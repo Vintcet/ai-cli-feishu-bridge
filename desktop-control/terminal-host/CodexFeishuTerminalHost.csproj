@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <NuGetAudit>false</NuGetAudit>
+    <AssemblyName>CodexFeishuTerminalHost</AssemblyName>
+    <RootNamespace>CodexFeishuControl</RootNamespace>
+    <Version>0.9.0</Version>
+    <AssemblyVersion>0.9.0.0</AssemblyVersion>
+    <FileVersion>0.9.0.0</FileVersion>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="..\ManagedTerminalHost.cs" Link="ManagedTerminalHost.cs" />
+    <Compile Include="..\CodexArgumentParser.cs" Link="CodexArgumentParser.cs" />
+    <Compile Include="..\TerminalInputParser.cs" Link="TerminalInputParser.cs" />
+  </ItemGroup>
+</Project>

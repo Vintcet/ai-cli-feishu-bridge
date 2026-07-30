@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <NuGetAudit>false</NuGetAudit>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>CodexFeishuControl</AssemblyName>
+    <RootNamespace>CodexFeishuControl</RootNamespace>
+    <Version>0.9.0</Version>
+    <AssemblyVersion>0.9.0.0</AssemblyVersion>
+    <FileVersion>0.9.0.0</FileVersion>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="terminal-host\**\*.cs" />
+    <Compile Remove="tests\**\*.cs" />
+    <ProjectReference Include="terminal-host\CodexFeishuTerminalHost.csproj"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <Target Name="CopyTerminalHostToOutput" AfterTargets="Build">
+    <PropertyGroup>
+      <TerminalHostOutputDirectory>$(MSBuildThisFileDirectory)terminal-host\bin\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)</TerminalHostOutputDirectory>
+    </PropertyGroup>
+    <ItemGroup>
+      <TerminalHostOutputFiles Include="$(TerminalHostOutputDirectory)\CodexFeishuTerminalHost.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(TerminalHostOutputFiles)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(TerminalHostOutputDirectory)')" />
+  </Target>
+
+  <Target Name="PublishTerminalHost" AfterTargets="Publish">
+    <PropertyGroup>
+      <TerminalHostPublishDirectory>$(MSBuildThisFileDirectory)terminal-host\bin\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish-sidecar\</TerminalHostPublishDirectory>
+    </PropertyGroup>
+    <MSBuild Projects="$(MSBuildThisFileDirectory)terminal-host\CodexFeishuTerminalHost.csproj"
+             Targets="Publish"
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);PublishDir=$(TerminalHostPublishDirectory);PublishSingleFile=true;SelfContained=false" />
+    <Copy SourceFiles="$(TerminalHostPublishDirectory)CodexFeishuTerminalHost.exe"
+          DestinationFolder="$(PublishDir)" />
+    <Delete Files="$(PublishDir)CodexFeishuTerminalHost.dll;$(PublishDir)CodexFeishuTerminalHost.deps.json;$(PublishDir)CodexFeishuTerminalHost.runtimeconfig.json" />
+  </Target>
+</Project>

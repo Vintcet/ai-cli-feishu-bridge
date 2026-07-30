@@ -1,0 +1,2074 @@
+import { randomUUID } from "node:crypto";
+
+import {
+  appendAttachmentsToPrompt,
+  LocalAttachmentStore,
+  parseFeishuContent,
+  type SavedAttachment,
+} from "./attachments.js";
+import {
+  buildActivityCard,
+  buildApprovalCard,
+  buildErrorCard,
+  buildResolvedApprovalCard,
+  buildResolvedUserInputCard,
+  buildStopCard,
+  buildUserInputCard,
+  type ActivityCardEvent,
+} from "./cards.js";
+import type { CodexExitResult } from "./codex-runner.js";
+import { CodexRunner } from "./codex-runner.js";
+import {
+  managedTerminalSessionId,
+  ManagedTerminalRouter,
+} from "./managed-terminal.js";
+import { isProcessAlive } from "./process-tracking.js";
+import type {
+  ActivityHookPayload,
+  ApprovalRecord,
+  ApprovalResolution,
+  Binding,
+  MessageRouteKind,
+  PermissionHookPayload,
+  RequestUserInputHookPayload,
+  SessionEndHookPayload,
+  SessionRecord,
+  SessionStartHookPayload,
+  StopHookPayload,
+  UserInputQuestion,
+} from "./domain.js";
+import {
+  normalizeSessionAlias,
+  previewJson,
+  projectNameFromCwd,
+  sessionAddress,
+  sessionAliasKey,
+  sessionAliasValidationError,
+  sessionLabel,
+  shortSessionId,
+  statusLabel,
+  truncate,
+} from "./domain.js";
+import { FeishuGateway } from "./feishu.js";
+import {
+  addFileReturnInstruction,
+  extractBridgeFileDirectives,
+  validateBridgeFile,
+} from "./file-transfer.js";
+import { BridgeStore } from "./store.js";
+
+type FeishuEvent = Record<string, any>;
+
+interface ApprovalWaiter {
+  timer: NodeJS.Timeout;
+  resolve: (resolution: ApprovalResolution) => void;
+}
+
+type UserInputResolution =
+  | { kind: "answered"; answers: Record<string, string> }
+  | { kind: "local" | "timeout" };
+
+interface UserInputWaiter {
+  sessionId: string;
+  turnId: string;
+  cwd: string;
+  questions: UserInputQuestion[];
+  messageIds: string[];
+  timer: NodeJS.Timeout;
+  resolve: (resolution: UserInputResolution) => void;
+}
+
+interface QueuedRemotePrompt {
+  prompt: string;
+  sourceMessageId: string;
+  chatId: string;
+  requestFileReturn: boolean;
+}
+
+interface StagedAttachments {
+  createdAt: number;
+  files: SavedAttachment[];
+}
+
+interface FileReturnRequest {
+  chatId: string;
+  remainingStops: number;
+  expiresAt: number;
+}
+
+interface ActivityState {
+  sessionId: string;
+  turnId?: string;
+  startedAt: string;
+  events: ActivityCardEvent[];
+  messageIds: Map<string, string>;
+  lastSentAt: number;
+  revision: number;
+  sentRevision: number;
+  completed: boolean;
+  timer?: NodeJS.Timeout;
+  flushing?: Promise<void>;
+}
+
+interface ControllerConfig {
+  bindCommand: string;
+  approvalTimeoutMs: number;
+  inputTimeoutMs: number;
+  sessionActiveMs: number;
+  uploadsDirectory: string;
+  inboundFileMaxBytes: number;
+  inboundAttachmentMaxCount: number;
+  uploadTtlMs: number;
+  outboundFileMaxBytes: number;
+}
+
+interface ActionResult {
+  toast: {
+    type: "success" | "warning" | "error" | "info";
+    content: string;
+  };
+}
+
+interface AliasCommand {
+  targetKind?: "short" | "alias";
+  target?: string;
+  alias?: string;
+}
+
+interface SessionAliasResult {
+  ok: boolean;
+  error?: string;
+  session?: SessionRecord;
+}
+
+export class BridgeController {
+  private readonly approvalWaiters = new Map<string, ApprovalWaiter>();
+  private readonly inputWaiters = new Map<string, UserInputWaiter>();
+  private readonly remoteInputLocks = new Set<string>();
+  private readonly externalQueues = new Map<string, QueuedRemotePrompt[]>();
+  private readonly managedQueueDepth = new Map<string, number>();
+  private readonly pendingAttachments = new Map<string, StagedAttachments>();
+  private readonly fileReturnRequests = new Map<string, FileReturnRequest[]>();
+  private readonly activityStates = new Map<string, ActivityState>();
+  private readonly attachmentStore: LocalAttachmentStore;
+
+  constructor(
+    private readonly store: BridgeStore,
+    private readonly feishu: FeishuGateway,
+    private readonly codex: CodexRunner,
+    private readonly managedTerminals: ManagedTerminalRouter,
+    private readonly config: ControllerConfig,
+  ) {
+    this.attachmentStore = new LocalAttachmentStore(
+      config.uploadsDirectory,
+      config.inboundFileMaxBytes,
+      config.inboundAttachmentMaxCount,
+      config.uploadTtlMs,
+    );
+  }
+
+  health(): Record<string, unknown> {
+    const sessions = this.listActiveSessions();
+    const pairingCode = this.store.getPairingCode();
+    return {
+      ok: true,
+      bindings: this.store.listBindings().length,
+      ownerConfigured: Boolean(this.store.getOwnerOpenId()),
+      pairingCode: pairingCode ?? "",
+      bindingCommand: pairingCode
+        ? `${this.config.bindCommand} ${pairingCode}`
+        : "",
+      activeSessions: sessions.length,
+      pendingApprovals: sessions.filter((session) => session.status === "pending_approval")
+        .length,
+      pendingInputs: this.inputWaiters.size,
+      queuedPrompts:
+        [...this.externalQueues.values()].reduce(
+          (total, queue) => total + queue.length,
+          0,
+        ) +
+        [...this.managedQueueDepth.values()].reduce(
+          (total, depth) => total + depth,
+          0,
+        ),
+      runningResumes: sessions.filter((session) => this.codex.isRunning(session.sessionId))
+        .length,
+      activeSessionDefinition: this.activeSessionDefinition(),
+      sessions: sessions.map((session) => ({
+        sessionId: session.sessionId,
+        shortId: session.shortId,
+        alias: session.alias ?? "",
+        projectName: session.projectName,
+        cwd: session.cwd,
+        model: session.model ?? "",
+        status: session.status,
+        statusLabel: statusLabel(session.status),
+        source: session.source ?? "",
+        openedAt: session.openedAt,
+        lastSeenAt: session.lastSeenAt,
+        remoteResumeRunning: this.codex.isRunning(session.sessionId),
+        externalProcessTracked: Boolean(session.clientProcessId),
+        managedTerminal: this.managedTerminals.isManaged(session),
+        managedTerminalElevated: session.managedTerminalElevated === true,
+        managedTerminalOnline: this.managedTerminals.isOnline(session),
+        managedTerminalReady: this.managedTerminals.isReady(session),
+        queuedPrompts:
+          (this.externalQueues.get(session.sessionId)?.length ?? 0) +
+          (this.managedQueueDepth.get(session.sessionId) ?? 0),
+      })),
+    };
+  }
+
+  handleManagedTerminalRegistration(value: Record<string, unknown>): Record<string, unknown> {
+    const terminalId = typeof value.terminalId === "string" ? value.terminalId : "";
+    const existingSession = terminalId
+      ? this.store.findSessionByManagedTerminalId(terminalId)
+      : undefined;
+    this.managedTerminals.register(
+      value,
+      existingSession?.source === "managed_window"
+        ? undefined
+        : existingSession?.sessionId,
+    );
+    return { ok: true };
+  }
+
+  async handleManagedTerminalUnregistration(
+    value: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const terminalId = typeof value.terminalId === "string" ? value.terminalId : "";
+    this.managedTerminals.unregister(value);
+    const session = terminalId
+      ? this.store.findSessionByManagedTerminalId(terminalId)
+      : undefined;
+    if (terminalId) {
+      this.remoteInputLocks.delete(managedTerminalSessionId(terminalId));
+    }
+    if (session) {
+      this.remoteInputLocks.delete(session.sessionId);
+      this.externalQueues.delete(session.sessionId);
+      this.managedQueueDepth.delete(session.sessionId);
+      this.fileReturnRequests.delete(session.sessionId);
+      this.resolveInputsForSession(session.sessionId, "local");
+      void this.finishActivity(session.sessionId, "窗口已关闭");
+      await this.store.upsertSession({
+        sessionId: session.sessionId,
+        alias: session.alias,
+        cwd: session.cwd,
+        model: session.model,
+        status: "ended",
+        source: "ended",
+        managedTerminalId: session.managedTerminalId,
+        managedTerminalElevated: session.managedTerminalElevated,
+      });
+    }
+    return { ok: true };
+  }
+
+  async handleSessionAliasUpdate(
+    value: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const sessionId = typeof value.sessionId === "string" ? value.sessionId.trim() : "";
+    const hasAlias = Object.prototype.hasOwnProperty.call(value, "alias");
+    const aliasValue = value.alias;
+    if (
+      !sessionId ||
+      !hasAlias ||
+      (typeof aliasValue !== "string" && aliasValue !== null)
+    ) {
+      return { ok: false, error: "会话 ID 或别名参数不完整。" };
+    }
+
+    const session = this.listActiveSessions().find((item) => item.sessionId === sessionId);
+    if (!session) {
+      return { ok: false, error: "这个会话已不在活跃列表中，请刷新后重试。" };
+    }
+
+    const result = await this.updateSessionAlias(
+      session,
+      typeof aliasValue === "string" ? aliasValue : undefined,
+    );
+    return result.ok
+      ? {
+          ok: true,
+          session: {
+            sessionId: result.session?.sessionId,
+            shortId: result.session?.shortId,
+            alias: result.session?.alias ?? "",
+          },
+        }
+      : { ok: false, error: result.error };
+  }
+
+  async handleSessionStartHook(
+    payload: SessionStartHookPayload,
+  ): Promise<Record<string, unknown>> {
+    const claimedTerminal = payload.managed_terminal_id
+      ? this.managedTerminals.claimById(
+          payload.managed_terminal_id,
+          payload.cwd,
+          payload.session_id,
+        )
+      : this.managedTerminals.claim(payload.cwd, payload.session_id);
+    const managedTerminalId =
+      payload.managed_terminal_id ?? claimedTerminal?.terminalId ?? null;
+    const managedTerminalElevated =
+      managedTerminalId
+        ? payload.managed_terminal_elevated ?? claimedTerminal?.elevated ?? null
+        : null;
+    const placeholder = managedTerminalId
+      ? this.store.findSessionByManagedTerminalId(managedTerminalId)
+      : undefined;
+    const openedAt =
+      placeholder?.openedAt ??
+      (claimedTerminal
+        ? new Date(claimedTerminal.createdAt).toISOString()
+        : undefined);
+    const session = await this.store.upsertSession({
+      sessionId: payload.session_id,
+      alias: placeholder?.source === "managed_window" ? placeholder.alias : undefined,
+      cwd: payload.cwd,
+      model: payload.model,
+      status: managedTerminalId ? "waiting" : "running",
+      source: payload.source,
+      clientProcessId: managedTerminalId
+        ? null
+        : payload.client_process_id ?? null,
+      clientProcessStartedAt: managedTerminalId
+        ? null
+        : payload.client_process_started_at ?? null,
+      managedTerminalId,
+      managedTerminalElevated,
+      openedAt,
+    });
+    if (
+      placeholder?.source === "managed_window" &&
+      placeholder.sessionId !== session.sessionId
+    ) {
+      if (this.remoteInputLocks.delete(placeholder.sessionId)) {
+        this.remoteInputLocks.add(session.sessionId);
+      }
+      const queueDepth = this.managedQueueDepth.get(placeholder.sessionId);
+      if (queueDepth !== undefined) {
+        this.managedQueueDepth.delete(placeholder.sessionId);
+        this.managedQueueDepth.set(session.sessionId, queueDepth);
+      }
+      const fileRequests = this.fileReturnRequests.get(placeholder.sessionId);
+      if (fileRequests) {
+        this.fileReturnRequests.delete(placeholder.sessionId);
+        this.fileReturnRequests.set(session.sessionId, fileRequests);
+      }
+      const activity = this.activityStates.get(placeholder.sessionId);
+      if (activity) {
+        this.activityStates.delete(placeholder.sessionId);
+        activity.sessionId = session.sessionId;
+        this.activityStates.set(session.sessionId, activity);
+      }
+      await this.store.replaceSessionReferences(placeholder.sessionId, session.sessionId);
+    }
+    console.log(
+      `[session] ${payload.source} registered session #${session.shortId}.`,
+    );
+    return {};
+  }
+
+  async handleSessionEndHook(
+    payload: SessionEndHookPayload,
+  ): Promise<Record<string, unknown>> {
+    const session = await this.store.upsertSession({
+      sessionId: payload.session_id,
+      cwd: payload.cwd,
+      status: "ended",
+      source: "ended",
+      ...(payload.managed_terminal_id !== undefined
+        ? { managedTerminalId: payload.managed_terminal_id }
+        : {}),
+      ...(payload.managed_terminal_elevated !== undefined
+        ? { managedTerminalElevated: payload.managed_terminal_elevated }
+        : {}),
+    });
+    this.remoteInputLocks.delete(payload.session_id);
+    this.externalQueues.delete(payload.session_id);
+    this.managedQueueDepth.delete(payload.session_id);
+    this.fileReturnRequests.delete(payload.session_id);
+    this.resolveInputsForSession(payload.session_id, "local");
+    void this.finishActivity(payload.session_id, "会话已结束");
+    this.managedTerminals.release(payload.session_id);
+    console.log(`[session] Ended session #${session.shortId}.`);
+    return {};
+  }
+
+  async handlePermissionHook(
+    payload: PermissionHookPayload,
+  ): Promise<Record<string, unknown>> {
+    const session = await this.store.upsertSession({
+      sessionId: payload.session_id,
+      cwd: payload.cwd,
+      model: payload.model,
+      turnId: payload.turn_id,
+      status: "pending_approval",
+      ...(payload.managed_terminal_id !== undefined
+        ? { managedTerminalId: payload.managed_terminal_id }
+        : {}),
+      ...(payload.managed_terminal_elevated !== undefined
+        ? { managedTerminalElevated: payload.managed_terminal_elevated }
+        : {}),
+    });
+
+    const now = Date.now();
+    const approval: ApprovalRecord = {
+      requestId: randomUUID(),
+      sessionId: payload.session_id,
+      turnId: payload.turn_id,
+      cwd: payload.cwd,
+      toolName: payload.tool_name,
+      toolPreview: previewJson(payload.tool_input),
+      createdAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + this.config.approvalTimeoutMs).toISOString(),
+      status: "pending",
+      messageIds: [],
+    };
+    await this.store.createApproval(approval);
+
+    const bindings = this.uniqueChatBindings();
+    if (bindings.length === 0) {
+      await this.store.resolveApproval(approval.requestId, "local");
+      await this.store.upsertSession({
+        sessionId: payload.session_id,
+        cwd: payload.cwd,
+        model: payload.model,
+        turnId: payload.turn_id,
+        status: "local_approval",
+      });
+      return {};
+    }
+
+    const resultPromise = new Promise<ApprovalResolution>((resolve) => {
+      const timer = setTimeout(() => {
+        void this.completeApproval(approval.requestId, "timeout");
+      }, this.config.approvalTimeoutMs);
+      this.approvalWaiters.set(approval.requestId, { timer, resolve });
+    });
+
+    let sentCount = 0;
+    for (const binding of bindings) {
+      try {
+        const messageId = await this.feishu.sendCard(
+          binding.chatId,
+          buildApprovalCard(session, approval),
+        );
+        sentCount += 1;
+        await this.store.addApprovalMessage(approval.requestId, messageId);
+        await this.addRoute(
+          messageId,
+          payload.session_id,
+          binding.chatId,
+          "approval",
+          approval.requestId,
+        );
+      } catch (error) {
+        console.error("[approval] Failed to send a Feishu approval card:", error);
+      }
+    }
+
+    if (sentCount === 0) {
+      await this.completeApproval(approval.requestId, "local");
+    } else {
+      console.log(
+        `[approval] Waiting for Feishu decision for session #${session.shortId}.`,
+      );
+    }
+
+    const resolution = await resultPromise;
+    if (resolution === "allow") {
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PermissionRequest",
+          decision: { behavior: "allow" },
+        },
+      };
+    }
+    if (resolution === "deny") {
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PermissionRequest",
+          decision: {
+            behavior: "deny",
+            message: "用户已通过飞书拒绝这次操作。",
+          },
+        },
+      };
+    }
+    return {};
+  }
+
+  async handleRequestUserInputHook(
+    payload: RequestUserInputHookPayload,
+  ): Promise<Record<string, unknown>> {
+    const session = await this.store.upsertSession({
+      sessionId: payload.session_id,
+      cwd: payload.cwd,
+      model: payload.model,
+      turnId: payload.turn_id,
+      status: "pending_input",
+      ...(payload.managed_terminal_id !== undefined
+        ? { managedTerminalId: payload.managed_terminal_id }
+        : {}),
+      ...(payload.managed_terminal_elevated !== undefined
+        ? { managedTerminalElevated: payload.managed_terminal_elevated }
+        : {}),
+    });
+    const bindings = this.uniqueChatBindings();
+    if (bindings.length === 0) {
+      return {};
+    }
+
+    const requestId = randomUUID();
+    const autoResolutionMs = payload.tool_input.autoResolutionMs;
+    const timeoutMs = typeof autoResolutionMs === "number" && autoResolutionMs > 0
+      ? Math.min(this.config.inputTimeoutMs, autoResolutionMs)
+      : this.config.inputTimeoutMs;
+    const resultPromise = new Promise<UserInputResolution>((resolve) => {
+      const timer = setTimeout(() => {
+        void this.completeUserInput(requestId, { kind: "timeout" });
+      }, timeoutMs);
+      this.inputWaiters.set(requestId, {
+        sessionId: payload.session_id,
+        turnId: payload.turn_id,
+        cwd: payload.cwd,
+        questions: payload.tool_input.questions,
+        messageIds: [],
+        timer,
+        resolve,
+      });
+    });
+
+    let sentCount = 0;
+    for (const binding of bindings) {
+      try {
+        const messageId = await this.feishu.sendCard(
+          binding.chatId,
+          buildUserInputCard(session, requestId, payload.tool_input.questions),
+        );
+        sentCount += 1;
+        this.inputWaiters.get(requestId)?.messageIds.push(messageId);
+        await this.addRoute(
+          messageId,
+          payload.session_id,
+          binding.chatId,
+          "input",
+          requestId,
+        );
+      } catch (error) {
+        console.error("[input] Failed to send a Feishu question card:", error);
+      }
+    }
+    if (sentCount === 0) {
+      await this.completeUserInput(requestId, { kind: "local" });
+    }
+
+    const resolution = await resultPromise;
+    if (resolution.kind !== "answered") {
+      return {};
+    }
+    const answerText = payload.tool_input.questions
+      .map(
+        (question, index) =>
+          `${index + 1}. ${question.header} (${question.id}): ${resolution.answers[question.id] ?? ""}`,
+      )
+      .join("\n");
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `request_user_input 已由用户通过飞书回答：\n${answerText}\n请直接使用这些答案继续，不要再次询问同一组问题。`,
+      },
+    };
+  }
+
+  async handleActivityHook(
+    payload: ActivityHookPayload,
+  ): Promise<Record<string, unknown>> {
+    void this.recordActivity(payload).catch((error) => {
+      console.error("[activity] Could not record Codex activity:", error);
+    });
+    return {};
+  }
+
+  async handleStopHook(payload: StopHookPayload): Promise<Record<string, unknown>> {
+    if ((this.managedQueueDepth.get(payload.session_id) ?? 0) > 0) {
+      this.remoteInputLocks.add(payload.session_id);
+    } else {
+      this.remoteInputLocks.delete(payload.session_id);
+    }
+    const previous = this.store.getSession(payload.session_id);
+    const session = await this.store.upsertSession({
+      sessionId: payload.session_id,
+      cwd: payload.cwd,
+      model: payload.model,
+      turnId: payload.turn_id,
+      status: "waiting",
+      assistantMessage: payload.last_assistant_message,
+      ...(payload.managed_terminal_id !== undefined
+        ? { managedTerminalId: payload.managed_terminal_id }
+        : {}),
+      ...(payload.managed_terminal_elevated !== undefined
+        ? { managedTerminalElevated: payload.managed_terminal_elevated }
+        : {}),
+    });
+    await this.finishActivity(payload.session_id, "本轮处理完成");
+
+    if (previous?.lastNotificationTurnId === payload.turn_id) {
+      return {};
+    }
+    const fileReturnRequest = this.advanceFileReturnRequests(payload.session_id);
+    this.decrementManagedQueueDepth(payload.session_id);
+
+    const fileDirectives = extractBridgeFileDirectives(
+      payload.last_assistant_message?.trim() || "Codex 已结束本轮处理。",
+    );
+    const message = fileDirectives.displayMessage || "Codex 已结束本轮处理。";
+    let sentCount = 0;
+    for (const binding of this.uniqueChatBindings()) {
+      try {
+        const messageId = await this.feishu.sendCard(
+          binding.chatId,
+          buildStopCard(session, message),
+        );
+        sentCount += 1;
+        await this.addRoute(messageId, payload.session_id, binding.chatId, "stop");
+      } catch (error) {
+        console.error("[stop] Failed to send a Feishu completion card:", error);
+      }
+    }
+    if (sentCount > 0) {
+      await this.store.markStopNotified(payload.session_id, payload.turn_id);
+      console.log(`[stop] Notified Feishu for session #${session.shortId}.`);
+    }
+    if (fileReturnRequest && fileDirectives.paths.length > 0) {
+      void this.sendRequestedFiles(
+        session,
+        fileReturnRequest.chatId,
+        fileDirectives.paths,
+      ).catch((error) => {
+        console.error("[files] Asynchronous file return failed:", error);
+      });
+    }
+    void this.tryDrainExternalQueue(payload.session_id);
+    return {};
+  }
+
+  async handleFeishuMessage(data: FeishuEvent): Promise<void> {
+    const openId = data.sender?.sender_id?.open_id;
+    const message = data.message;
+    const chatId = message?.chat_id;
+    const messageId = message?.message_id;
+    const chatType = message?.chat_type ?? "unknown";
+    const parsedContent = parseFeishuContent(message);
+    const text = parsedContent.text;
+
+    if (!openId || !chatId || !messageId) {
+      console.warn("[message] Ignored a message without sender, chat, or message id.");
+      return;
+    }
+
+    if (!(await this.store.claimInboundMessage(messageId))) {
+      console.log(`[message] Ignored duplicate Feishu message ${messageId}.`);
+      return;
+    }
+
+    console.log(
+      `[message] Received Feishu ${String(message?.message_type ?? "text")} (${text.length} chars, ${parsedContent.attachments.length} attachments, ${chatType}).`,
+    );
+
+    const bindAttempt = parseBindCommand(text, this.config.bindCommand);
+    if (bindAttempt.matched) {
+      if (chatType !== "p2p") {
+        await this.respond(
+          messageId,
+          chatId,
+          "为保护本机 Codex，绑定只能在与机器人的私聊中完成。",
+        );
+        return;
+      }
+      const result = await this.store.bindOwner(
+        {
+          openId,
+          chatId,
+          chatType,
+          boundAt: new Date().toISOString(),
+        },
+        bindAttempt.code,
+      );
+      if (result === "invalid_code") {
+        await this.respond(
+          messageId,
+          chatId,
+          `绑定码不正确。请在电脑端 Codex 飞书助手中查看本机绑定命令，再发送“${this.config.bindCommand} 绑定码”。`,
+        );
+        return;
+      }
+      if (result === "owner_mismatch") {
+        await this.respond(
+          messageId,
+          chatId,
+          "这个助手已经设置了唯一管理员，其他飞书账号不能绑定或控制本机 Codex。",
+        );
+        return;
+      }
+      await this.respond(
+        messageId,
+        chatId,
+        result === "bound"
+          ? "绑定成功，你已成为这台电脑上 Codex 助手的唯一管理员。"
+          : "管理员绑定已恢复。现在可以继续接收通知和回复 Codex。",
+      );
+      return;
+    }
+
+    if (text === "解绑") {
+      const removed = await this.store.removeBinding(openId);
+      await this.respond(messageId, chatId, removed ? "已解绑。" : "当前账号还没有绑定。");
+      return;
+    }
+
+    if (!this.store.isBound(openId)) {
+      await this.respond(
+        messageId,
+        chatId,
+        this.store.getOwnerOpenId()
+          ? "飞书连接正常，但这个助手只允许已设置的管理员账号操作。"
+          : `飞书连接正常。请先在电脑端查看随机绑定码，然后私聊发送“${this.config.bindCommand} 绑定码”。`,
+      );
+      return;
+    }
+
+    const attachmentKey = this.attachmentKey(openId, chatId);
+    if (parsedContent.attachments.length > 0) {
+      try {
+        const downloaded = await this.attachmentStore.download(
+          this.feishu,
+          messageId,
+          parsedContent.attachments,
+        );
+        this.stageAttachments(attachmentKey, downloaded);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        await this.respond(messageId, chatId, `附件接收失败：${truncate(detail, 500)}`);
+        return;
+      }
+      if (!text) {
+        const staged = this.peekAttachments(attachmentKey);
+        await this.respond(
+          messageId,
+          chatId,
+          `已安全保存 ${parsedContent.attachments.length} 个附件（当前暂存 ${staged.length} 个）。下一条请发送处理要求；有多个窗口时请写成“@别名 要求”或“#短ID 要求”。`,
+        );
+        return;
+      }
+    }
+
+    if (text === "状态") {
+      const sessions = this.listActiveSessions();
+      const pending = sessions.filter((session) => session.status === "pending_approval").length;
+      const queued = [...this.externalQueues.values()].reduce(
+        (total, queue) => total + queue.length,
+        0,
+      ) + [...this.managedQueueDepth.values()].reduce(
+        (total, depth) => total + depth,
+        0,
+      );
+      await this.respond(
+        messageId,
+        chatId,
+        `飞书桥接在线，当前账号已绑定。活跃会话 ${sessions.length} 个，待审批 ${pending} 个，待补充 ${this.inputWaiters.size} 个，排队 ${queued} 条。\n${this.activeSessionDefinition()}`,
+      );
+      return;
+    }
+
+    if (text === "会话" || text.toLowerCase() === "sessions") {
+      await this.respond(messageId, chatId, this.formatSessionList());
+      return;
+    }
+
+    const aliasCommand = parseAliasCommand(text);
+    if (aliasCommand) {
+      await this.handleFeishuAliasCommand(aliasCommand, messageId, chatId);
+      return;
+    }
+    if (/^别名(?:\s|$)/.test(text)) {
+      await this.respond(messageId, chatId, aliasCommandUsage());
+      return;
+    }
+
+    if (text === "帮助") {
+      await this.respond(
+        messageId,
+        chatId,
+        "用法：\n1. 引用某条 Codex 通知并回复；\n2. 发送 @别名 内容，运行中会直接插话；\n3. 发送“排队 @别名 内容”，排到下一轮；\n4. 发送“发文件 @别名 要求”，让 Codex 完成后把文件发回；\n5. 可直接发送图片或文件，下一条再发送处理要求；\n6. 发送“会话”或“别名”查看路由；\n7. 审批和补充信息卡片都可在飞书处理。",
+      );
+      return;
+    }
+
+    if (!text) {
+      await this.respond(messageId, chatId, "没有识别到文字或可下载的附件。请发送“帮助”查看用法。");
+      return;
+    }
+
+    const quotedRoute = this.store.findMessageRoute([
+      message?.parent_id,
+      message?.root_id,
+    ]);
+
+    if (quotedRoute?.kind === "input" && quotedRoute.requestId) {
+      const waiter = this.inputWaiters.get(quotedRoute.requestId);
+      if (!waiter) {
+        await this.respond(messageId, chatId, "这组问题已经处理或失效。");
+        return;
+      }
+      const answers = parseUserInputAnswers(text, waiter.questions);
+      if (!answers) {
+        await this.respond(
+          messageId,
+          chatId,
+          inputAnswerUsage(waiter.questions),
+        );
+        return;
+      }
+      const completed = await this.completeUserInput(quotedRoute.requestId, {
+        kind: "answered",
+        answers,
+      });
+      await this.respond(
+        messageId,
+        chatId,
+        completed ? "已把答案交给 Codex。" : "这组问题已经处理或失效。",
+      );
+      return;
+    }
+
+    if (quotedRoute?.requestId && this.store.hasPendingApprovalForSession(quotedRoute.sessionId)) {
+      const approvalResolution = approvalResolutionFromText(text);
+      if (approvalResolution) {
+        const completed = await this.completeApproval(
+          quotedRoute.requestId,
+          approvalResolution,
+        );
+        await this.respond(
+          messageId,
+          chatId,
+          completed ? approvalText(approvalResolution) : "这条审批已经处理或失效。",
+        );
+      } else {
+        await this.respond(
+          messageId,
+          chatId,
+          "这个会话正在等待审批。请点击审批卡片按钮；也可以引用卡片回复“批准”“拒绝”或“本机确认”。",
+        );
+      }
+      return;
+    }
+
+    const leadingDirectives = parsePromptDirectives(text);
+    const explicit = parseExplicitSession(leadingDirectives.prompt) ??
+      parseExplicitAlias(leadingDirectives.prompt);
+
+    let target: SessionRecord | undefined;
+    let prompt = leadingDirectives.prompt;
+    let queueRequested = leadingDirectives.queue;
+    let fileReturnRequested = leadingDirectives.fileReturn;
+
+    if (explicit) {
+      const matches = explicit.kind === "short"
+        ? this.findActiveSessionsByShortToken(explicit.token)
+        : this.findActiveSessionsByAlias(explicit.token);
+      const address = explicit.kind === "short"
+        ? `#${explicit.token}`
+        : `@${explicit.token}`;
+      if (matches.length !== 1) {
+        await this.respond(
+          messageId,
+          chatId,
+          matches.length === 0
+            ? `没有找到 ${address} 对应的活跃会话。发送“会话”查看列表。`
+            : explicit.kind === "short"
+              ? `${address} 匹配到多个会话，请使用更长的短 ID。`
+              : `${address} 匹配到多个会话，请重新设置一个唯一别名。`,
+        );
+        return;
+      }
+      target = matches[0];
+      prompt = explicit.prompt;
+    } else if (quotedRoute) {
+      target = this.listActiveSessions().find(
+        (session) => session.sessionId === quotedRoute.sessionId,
+      );
+    } else {
+      const activeSessions = this.listActiveSessions();
+      if (activeSessions.length === 1) {
+        target = activeSessions[0];
+      } else {
+        await this.respond(
+          messageId,
+          chatId,
+          activeSessions.length === 0
+            ? "当前没有活跃 Codex 会话。请先在电脑上打开一个 Codex 窗口并运行一轮任务。"
+            : "当前有多个 Codex 窗口，为避免串线，请引用对应通知回复，或发送 @别名 / #短ID 回复内容。发送“会话”可查看列表。",
+        );
+        return;
+      }
+    }
+
+    if (!target) {
+      await this.respond(messageId, chatId, "对应会话已经不可用，请发送“会话”查看当前列表。");
+      return;
+    }
+    const nestedDirectives = parsePromptDirectives(prompt);
+    prompt = nestedDirectives.prompt;
+    queueRequested ||= nestedDirectives.queue;
+    fileReturnRequested ||= nestedDirectives.fileReturn;
+    if (!prompt) {
+      await this.respond(messageId, chatId, "要发送给 Codex 的内容不能为空。");
+      return;
+    }
+    const attachments = this.takeAttachments(attachmentKey);
+    prompt = appendAttachmentsToPrompt(prompt, attachments);
+    if (fileReturnRequested) {
+      prompt = addFileReturnInstruction(prompt);
+    }
+    await this.resumeSession(
+      target,
+      prompt,
+      messageId,
+      chatId,
+      queueRequested,
+      fileReturnRequested,
+    );
+  }
+
+  async handleCardAction(data: FeishuEvent): Promise<ActionResult> {
+    const actionValue = normalizeActionValue(data.action?.value);
+    const action = actionValue?.action;
+    const requestId = actionValue?.requestId;
+    const operatorOpenId = data.operator?.open_id;
+
+    if (!operatorOpenId || !this.store.isBound(operatorOpenId)) {
+      return { toast: { type: "warning", content: "只有已绑定的管理员可以审批。" } };
+    }
+    if (typeof requestId !== "string") {
+      return { toast: { type: "error", content: "审批参数不完整。" } };
+    }
+
+    if (action === "input_answer" || action === "input_local") {
+      const waiter = this.inputWaiters.get(requestId);
+      if (
+        !waiter ||
+        (typeof actionValue?.sessionId === "string" &&
+          waiter.sessionId !== actionValue.sessionId)
+      ) {
+        return { toast: { type: "warning", content: "这组问题已经处理或失效。" } };
+      }
+      if (action === "input_local") {
+        const completed = await this.completeUserInput(requestId, { kind: "local" });
+        return {
+          toast: {
+            type: completed ? "success" : "warning",
+            content: completed ? "已转回电脑端回答。" : "这组问题已经处理或失效。",
+          },
+        };
+      }
+      const questionId = actionValue?.questionId;
+      const answer = actionValue?.answer;
+      if (typeof questionId !== "string" || typeof answer !== "string") {
+        return { toast: { type: "error", content: "答案参数不完整。" } };
+      }
+      const question = waiter.questions.find((item) => item.id === questionId);
+      if (!question || !question.options.some((option) => option.label === answer)) {
+        return { toast: { type: "error", content: "这个答案不属于当前问题。" } };
+      }
+      const completed = await this.completeUserInput(requestId, {
+        kind: "answered",
+        answers: { [questionId]: answer },
+      });
+      return {
+        toast: {
+          type: completed ? "success" : "warning",
+          content: completed ? "已把答案交给 Codex。" : "这组问题已经处理或失效。",
+        },
+      };
+    }
+
+    const resolution = actionToResolution(action);
+    if (!resolution) {
+      return { toast: { type: "warning", content: "无法识别这个操作。" } };
+    }
+
+    const approval = this.store.getApproval(requestId);
+    if (
+      !approval ||
+      (typeof actionValue?.sessionId === "string" &&
+        approval.sessionId !== actionValue.sessionId)
+    ) {
+      return { toast: { type: "error", content: "审批请求不存在或已失效。" } };
+    }
+
+    const completed = await this.completeApproval(requestId, resolution);
+    return {
+      toast: {
+        type: completed ? "success" : "warning",
+        content: completed ? approvalText(resolution) : "这条审批已经处理或失效。",
+      },
+    };
+  }
+
+  private async resumeSession(
+    session: SessionRecord,
+    prompt: string,
+    sourceMessageId: string,
+    chatId: string,
+    queueRequested = false,
+    requestFileReturn = false,
+  ): Promise<void> {
+    if (this.store.hasPendingApprovalForSession(session.sessionId)) {
+      await this.respond(
+        sourceMessageId,
+        chatId,
+        `会话 ${sessionLabel(session)} 正在等待审批，请先处理审批卡片。`,
+      );
+      return;
+    }
+    if (this.hasPendingInputForSession(session.sessionId)) {
+      await this.respond(
+        sourceMessageId,
+        chatId,
+        `会话 ${sessionLabel(session)} 正在等待补充信息，请引用问题卡片回答，或点击“转回本机回答”。`,
+      );
+      return;
+    }
+    const managedTerminal = this.managedTerminals.isManaged(session);
+    if (managedTerminal && !this.managedTerminals.isReady(session)) {
+      await this.respond(
+        sourceMessageId,
+        chatId,
+        `会话 ${sessionLabel(session)} 的窗口仍在启动，暂时不能接收飞书输入。请稍等几秒后再试。`,
+      );
+      return;
+    }
+    if (!managedTerminal &&
+        (this.codex.isRunning(session.sessionId) ||
+          this.remoteInputLocks.has(session.sessionId))) {
+      const queue = this.externalQueues.get(session.sessionId) ?? [];
+      queue.push({
+        prompt,
+        sourceMessageId,
+        chatId,
+        requestFileReturn,
+      });
+      this.externalQueues.set(session.sessionId, queue);
+      await this.respond(
+        sourceMessageId,
+        chatId,
+        `会话 ${sessionLabel(session)} 正在运行，已排到桥接队列第 ${queue.length} 位。外部会话会在上一轮退出后按顺序继续；桥接器重启会清空这类内存队列。`,
+      );
+      return;
+    }
+    if (!managedTerminal) {
+      this.remoteInputLocks.add(session.sessionId);
+    }
+
+    try {
+      const runningSession = await this.store.upsertSession({
+        sessionId: session.sessionId,
+        alias: session.alias,
+        cwd: session.cwd,
+        model: session.model,
+        status: "running",
+        source: session.source,
+        managedTerminalId: session.managedTerminalId,
+        managedTerminalElevated: session.managedTerminalElevated,
+      });
+      if (managedTerminal) {
+        const busy = this.remoteInputLocks.has(session.sessionId) ||
+          session.status === "running";
+        const submitMode = queueRequested && busy ? "queue" : "steer";
+        if (submitMode === "queue") {
+          this.managedQueueDepth.set(
+            session.sessionId,
+            (this.managedQueueDepth.get(session.sessionId) ?? 0) + 1,
+          );
+        }
+        this.remoteInputLocks.add(session.sessionId);
+        try {
+          await this.managedTerminals.send(runningSession, prompt, submitMode);
+        } catch (error) {
+          if (submitMode === "queue") {
+            this.decrementManagedQueueDepth(session.sessionId);
+          }
+          throw error;
+        }
+        if (requestFileReturn) {
+          this.registerFileReturnRequest(
+            session.sessionId,
+            chatId,
+            submitMode === "queue"
+              ? this.managedQueueDepth.get(session.sessionId) ?? 1
+              : 0,
+          );
+        }
+        const acknowledgement = submitMode === "queue"
+          ? `已把消息排到 ${sessionLabel(runningSession)} 的下一轮。当前任务完成后，Codex 会在同一窗口继续处理。`
+          : busy
+            ? `已插入 ${sessionLabel(runningSession)} 当前正在执行的任务。Codex 会在同一窗口接收这条补充。`
+            : `已输入到 ${sessionLabel(runningSession)} 的可见窗口。本地窗口和飞书使用同一个 Codex 进程。`;
+        const ackId = await this.respond(
+          sourceMessageId,
+          chatId,
+          acknowledgement,
+        );
+        if (ackId) {
+          await this.addRoute(ackId, session.sessionId, chatId, "resume_ack");
+        }
+        return;
+      }
+      await this.startExternalPrompt(runningSession, {
+        prompt,
+        sourceMessageId,
+        chatId,
+        requestFileReturn,
+      });
+    } catch (error) {
+      this.remoteInputLocks.delete(session.sessionId);
+      const message = error instanceof Error ? error.message : String(error);
+      await this.store.upsertSession({
+        sessionId: session.sessionId,
+        alias: session.alias,
+        cwd: session.cwd,
+        model: session.model,
+        status: "error",
+        error: message,
+        source: session.source,
+        managedTerminalId: session.managedTerminalId,
+        managedTerminalElevated: session.managedTerminalElevated,
+      });
+      await this.respond(
+        sourceMessageId,
+        chatId,
+        `未能继续 ${sessionLabel(session)}：${truncate(message, 500)}`,
+      );
+    }
+  }
+
+  private async startExternalPrompt(
+    session: SessionRecord,
+    item: QueuedRemotePrompt,
+  ): Promise<void> {
+    this.remoteInputLocks.add(session.sessionId);
+    await this.codex.resume(session, item.prompt, async (result) => {
+      await this.handleCodexExit(session, result);
+      await this.tryDrainExternalQueue(session.sessionId);
+    });
+    if (item.requestFileReturn) {
+      this.registerFileReturnRequest(session.sessionId, item.chatId, 0);
+    }
+    const ackId = await this.respond(
+      item.sourceMessageId,
+      item.chatId,
+      `已发送给 ${sessionLabel(session)}。外部会话的后续消息会在桥接侧按顺序排队。`,
+    );
+    if (ackId) {
+      await this.addRoute(ackId, session.sessionId, item.chatId, "resume_ack");
+    }
+  }
+
+  private async tryDrainExternalQueue(sessionId: string): Promise<void> {
+    if (this.codex.isRunning(sessionId) || this.remoteInputLocks.has(sessionId)) {
+      return;
+    }
+    const queue = this.externalQueues.get(sessionId);
+    const item = queue?.shift();
+    if (!item) {
+      this.externalQueues.delete(sessionId);
+      return;
+    }
+    if (queue?.length === 0) {
+      this.externalQueues.delete(sessionId);
+    }
+    const session = this.store.getSession(sessionId);
+    if (!session || session.status === "ended") {
+      await this.respond(
+        item.sourceMessageId,
+        item.chatId,
+        "排队消息未执行：对应的外部 Codex 会话已经结束。",
+      );
+      return;
+    }
+    try {
+      const runningSession = await this.store.upsertSession({
+        sessionId: session.sessionId,
+        alias: session.alias,
+        cwd: session.cwd,
+        model: session.model,
+        status: "running",
+        source: session.source,
+      });
+      await this.startExternalPrompt(runningSession, item);
+    } catch (error) {
+      this.remoteInputLocks.delete(sessionId);
+      const message = error instanceof Error ? error.message : String(error);
+      await this.respond(
+        item.sourceMessageId,
+        item.chatId,
+        `排队消息启动失败：${truncate(message, 500)}`,
+      );
+      void this.tryDrainExternalQueue(sessionId);
+    }
+  }
+
+  private async handleCodexExit(
+    session: SessionRecord,
+    result: CodexExitResult,
+  ): Promise<void> {
+    this.remoteInputLocks.delete(session.sessionId);
+    if (result.code === 0) {
+      return;
+    }
+    const reason =
+      result.stderr ||
+      (result.signal
+        ? `Codex 进程被信号 ${result.signal} 终止。`
+        : `Codex 进程退出，代码 ${String(result.code)}。`);
+    const failedSession = await this.store.upsertSession({
+      sessionId: session.sessionId,
+      cwd: session.cwd,
+      model: session.model,
+      status: "error",
+      error: reason,
+    });
+    for (const binding of this.uniqueChatBindings()) {
+      try {
+        const messageId = await this.feishu.sendCard(
+          binding.chatId,
+          buildErrorCard(failedSession, reason),
+        );
+        await this.addRoute(messageId, session.sessionId, binding.chatId, "error");
+      } catch (error) {
+        console.error("[resume] Failed to send an error notification:", error);
+      }
+    }
+  }
+
+  private hasPendingInputForSession(sessionId: string): boolean {
+    return [...this.inputWaiters.values()].some(
+      (waiter) => waiter.sessionId === sessionId,
+    );
+  }
+
+  private async completeUserInput(
+    requestId: string,
+    resolution: UserInputResolution,
+  ): Promise<boolean> {
+    const waiter = this.inputWaiters.get(requestId);
+    if (!waiter) {
+      return false;
+    }
+    clearTimeout(waiter.timer);
+    this.inputWaiters.delete(requestId);
+    const session = await this.store.upsertSession({
+      sessionId: waiter.sessionId,
+      cwd: waiter.cwd,
+      turnId: waiter.turnId,
+      status: resolution.kind === "answered" ? "running" : "waiting",
+    });
+    waiter.resolve(resolution);
+    const card = buildResolvedUserInputCard(
+      session,
+      waiter.questions,
+      resolution.kind === "answered" ? resolution.answers : undefined,
+      resolution.kind,
+    );
+    void Promise.allSettled(
+      waiter.messageIds.map((messageId) => this.feishu.patchCard(messageId, card)),
+    );
+    console.log(`[input] ${resolution.kind} for session #${session.shortId}.`);
+    return true;
+  }
+
+  private resolveInputsForSession(
+    sessionId: string,
+    resolution: "local" | "timeout",
+  ): void {
+    for (const [requestId, waiter] of this.inputWaiters) {
+      if (waiter.sessionId === sessionId) {
+        void this.completeUserInput(requestId, { kind: resolution });
+      }
+    }
+  }
+
+  private async recordActivity(payload: ActivityHookPayload): Promise<void> {
+    const current = this.store.getSession(payload.session_id);
+    const isRemoteQuestion = payload.hook_event_name === "PreToolUse" &&
+      payload.tool_name === "request_user_input";
+    const session = !current ||
+        (!isRemoteQuestion &&
+          (current.status !== "running" ||
+            (payload.turn_id && current.lastTurnId !== payload.turn_id)))
+      ? await this.store.upsertSession({
+          sessionId: payload.session_id,
+          cwd: payload.cwd,
+          model: payload.model,
+          turnId: payload.turn_id,
+          status: "running",
+          ...(payload.managed_terminal_id !== undefined
+            ? { managedTerminalId: payload.managed_terminal_id }
+            : {}),
+          ...(payload.managed_terminal_elevated !== undefined
+            ? { managedTerminalElevated: payload.managed_terminal_elevated }
+            : {}),
+        })
+      : current;
+    let state = this.activityStates.get(payload.session_id);
+    if (state && payload.turn_id && state.turnId && state.turnId !== payload.turn_id) {
+      await this.finishActivity(payload.session_id, "上一轮已结束");
+      state = undefined;
+    }
+    if (!state) {
+      state = {
+        sessionId: payload.session_id,
+        turnId: payload.turn_id,
+        startedAt: new Date().toISOString(),
+        events: [],
+        messageIds: new Map(),
+        lastSentAt: 0,
+        revision: 0,
+        sentRevision: -1,
+        completed: false,
+      };
+      this.activityStates.set(payload.session_id, state);
+    }
+    state.turnId ??= payload.turn_id;
+    state.events.push(activityEventFromPayload(payload));
+    state.events = state.events.slice(-6);
+    state.revision += 1;
+    this.scheduleActivityFlush(session.sessionId);
+  }
+
+  private scheduleActivityFlush(sessionId: string): void {
+    const state = this.activityStates.get(sessionId);
+    if (!state || state.timer || state.completed) return;
+    const delay = Math.max(0, 2_000 - (Date.now() - state.lastSentAt));
+    state.timer = setTimeout(() => {
+      state.timer = undefined;
+      void this.flushActivity(sessionId).catch((error) => {
+        console.error("[activity] Could not update Feishu progress card:", error);
+      });
+    }, delay);
+  }
+
+  private async flushActivity(sessionId: string, force = false): Promise<void> {
+    const state = this.activityStates.get(sessionId);
+    if (!state) return;
+    if (state.flushing) {
+      await state.flushing;
+      if (force && state.sentRevision < state.revision) {
+        await this.flushActivity(sessionId, true);
+      }
+      return;
+    }
+    if (!force && state.sentRevision >= state.revision) return;
+    const capturedRevision = state.revision;
+    const operation = (async () => {
+      const session = this.store.getSession(sessionId);
+      if (!session) return;
+      const card = buildActivityCard(
+        session,
+        state.events,
+        state.startedAt,
+        state.completed,
+      );
+      for (const binding of this.uniqueChatBindings()) {
+        try {
+          const existingMessageId = state.messageIds.get(binding.chatId);
+          if (existingMessageId) {
+            await this.feishu.patchCard(existingMessageId, card);
+          } else {
+            const messageId = await this.feishu.sendCard(binding.chatId, card);
+            state.messageIds.set(binding.chatId, messageId);
+            await this.addRoute(messageId, sessionId, binding.chatId, "activity");
+          }
+        } catch (error) {
+          console.error("[activity] Failed to send or patch a progress card:", error);
+        }
+      }
+      state.lastSentAt = Date.now();
+      state.sentRevision = capturedRevision;
+    })();
+    state.flushing = operation;
+    try {
+      await operation;
+    } finally {
+      state.flushing = undefined;
+    }
+    if (!state.completed && state.sentRevision < state.revision) {
+      this.scheduleActivityFlush(sessionId);
+    }
+  }
+
+  private async finishActivity(sessionId: string, label: string): Promise<void> {
+    const state = this.activityStates.get(sessionId);
+    if (!state) return;
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = undefined;
+    }
+    if (!state.completed) {
+      state.completed = true;
+      state.events.push({ at: new Date().toISOString(), label });
+      state.events = state.events.slice(-6);
+      state.revision += 1;
+    }
+    await this.flushActivity(sessionId, true);
+    this.activityStates.delete(sessionId);
+  }
+
+  private attachmentKey(openId: string, chatId: string): string {
+    return `${openId}\u0000${chatId}`;
+  }
+
+  private stageAttachments(key: string, files: SavedAttachment[]): void {
+    this.pruneStagedAttachments();
+    const current = this.pendingAttachments.get(key)?.files ?? [];
+    const limit = Math.max(1, this.config.inboundAttachmentMaxCount * 2);
+    this.pendingAttachments.set(key, {
+      createdAt: Date.now(),
+      files: [...current, ...files].slice(-limit),
+    });
+  }
+
+  private peekAttachments(key: string): SavedAttachment[] {
+    this.pruneStagedAttachments();
+    return this.pendingAttachments.get(key)?.files ?? [];
+  }
+
+  private takeAttachments(key: string): SavedAttachment[] {
+    this.pruneStagedAttachments();
+    const staged = this.pendingAttachments.get(key);
+    this.pendingAttachments.delete(key);
+    return staged?.files ?? [];
+  }
+
+  private pruneStagedAttachments(): void {
+    const cutoff = Date.now() - this.config.uploadTtlMs;
+    for (const [key, staged] of this.pendingAttachments) {
+      if (staged.createdAt < cutoff) {
+        this.pendingAttachments.delete(key);
+      }
+    }
+  }
+
+  private registerFileReturnRequest(
+    sessionId: string,
+    chatId: string,
+    remainingStops: number,
+  ): void {
+    const now = Date.now();
+    const requests = (this.fileReturnRequests.get(sessionId) ?? []).filter(
+      (request) => request.expiresAt > now,
+    );
+    requests.push({
+      chatId,
+      remainingStops: Math.max(0, remainingStops),
+      expiresAt: now + 2 * 60 * 60 * 1000,
+    });
+    this.fileReturnRequests.set(sessionId, requests);
+  }
+
+  private advanceFileReturnRequests(sessionId: string): FileReturnRequest | undefined {
+    const now = Date.now();
+    const requests = (this.fileReturnRequests.get(sessionId) ?? []).filter(
+      (request) => request.expiresAt > now,
+    );
+    const eligibleIndex = requests.findIndex((request) => request.remainingStops === 0);
+    const eligible = eligibleIndex >= 0 ? requests.splice(eligibleIndex, 1)[0] : undefined;
+    for (const request of requests) {
+      if (request.remainingStops > 0) {
+        request.remainingStops -= 1;
+      }
+    }
+    if (requests.length > 0) {
+      this.fileReturnRequests.set(sessionId, requests);
+    } else {
+      this.fileReturnRequests.delete(sessionId);
+    }
+    return eligible;
+  }
+
+  private decrementManagedQueueDepth(sessionId: string): void {
+    const current = this.managedQueueDepth.get(sessionId) ?? 0;
+    if (current <= 1) {
+      this.managedQueueDepth.delete(sessionId);
+    } else {
+      this.managedQueueDepth.set(sessionId, current - 1);
+    }
+  }
+
+  private async sendRequestedFiles(
+    session: SessionRecord,
+    chatId: string,
+    candidates: string[],
+  ): Promise<void> {
+    const errors: string[] = [];
+    let sentCount = 0;
+    for (const candidate of candidates.slice(0, 3)) {
+      try {
+        const file = await validateBridgeFile(
+          candidate,
+          session.cwd,
+          this.config.outboundFileMaxBytes,
+        );
+        const messageId = await this.feishu.sendLocalFile(chatId, file.path);
+        await this.addRoute(messageId, session.sessionId, chatId, "stop");
+        sentCount += 1;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        errors.push(`${candidate}：${detail}`);
+      }
+    }
+    if (errors.length > 0) {
+      await this.feishu.sendText(
+        chatId,
+        `文件回传结果：成功 ${sentCount} 个，失败 ${errors.length} 个。\n${errors
+          .map((error) => `- ${truncate(error, 400)}`)
+          .join("\n")}`,
+      );
+    }
+  }
+
+  private async completeApproval(
+    requestId: string,
+    resolution: ApprovalResolution,
+  ): Promise<boolean> {
+    const approval = await this.store.resolveApproval(requestId, resolution);
+    if (!approval) {
+      return false;
+    }
+
+    const waiter = this.approvalWaiters.get(requestId);
+    if (waiter) {
+      clearTimeout(waiter.timer);
+      this.approvalWaiters.delete(requestId);
+    }
+
+    const session = await this.store.upsertSession({
+      sessionId: approval.sessionId,
+      cwd: approval.cwd,
+      turnId: approval.turnId,
+      status:
+        resolution === "allow"
+          ? "running"
+          : resolution === "deny"
+            ? "waiting"
+            : "local_approval",
+    });
+
+    const card = buildResolvedApprovalCard(session, approval, resolution);
+    waiter?.resolve(resolution);
+    void Promise.allSettled(
+      approval.messageIds.map((messageId) => this.feishu.patchCard(messageId, card)),
+    );
+    console.log(
+      `[approval] ${resolution} for session #${session.shortId}.`,
+    );
+    return true;
+  }
+
+  private listActiveSessions(): SessionRecord[] {
+    const now = Date.now();
+    const registrations = this.managedTerminals.listOnline(now);
+    const registrationById = new Map(
+      registrations.map((registration) => [registration.terminalId, registration]),
+    );
+    const sessions = this.store
+      .listOpenSessions()
+      .flatMap((session): SessionRecord[] => {
+        if (!this.managedTerminals.isManaged(session)) {
+          if (session.clientProcessId) {
+            return isProcessAlive(session.clientProcessId) ? [session] : [];
+          }
+          const fallbackMs = Math.min(
+            this.config.sessionActiveMs,
+            5 * 60 * 1000,
+          );
+          return now - Date.parse(session.lastSeenAt) <= fallbackMs ? [session] : [];
+        }
+        const terminalId = session.managedTerminalId;
+        const registration = terminalId
+          ? registrationById.get(terminalId)
+          : undefined;
+        return registration
+          ? [{ ...session, lastSeenAt: new Date(registration.lastSeenAt).toISOString() }]
+          : [];
+      });
+
+    const representedTerminals = new Set(
+      sessions
+        .map((session) => session.managedTerminalId)
+        .filter((terminalId): terminalId is string => Boolean(terminalId)),
+    );
+    for (const registration of registrations) {
+      if (representedTerminals.has(registration.terminalId)) {
+        continue;
+      }
+      sessions.push({
+        sessionId: managedTerminalSessionId(registration.terminalId),
+        shortId: shortSessionId(registration.terminalId),
+        cwd: registration.cwd,
+        projectName: projectNameFromCwd(registration.cwd),
+        status: registration.ready ? "ready" : "starting",
+        openedAt: new Date(registration.createdAt).toISOString(),
+        lastSeenAt: new Date(registration.lastSeenAt).toISOString(),
+        source: "managed_window",
+        managedTerminalId: registration.terminalId,
+        managedTerminalElevated: registration.elevated,
+      });
+    }
+    return sessions.sort(
+      (left, right) => Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt),
+    );
+  }
+
+  private findActiveSessionsByShortToken(token: string): SessionRecord[] {
+    const normalized = token.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+    if (normalized.length < 4) {
+      return [];
+    }
+    return this.listActiveSessions().filter((session) =>
+      session.sessionId
+        .replace(/[^a-zA-Z0-9]/g, "")
+        .toLowerCase()
+        .endsWith(normalized),
+    );
+  }
+
+  private findActiveSessionsByAlias(alias: string): SessionRecord[] {
+    const key = sessionAliasKey(alias);
+    if (!key) {
+      return [];
+    }
+    return this.listActiveSessions().filter(
+      (session) => session.alias && sessionAliasKey(session.alias) === key,
+    );
+  }
+
+  private async updateSessionAlias(
+    session: SessionRecord,
+    rawAlias: string | undefined,
+  ): Promise<SessionAliasResult> {
+    let persistentSession = this.store.getSession(session.sessionId);
+    if (!persistentSession && session.source === "managed_window") {
+      persistentSession = await this.store.upsertSession({
+        sessionId: session.sessionId,
+        cwd: session.cwd,
+        status: "ready",
+        source: session.source,
+        managedTerminalId: session.managedTerminalId,
+        managedTerminalElevated: session.managedTerminalElevated,
+      });
+    }
+    if (!persistentSession) {
+      return { ok: false, error: "会话不存在或已经失效。" };
+    }
+
+    if (rawAlias === undefined || !rawAlias.trim()) {
+      const updated = await this.store.setSessionAlias(
+        persistentSession.sessionId,
+        undefined,
+      );
+      return updated
+        ? { ok: true, session: updated }
+        : { ok: false, error: "会话不存在或已经失效。" };
+    }
+
+    const validationError = sessionAliasValidationError(rawAlias);
+    if (validationError) {
+      return { ok: false, error: validationError };
+    }
+    const alias = normalizeSessionAlias(rawAlias);
+    const key = sessionAliasKey(alias);
+    const conflict = this.listActiveSessions().find(
+      (item) =>
+        item.sessionId !== session.sessionId &&
+        item.alias &&
+        sessionAliasKey(item.alias) === key,
+    );
+    if (conflict) {
+      return {
+        ok: false,
+        error: `别名 @${alias} 已被会话 ${conflict.projectName} #${conflict.shortId} 使用。`,
+      };
+    }
+
+    const updated = await this.store.setSessionAlias(persistentSession.sessionId, alias);
+    return updated
+      ? { ok: true, session: updated }
+      : { ok: false, error: "会话不存在或已经失效。" };
+  }
+
+  private async handleFeishuAliasCommand(
+    command: AliasCommand,
+    messageId: string,
+    chatId: string,
+  ): Promise<void> {
+    if (!command.targetKind || !command.target) {
+      await this.respond(messageId, chatId, this.formatAliasList());
+      return;
+    }
+
+    const matches = command.targetKind === "short"
+      ? this.findActiveSessionsByShortToken(command.target)
+      : this.findActiveSessionsByAlias(command.target);
+    const address = command.targetKind === "short"
+      ? `#${command.target}`
+      : `@${command.target}`;
+    if (matches.length !== 1) {
+      await this.respond(
+        messageId,
+        chatId,
+        matches.length === 0
+          ? `没有找到 ${address} 对应的活跃会话。发送“会话”查看列表。`
+          : `${address} 匹配到多个会话，请换用完整短 ID。`,
+      );
+      return;
+    }
+
+    const session = matches[0];
+    if (command.alias === undefined) {
+      await this.respond(
+        messageId,
+        chatId,
+        session.alias
+          ? `会话 ${session.projectName} #${session.shortId} 的别名是 @${session.alias}。`
+          : `会话 ${session.projectName} #${session.shortId} 尚未设置别名。`,
+      );
+      return;
+    }
+
+    const clear = ["清除", "删除", "clear", "none"].includes(
+      command.alias.trim().toLowerCase(),
+    );
+    const result = await this.updateSessionAlias(
+      session,
+      clear ? undefined : command.alias,
+    );
+    if (!result.ok || !result.session) {
+      await this.respond(messageId, chatId, result.error ?? "设置别名失败。");
+      return;
+    }
+
+    await this.respond(
+      messageId,
+      chatId,
+      result.session.alias
+        ? `已将 ${result.session.projectName} #${result.session.shortId} 的别名设为 @${result.session.alias}。以后可发送“@${result.session.alias} 回复内容”。`
+        : `已清除 ${result.session.projectName} #${result.session.shortId} 的别名。`,
+    );
+  }
+
+  private activeSessionDefinition(): string {
+    const fallbackMs = Math.min(this.config.sessionActiveMs, 5 * 60 * 1000);
+    return `活跃定义：助手打开的窗口从打开到关闭始终算活跃；外部会话会跟踪真实 Codex 进程，进程关闭后自动移除。无法取得进程信息时仅临时保留 ${formatDuration(fallbackMs)}。`;
+  }
+
+  private formatSessionList(): string {
+    const sessions = this.listActiveSessions();
+    if (sessions.length === 0) {
+      return `当前没有活跃 Codex 会话。\n${this.activeSessionDefinition()}`;
+    }
+    const lines = sessions.slice(0, 20).map(
+      (session, index) => {
+        const mode = session.managedTerminalId
+          ? session.managedTerminalElevated
+            ? " · 管理员同步"
+            : " · 窗口同步"
+          : " · 外部会话";
+        const address = session.alias
+          ? `@${session.alias}  (#${session.shortId})`
+          : sessionAddress(session);
+        const queued = (this.externalQueues.get(session.sessionId)?.length ?? 0) +
+          (this.managedQueueDepth.get(session.sessionId) ?? 0);
+        return `${index + 1}. ${address}  ${session.projectName}  · ${statusLabel(session.status)}${mode}${queued > 0 ? ` · 排队 ${queued}` : ""}`;
+      },
+    );
+    return `当前活跃会话：\n${lines.join("\n")}\n\n回复：@别名 内容；排队：排队 @别名 内容；文件回传：发文件 @别名 要求\n${this.activeSessionDefinition()}`;
+  }
+
+  private formatAliasList(): string {
+    const sessions = this.listActiveSessions();
+    if (sessions.length === 0) {
+      return `当前没有可设置别名的活跃会话。\n\n${aliasCommandUsage()}`;
+    }
+    const lines = sessions.slice(0, 20).map(
+      (session, index) =>
+        `${index + 1}. ${session.alias ? `@${session.alias}` : "（未设置）"} · #${session.shortId} · ${session.projectName}`,
+    );
+    return `当前会话别名：\n${lines.join("\n")}\n\n${aliasCommandUsage()}`;
+  }
+
+  private uniqueChatBindings(): Binding[] {
+    const byChat = new Map<string, Binding>();
+    for (const binding of this.store.listBindings()) {
+      byChat.set(binding.chatId, binding);
+    }
+    return [...byChat.values()];
+  }
+
+  private async respond(
+    sourceMessageId: string,
+    chatId: string,
+    text: string,
+  ): Promise<string | undefined> {
+    try {
+      return await this.feishu.replyText(sourceMessageId, text);
+    } catch (error) {
+      console.warn("[message] Reply API failed; falling back to a new message.");
+      try {
+        return await this.feishu.sendText(chatId, text);
+      } catch (fallbackError) {
+        console.error("[message] Could not send Feishu response:", fallbackError ?? error);
+        return undefined;
+      }
+    }
+  }
+
+  private async addRoute(
+    messageId: string,
+    sessionId: string,
+    chatId: string,
+    kind: MessageRouteKind,
+    requestId?: string,
+  ): Promise<void> {
+    await this.store.addMessageRoute({
+      messageId,
+      sessionId,
+      requestId,
+      chatId,
+      kind,
+      createdAt: new Date().toISOString(),
+    });
+  }
+}
+
+function parseBindCommand(
+  text: string,
+  command: string,
+): { matched: boolean; code?: string } {
+  if (text === command) {
+    return { matched: true };
+  }
+  const prefix = `${command} `;
+  if (!text.startsWith(prefix)) {
+    return { matched: false };
+  }
+  const code = text.slice(prefix.length).trim();
+  return { matched: true, code: code || undefined };
+}
+
+function parsePromptDirectives(text: string): {
+  prompt: string;
+  queue: boolean;
+  fileReturn: boolean;
+} {
+  let prompt = text.trim();
+  let queue = false;
+  let fileReturn = false;
+  for (let index = 0; index < 3; index += 1) {
+    const queueMatch = prompt.match(/^(?:排队|\/queue|queue)\s+([\s\S]+)$/iu);
+    if (queueMatch?.[1]) {
+      queue = true;
+      prompt = queueMatch[1].trim();
+      continue;
+    }
+    const fileMatch = prompt.match(/^(?:发文件|\/sendfile|sendfile)\s+([\s\S]+)$/iu);
+    if (fileMatch?.[1]) {
+      fileReturn = true;
+      prompt = fileMatch[1].trim();
+      continue;
+    }
+    break;
+  }
+  return { prompt, queue, fileReturn };
+}
+
+function parseUserInputAnswers(
+  text: string,
+  questions: UserInputQuestion[],
+): Record<string, string> | undefined {
+  const parts = questions.length === 1
+    ? [text.trim()]
+    : text.split(/[；;\n]+/).map((part) => part.trim()).filter(Boolean);
+  if (parts.length !== questions.length) {
+    return undefined;
+  }
+  const answers: Record<string, string> = {};
+  for (const [index, question] of questions.entries()) {
+    const raw = parts[index]?.trim();
+    if (!raw) return undefined;
+    const numeric = Number.parseInt(raw, 10);
+    const option = /^\d+$/.test(raw) && numeric >= 1
+      ? question.options[numeric - 1]
+      : question.options.find(
+          (candidate) => candidate.label.toLocaleLowerCase("zh-CN") ===
+            raw.toLocaleLowerCase("zh-CN"),
+        );
+    answers[question.id] = truncate(option?.label ?? raw, 1_000);
+  }
+  return answers;
+}
+
+function inputAnswerUsage(questions: UserInputQuestion[]): string {
+  return questions.length === 1
+    ? "请引用问题卡片，回复选项编号、选项文字或自定义答案。"
+    : `需要按顺序提供 ${questions.length} 个答案，并用中文分号“；”分隔，例如：1；2；自定义答案。`;
+}
+
+function activityEventFromPayload(payload: ActivityHookPayload): ActivityCardEvent {
+  const at = new Date().toISOString();
+  switch (payload.hook_event_name) {
+    case "PreToolUse":
+      return {
+        at,
+        label: `正在调用 ${humanizeToolName(payload.tool_name)}`,
+        detail: payload.tool_preview,
+      };
+    case "PostToolUse":
+      return {
+        at,
+        label: `${humanizeToolName(payload.tool_name)} 已完成`,
+        detail: payload.tool_response_preview,
+      };
+    case "PreCompact":
+      return { at, label: "正在压缩上下文" };
+    case "PostCompact":
+      return { at, label: "上下文压缩完成" };
+    case "UserPromptSubmit":
+      return { at, label: "已提交新任务，Codex 开始处理" };
+  }
+}
+
+function humanizeToolName(toolName: string | undefined): string {
+  if (!toolName) return "工具";
+  const known: Record<string, string> = {
+    shell_command: "命令行",
+    apply_patch: "文件修改",
+    view_image: "图片查看",
+    request_user_input: "用户提问",
+  };
+  return known[toolName] ?? toolName.replace(/^mcp__/, "MCP · ");
+}
+
+function parseExplicitSession(
+  text: string,
+): { kind: "short"; token: string; prompt: string } | undefined {
+  const match = text.match(/^#([a-zA-Z0-9]{4,32})\s+([\s\S]+)$/);
+  if (!match?.[1] || !match[2]?.trim()) {
+    return undefined;
+  }
+  return { kind: "short", token: match[1].toLowerCase(), prompt: match[2].trim() };
+}
+
+function parseExplicitAlias(
+  text: string,
+): { kind: "alias"; token: string; prompt: string } | undefined {
+  const match = text.match(/^@([^\s@#]+)\s+([\s\S]+)$/u);
+  if (!match?.[1] || !match[2]?.trim()) {
+    return undefined;
+  }
+  return { kind: "alias", token: match[1], prompt: match[2].trim() };
+}
+
+function parseAliasCommand(text: string): AliasCommand | undefined {
+  if (text === "别名") {
+    return {};
+  }
+  const match = text.match(/^别名\s+([#@])([^\s#@]+)(?:\s+([\s\S]+))?$/u);
+  if (!match?.[1] || !match[2]) {
+    return undefined;
+  }
+  if (match[1] === "#" && !/^[a-zA-Z0-9]{4,32}$/.test(match[2])) {
+    return undefined;
+  }
+  return {
+    targetKind: match[1] === "#" ? "short" : "alias",
+    target: match[1] === "#" ? match[2].toLowerCase() : match[2],
+    alias: match[3]?.trim(),
+  };
+}
+
+function aliasCommandUsage(): string {
+  return "设置：别名 #短ID 名称\n清除：别名 #短ID 清除\n也可用旧别名定位：别名 @旧别名 新名称\n回复：@名称 你的内容\n规则：1–20 个字符，可用中文、字母、数字、下划线和短横线。";
+}
+
+function formatDuration(milliseconds: number): string {
+  const hours = milliseconds / (60 * 60 * 1000);
+  if (Number.isInteger(hours)) {
+    return `${hours} 小时`;
+  }
+  const minutes = Math.max(1, Math.round(milliseconds / (60 * 1000)));
+  return `${minutes} 分钟`;
+}
+
+function normalizeActionValue(value: unknown): Record<string, unknown> | undefined {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value === "string") {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function actionToResolution(action: unknown): ApprovalResolution | undefined {
+  switch (action) {
+    case "approval_allow":
+      return "allow";
+    case "approval_deny":
+      return "deny";
+    case "approval_local":
+      return "local";
+    default:
+      return undefined;
+  }
+}
+
+function approvalResolutionFromText(text: string): ApprovalResolution | undefined {
+  const normalized = text.replace(/[\s，。！!]/g, "").toLowerCase();
+  if (["批准", "允许", "同意", "approve", "allow"].includes(normalized)) {
+    return "allow";
+  }
+  if (["拒绝", "不允许", "deny", "reject"].includes(normalized)) {
+    return "deny";
+  }
+  if (["本机确认", "转回本机", "电脑确认", "local"].includes(normalized)) {
+    return "local";
+  }
+  return undefined;
+}
+
+function approvalText(resolution: ApprovalResolution): string {
+  switch (resolution) {
+    case "allow":
+      return "已批准，Codex 将继续执行。";
+    case "deny":
+      return "已拒绝这次操作。";
+    case "local":
+      return "已转回电脑端确认。";
+    case "timeout":
+      return "审批已超时，已转回电脑端。";
+  }
+}

@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+data/*.json
+data/uploads/
+data/hook-test-home/
+*.log
+desktop-control/**/bin/
+desktop-control/**/obj/
+desktop-control/publish/
+desktop-control/**/publish*/
+desktop-control/ui-test*.png
+*.exe
+*.exe.bak-*
+.codex-app-schema-*/
+.codex-app-ts-*/
