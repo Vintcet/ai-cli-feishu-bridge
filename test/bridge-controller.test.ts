@@ -1044,6 +1044,102 @@ test("a managed temporary error is notified and retried when enabled", async () 
   }
 });
 
+test("normal explanatory replies containing status codes and error words are not error cards", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-error-detection-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "waiting",
+      source: "startup",
+      clientProcessId: process.pid,
+    });
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      controllerConfig(directory),
+    );
+    await controller.handleStopHook({
+      hook_event_name: "Stop",
+      session_id: sessionId,
+      turn_id: "turn-normal-explanation",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      last_assistant_message: "已完成修正。说明：之前的 400 错误和失败状态是桥接器误报。",
+      stop_hook_active: true,
+      transcript_path: null,
+    });
+    assert.equal(feishu.cards.length, 1);
+    assert.doesNotMatch(JSON.stringify(feishu.cards[0]?.card), /Codex 运行错误/);
+    assert.equal(store.getSession(sessionId)?.status, "waiting");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("compact service error lines still produce an error card", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-error-line-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "waiting",
+      source: "startup",
+      clientProcessId: process.pid,
+    });
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      controllerConfig(directory),
+    );
+    await controller.handleStopHook({
+      hook_event_name: "Stop",
+      session_id: sessionId,
+      turn_id: "turn-compact-error",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      last_assistant_message: "Error 503: service unavailable, request failed.",
+      stop_hook_active: true,
+      transcript_path: null,
+    });
+    assert.equal(feishu.cards.length, 1);
+    assert.match(JSON.stringify(feishu.cards[0]?.card), /Codex 运行错误/);
+    assert.equal(store.getSession(sessionId)?.status, "error");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("an explicit file request returns only project files and hides the protocol line", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-return-"));
   try {

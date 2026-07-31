@@ -2457,10 +2457,34 @@ function isRetryableCodexError(value: string): boolean {
 
 function codexErrorFromMessage(value: string | null | undefined): string | undefined {
   const message = value?.trim();
+  if (!message) {
+    return undefined;
+  }
+
+  // Stop currently exposes only the last assistant text, not Codex's
+  // structured task_complete error. A normal answer may legitimately discuss
+  // “400”, “错误” or “失败”, so never scan an entire prose response for a pair
+  // of loose keywords. Only accept an explicitly error-shaped first line.
+  const firstLine = message
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!firstLine || Array.from(firstLine).length > 500) {
+    return undefined;
+  }
+
+  const startsLikeError = /^(?:error\b|failed\b|failure\b|exception\b|unable\b|request failed\b|unexpected status\b|exceeded retry limit\b|(?:错误|失败|异常|服务繁忙|请求过多|连接超时|暂时不可用)(?:\s*[:：]|\s|$))/iu.test(
+    firstLine,
+  );
+  const startsWithRetryableStatus = /^(?:http\s*)?(?:400|408|409|429|500|502|503|504)(?:\s*[:：-]\s*|\s+(?:bad\b|too many\b|internal\b|service\b|request\b|gateway\b|error\b|错误|失败|异常))/iu.test(
+    firstLine,
+  );
+  const knownServiceFailure = /^(?:we(?:'re| are) currently experiencing high demand\b|too many requests\b|service unavailable\b|rate.?limit(?:ed| exceeded)?\b|request timed out\b|timed out\b)/iu.test(
+    firstLine,
+  );
   if (
-    !message ||
-    !isRetryableCodexError(message) ||
-    !/(?:error|failed|failure|unable|exception|错误|失败|异常|繁忙|超时|请求过多|不可用)/i.test(message)
+    !(startsLikeError || startsWithRetryableStatus || knownServiceFailure) ||
+    !isRetryableCodexError(firstLine)
   ) {
     return undefined;
   }
