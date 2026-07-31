@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildActivityCard, buildStopCard } from "../src/cards.js";
+import { buildActivityCard, buildStopCard, buildStopCards, buildUserPromptCards } from "../src/cards.js";
+import { splitTextForFeishu } from "../src/feishu-markdown.js";
 import type { SessionRecord } from "../src/domain.js";
 
 const session: SessionRecord = {
@@ -81,4 +82,26 @@ test("activity detail uses the same Markdown conversion", () => {
   assert.doesNotMatch(rendered, /## 输出/);
   assert.match(rendered, /\*\*输出\*\*/);
   assert.match(rendered, /• 测试通过/);
+});
+
+test("long completion content is split into complete numbered cards", () => {
+  const source = Array.from({ length: 8_000 }, (_, index) => `第${index}段：完整内容。`).join("\n");
+  const cards = buildStopCards(session, source);
+  assert.ok(cards.length > 1);
+  const rendered = cards.map((card) => JSON.stringify(card)).join("\n");
+  assert.match(rendered, /（1\/\d+）/);
+  assert.match(rendered, /（\d+\/\d+）/);
+  assert.doesNotMatch(rendered, /已截断/);
+  assert.match(rendered, /第0段/);
+  assert.match(rendered, /第7999段/);
+});
+
+test("long PC prompts are split without losing content", () => {
+  const source = "开头\n" + "内容".repeat(7_000) + "\n结尾";
+  const chunks = splitTextForFeishu(source, 2_800);
+  assert.ok(chunks.length > 1);
+  assert.equal(chunks.join(""), source);
+  const cards = buildUserPromptCards(session, source);
+  assert.equal(cards.length, chunks.length);
+  assert.match(JSON.stringify(cards.at(-1)), /结尾/);
 });

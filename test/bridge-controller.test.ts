@@ -131,6 +131,14 @@ class FakeManagedTerminals {
     return true;
   }
 
+  claimById() {
+    return {
+      terminalId: this.terminalId,
+      elevated: false,
+      createdAt: Date.now() - 1_000,
+    };
+  }
+
   listOnline() {
     const now = Date.now();
     return [{
@@ -455,6 +463,7 @@ test("retry settings accept bounded integers and reject invalid values", async (
     assert.equal(saved.ok, true);
     assert.deepEqual(store.getSettings(), {
       notifyActivity: false,
+      notifyUserPrompts: false,
       autoRetryErrors: true,
       retryMaxAttempts: 20,
       retryIntervalSeconds: 600,
@@ -991,6 +1000,84 @@ test("activity hooks reuse one progress card and complete it on Stop", async () 
     assert.equal(feishu.cards.length, 2);
     assert.ok(feishu.patchedCards.length >= 1);
     assert.match(JSON.stringify(feishu.patchedCards.at(-1)?.card), /本轮处理完成/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("PC prompts can be synchronized to the managed session group without remote echo", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-prompt-sync-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    await store.updateSettings({ notifyUserPrompts: true });
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const terminalId = "terminal-prompt-sync";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "waiting",
+      source: "startup",
+      managedTerminalId: terminalId,
+      managedByAssistant: true,
+    });
+    const feishu = new FakeFeishu();
+    const terminals = new FakeManagedTerminals(terminalId, directory, sessionId);
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      terminals as unknown as ManagedTerminalRouter,
+      controllerConfig(directory),
+    );
+    await controller.handleSessionStartHook({
+      hook_event_name: "SessionStart",
+      session_id: sessionId,
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      source: "startup",
+      transcript_path: null,
+      managed_terminal_id: terminalId,
+    });
+    for (let attempt = 0; attempt < 20 && !store.getSession(sessionId)?.feishuChatId; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const chatId = store.getSession(sessionId)?.feishuChatId;
+    assert.ok(chatId);
+    await controller.handleFeishuMessage(
+      groupMessageEvent("remote-prompt-2", "owner", chatId, "飞书输入"),
+    );
+    await controller.handleActivityHook({
+      hook_event_name: "UserPromptSubmit",
+      session_id: sessionId,
+      turn_id: "turn-remote",
+      cwd: directory,
+      prompt: "飞书输入",
+    });
+    assert.equal(feishu.cards.filter((item) => JSON.stringify(item.card).includes("电脑端已提交消息")).length, 0);
+
+    await controller.handleActivityHook({
+      hook_event_name: "UserPromptSubmit",
+      session_id: sessionId,
+      turn_id: "turn-local",
+      cwd: directory,
+      prompt: "本机输入",
+    });
+    for (let attempt = 0; attempt < 20 &&
+      feishu.cards.filter((item) => JSON.stringify(item.card).includes("电脑端已提交消息")).length === 0;
+      attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(feishu.cards.filter((item) => JSON.stringify(item.card).includes("电脑端已提交消息")).length, 1);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -1,7 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import type { SessionRecord } from "./domain.js";
-import { truncate } from "./domain.js";
 
 export interface CodexExitResult {
   code: number | null;
@@ -59,7 +58,7 @@ export class CodexRunner {
         // Drain JSONL output. Completion is delivered by the Stop hook instead.
       });
       child.stderr.on("data", (chunk: Buffer | string) => {
-        stderr = truncate(`${stderr}${chunk.toString()}`, 4000);
+        stderr = `${stderr}${chunk.toString()}`;
       });
       child.once("close", (code, signal) => {
         this.starting.delete(session.sessionId);
@@ -71,7 +70,7 @@ export class CodexRunner {
         }
       });
       child.once("error", (error) => {
-        stderr = truncate(`${stderr}\n${error.message}`, 4000);
+        stderr = `${stderr}\n${error.message}`;
       });
 
       await new Promise<void>((resolve, reject) => {

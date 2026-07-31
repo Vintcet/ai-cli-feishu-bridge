@@ -61,6 +61,9 @@ internal sealed class BridgeSettings
     [JsonPropertyName("notifyActivity")]
     public bool NotifyActivity { get; set; }
 
+    [JsonPropertyName("notifyUserPrompts")]
+    public bool NotifyUserPrompts { get; set; }
+
     [JsonPropertyName("autoRetryErrors")]
     public bool AutoRetryErrors { get; set; }
 

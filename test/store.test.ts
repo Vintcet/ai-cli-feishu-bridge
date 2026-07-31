@@ -111,6 +111,7 @@ test("persists notification and automation settings", async () => {
     await store.init();
     assert.deepEqual(store.getSettings(), {
       notifyActivity: false,
+      notifyUserPrompts: false,
       autoRetryErrors: false,
       retryMaxAttempts: 3,
       retryIntervalSeconds: 5,
@@ -119,6 +120,7 @@ test("persists notification and automation settings", async () => {
     });
     await store.updateSettings({
       notifyActivity: true,
+      notifyUserPrompts: true,
       autoRetryErrors: true,
       retryMaxAttempts: 7,
       retryIntervalSeconds: 12,
@@ -129,6 +131,7 @@ test("persists notification and automation settings", async () => {
     await reopened.init();
     assert.deepEqual(reopened.getSettings(), {
       notifyActivity: true,
+      notifyUserPrompts: true,
       autoRetryErrors: true,
       retryMaxAttempts: 7,
       retryIntervalSeconds: 12,

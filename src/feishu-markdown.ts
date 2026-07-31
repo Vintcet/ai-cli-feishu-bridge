@@ -13,6 +13,7 @@ type MarkdownBlock =
 interface MarkdownCardOptions {
   maxCharacters?: number;
   maxElements?: number;
+  truncate?: boolean;
 }
 
 const headingPattern = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/;
@@ -28,17 +29,18 @@ export function markdownToFeishuCardElements(
 ): CardElement[] {
   const maxCharacters = Math.max(200, options.maxCharacters ?? 3_200);
   const maxElements = Math.max(1, options.maxElements ?? 20);
+  const shouldTruncate = options.truncate !== false;
   const normalized = normalizeMarkdown(value);
   if (!normalized) {
     return [];
   }
 
-  const inputTruncated = normalized.length > maxCharacters;
+  const inputTruncated = shouldTruncate && normalized.length > maxCharacters;
   const source = inputTruncated
     ? `${normalized.slice(0, maxCharacters).trimEnd()}\n\n…`
     : normalized;
   const elements = parseMarkdownBlocks(source).flatMap(blockToElements);
-  const needsElementTruncation = elements.length > maxElements;
+  const needsElementTruncation = shouldTruncate && elements.length > maxElements;
   if (!inputTruncated && !needsElementTruncation) {
     return elements;
   }
@@ -48,6 +50,36 @@ export function markdownToFeishuCardElements(
     return [note];
   }
   return [...elements.slice(0, maxElements - 1), note];
+}
+
+export function splitTextForFeishu(value: string, maxCharacters = 2_800): string[] {
+  const limit = Math.max(200, maxCharacters);
+  const normalized = normalizeMarkdown(value);
+  if (!normalized) {
+    return [];
+  }
+  const chunks: string[] = [];
+  let remaining = normalized;
+  while (remaining.length > limit) {
+    const splitAt = preferredSplitIndex(remaining, limit);
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt);
+  }
+  if (remaining) {
+    chunks.push(remaining);
+  }
+  return chunks;
+}
+
+function preferredSplitIndex(value: string, limit: number): number {
+  const minimum = Math.floor(limit * 0.55);
+  for (const separator of ["\n\n", "\n", "。", "！", "？", ". ", "; ", "，", ", ", " "]) {
+    const index = value.lastIndexOf(separator, limit);
+    if (index >= minimum) {
+      return index + separator.length;
+    }
+  }
+  return limit;
 }
 
 function parseMarkdownBlocks(value: string): MarkdownBlock[] {
@@ -178,8 +210,9 @@ function blockToElements(block: MarkdownBlock): CardElement[] {
       return [noteElement(toPlainText(block.text))];
     case "code": {
       const label = block.language ? `代码 · ${toPlainText(block.language)}` : "代码";
-      const code = limitText(block.text || "（空代码块）", 1_500);
-      return [plainDiv(`${label}\n${code}`)];
+      return splitLongText(block.text || "（空代码块）").map(
+        (code, index) => plainDiv(`${label}${index > 0 ? "（续）" : ""}\n${code}`),
+      );
     }
     case "table": {
       const rows = block.rows.map((row, rowIndex) => {
@@ -305,17 +338,11 @@ function splitLongText(value: string, limit = 1_500): string[] {
   while (remaining.length > limit) {
     const newline = remaining.lastIndexOf("\n", limit);
     const splitAt = newline >= Math.floor(limit * 0.6) ? newline : limit;
-    chunks.push(remaining.slice(0, splitAt).trimEnd());
-    remaining = remaining.slice(splitAt).trimStart();
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt);
   }
   if (remaining) chunks.push(remaining);
   return chunks;
-}
-
-function limitText(value: string, maxLength: number): string {
-  return value.length <= maxLength
-    ? value
-    : `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
 function markdownDiv(content: string): CardElement {

@@ -3,6 +3,7 @@ namespace CodexFeishuControl;
 internal sealed class SettingsDialog : Form
 {
     private readonly CheckBox notifyActivityBox = new();
+    private readonly CheckBox notifyUserPromptsBox = new();
     private readonly CheckBox autoRetryBox = new();
     private readonly CheckBox autoApproveBox = new();
     private readonly GroupBox retryOptionsGroup = new();
@@ -20,7 +21,7 @@ internal sealed class SettingsDialog : Form
         MaximizeBox = false;
         MinimizeBox = false;
         ShowInTaskbar = false;
-        ClientSize = new Size(580, 480);
+        ClientSize = new Size(580, 542);
         Font = new Font("Microsoft YaHei UI", 9F);
 
         var title = new Label
@@ -45,17 +46,23 @@ internal sealed class SettingsDialog : Form
             86,
             settings.NotifyActivity);
         ConfigureCheckBox(
+            notifyUserPromptsBox,
+            "同步电脑端输入到飞书",
+            "把你在 PC Codex 窗口提交的消息同步到对应飞书会话；飞书发来的消息不会重复回显。",
+            148,
+            settings.NotifyUserPrompts);
+        ConfigureCheckBox(
             autoRetryBox,
             "临时错误自动重试",
             "遇到 429、503、服务繁忙或超时等错误时，按下方参数重试。",
-            148,
+            210,
             settings.AutoRetryErrors);
         ConfigureRetryOptions(settings);
         ConfigureCheckBox(
             autoApproveBox,
             "审批请求自动允许",
             "高风险：Codex 请求权限时不再等待人工确认，并在飞书留下记录。",
-            342,
+            404,
             settings.AutoApprove);
         autoRetryBox.CheckedChanged += (_, _) =>
             retryOptionsGroup.Enabled = autoRetryBox.Checked;
@@ -66,14 +73,14 @@ internal sealed class SettingsDialog : Form
             Text = "取消",
             DialogResult = DialogResult.Cancel,
             Size = new Size(90, 36),
-            Location = new Point(366, 425),
+            Location = new Point(366, 487),
         };
         var saveButton = new Button
         {
             Text = "保存",
             DialogResult = DialogResult.OK,
             Size = new Size(90, 36),
-            Location = new Point(466, 425),
+            Location = new Point(466, 487),
             BackColor = Color.FromArgb(37, 99, 235),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
@@ -81,7 +88,8 @@ internal sealed class SettingsDialog : Form
         saveButton.FlatAppearance.BorderSize = 0;
 
         Controls.AddRange([
-            title, hint, notifyActivityBox, autoRetryBox, retryOptionsGroup, autoApproveBox,
+            title, hint, notifyActivityBox, notifyUserPromptsBox, autoRetryBox,
+            retryOptionsGroup, autoApproveBox,
             cancelButton, saveButton,
         ]);
         AcceptButton = saveButton;
@@ -114,6 +122,7 @@ internal sealed class SettingsDialog : Form
     public BridgeSettings Settings => new()
     {
         NotifyActivity = notifyActivityBox.Checked,
+        NotifyUserPrompts = notifyUserPromptsBox.Checked,
         AutoRetryErrors = autoRetryBox.Checked,
         RetryMaxAttempts = (int)retryMaxAttemptsInput.Value,
         RetryIntervalSeconds = (int)retryIntervalInput.Value,
@@ -124,7 +133,7 @@ internal sealed class SettingsDialog : Form
     private void ConfigureRetryOptions(BridgeSettings settings)
     {
         retryOptionsGroup.Text = "重试参数";
-        retryOptionsGroup.Location = new Point(26, 204);
+        retryOptionsGroup.Location = new Point(26, 266);
         retryOptionsGroup.Size = new Size(528, 126);
 
         ConfigureNumericInput(

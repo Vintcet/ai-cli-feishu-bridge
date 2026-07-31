@@ -13,6 +13,7 @@ export type SessionStatus =
 
 export interface BridgeSettings {
   notifyActivity: boolean;
+  notifyUserPrompts: boolean;
   autoRetryErrors: boolean;
   retryMaxAttempts: number;
   retryIntervalSeconds: number;
@@ -71,6 +72,7 @@ export type MessageRouteKind =
   | "approval"
   | "input"
   | "activity"
+  | "user_prompt"
   | "resume_ack"
   | "error";
 
@@ -183,6 +185,7 @@ export interface ActivityHookPayload {
   turn_id?: string;
   cwd: string;
   model?: string;
+  prompt?: string;
   tool_name?: string;
   tool_preview?: string;
   tool_response_preview?: string;
@@ -352,7 +355,8 @@ export function isActivityHookPayload(value: unknown): value is ActivityHookPayl
       String(item.hook_event_name),
     ) &&
     typeof item.session_id === "string" &&
-    typeof item.cwd === "string"
+    typeof item.cwd === "string" &&
+    (item.prompt === undefined || typeof item.prompt === "string")
   );
 }
 

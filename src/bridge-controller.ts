@@ -9,11 +9,12 @@ import {
 import {
   buildActivityCard,
   buildApprovalCard,
-  buildErrorCard,
+  buildErrorCards,
   buildResolvedApprovalCard,
   buildResolvedUserInputCard,
-  buildStopCard,
+  buildStopCards,
   buildUserInputCard,
+  buildUserPromptCards,
   type ActivityCardEvent,
 } from "./cards.js";
 import type { CodexExitResult } from "./codex-runner.js";
@@ -95,6 +96,11 @@ interface StagedAttachments {
   files: SavedAttachment[];
 }
 
+interface PendingRemotePrompt {
+  prompt: string;
+  createdAt: number;
+}
+
 interface FileReturnRequest {
   chatId: string;
   remainingStops: number;
@@ -157,6 +163,7 @@ export class BridgeController {
   private readonly pendingAttachments = new Map<string, StagedAttachments>();
   private readonly fileReturnRequests = new Map<string, FileReturnRequest[]>();
   private readonly activityStates = new Map<string, ActivityState>();
+  private readonly pendingRemotePrompts = new Map<string, PendingRemotePrompt[]>();
   private readonly managedRetryCounts = new Map<string, number>();
   private readonly sessionGroupCreates = new Map<
     string,
@@ -301,6 +308,7 @@ export class BridgeController {
       this.remoteInputLocks.delete(session.sessionId);
       this.externalQueues.delete(session.sessionId);
       this.managedQueueDepth.delete(session.sessionId);
+      this.pendingRemotePrompts.delete(session.sessionId);
       this.fileReturnRequests.delete(session.sessionId);
       this.resolveInputsForSession(session.sessionId, "local");
       void this.finishActivity(session.sessionId, "窗口已关闭");
@@ -452,7 +460,12 @@ export class BridgeController {
   async handleSettingsUpdate(
     value: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    const booleanKeys = ["notifyActivity", "autoRetryErrors", "autoApprove"] as const;
+    const booleanKeys = [
+      "notifyActivity",
+      "notifyUserPrompts",
+      "autoRetryErrors",
+      "autoApprove",
+    ] as const;
     const update: Record<string, boolean | number> = {};
     for (const key of booleanKeys) {
       if (value[key] !== undefined) {
@@ -550,6 +563,11 @@ export class BridgeController {
         this.fileReturnRequests.delete(placeholder.sessionId);
         this.fileReturnRequests.set(session.sessionId, fileRequests);
       }
+      const pendingPrompts = this.pendingRemotePrompts.get(placeholder.sessionId);
+      if (pendingPrompts) {
+        this.pendingRemotePrompts.delete(placeholder.sessionId);
+        this.pendingRemotePrompts.set(session.sessionId, pendingPrompts);
+      }
       const activity = this.activityStates.get(placeholder.sessionId);
       if (activity) {
         this.activityStates.delete(placeholder.sessionId);
@@ -585,6 +603,7 @@ export class BridgeController {
     this.remoteInputLocks.delete(payload.session_id);
     this.externalQueues.delete(payload.session_id);
     this.managedQueueDepth.delete(payload.session_id);
+    this.pendingRemotePrompts.delete(payload.session_id);
     this.fileReturnRequests.delete(payload.session_id);
     this.resolveInputsForSession(payload.session_id, "local");
     void this.finishActivity(payload.session_id, "会话已结束");
@@ -782,12 +801,17 @@ export class BridgeController {
   async handleActivityHook(
     payload: ActivityHookPayload,
   ): Promise<Record<string, unknown>> {
-    if (!this.store.getSettings().notifyActivity) {
-      return {};
+    const settings = this.store.getSettings();
+    if (payload.hook_event_name === "UserPromptSubmit") {
+      void this.handleUserPromptSubmit(payload, settings).catch((error) => {
+        console.error("[prompt] Could not sync the PC prompt to Feishu:", error);
+      });
     }
-    void this.recordActivity(payload).catch((error) => {
-      console.error("[activity] Could not record Codex activity:", error);
-    });
+    if (settings.notifyActivity) {
+      void this.recordActivity(payload).catch((error) => {
+        console.error("[activity] Could not record Codex activity:", error);
+      });
+    }
     return {};
   }
 
@@ -841,11 +865,10 @@ export class BridgeController {
       });
       for (const recipient of await this.notificationRecipients(failedSession)) {
         try {
-          const messageId = await this.feishu.sendCard(
-            recipient.chatId,
-            buildErrorCard(failedSession, detail),
-          );
-          await this.addRoute(messageId, payload.session_id, recipient.chatId, "error");
+          for (const card of buildErrorCards(failedSession, detail)) {
+            const messageId = await this.feishu.sendCard(recipient.chatId, card);
+            await this.addRoute(messageId, payload.session_id, recipient.chatId, "error");
+          }
         } catch (error) {
           console.error("[stop] Failed to send a Codex error card:", error);
         }
@@ -864,11 +887,17 @@ export class BridgeController {
           ) {
             return;
           }
+          const retryPrompt =
+            "刚才的请求因临时服务错误失败。请重试上一项任务，并继续从中断处执行。";
+          this.rememberRemotePrompt(payload.session_id, retryPrompt);
           void this.managedTerminals.send(
             current,
-            "刚才的请求因临时服务错误失败。请重试上一项任务，并继续从中断处执行。",
+            retryPrompt,
             "steer",
-          ).catch((error) => console.error("[retry] Managed retry failed:", error));
+          ).catch((error) => {
+            this.forgetRemotePrompt(payload.session_id, retryPrompt);
+            console.error("[retry] Managed retry failed:", error);
+          });
         }, retryDelay);
       }
       return {};
@@ -884,12 +913,11 @@ export class BridgeController {
     let sentCount = 0;
     for (const recipient of await this.notificationRecipients(session)) {
       try {
-        const messageId = await this.feishu.sendCard(
-          recipient.chatId,
-          buildStopCard(session, message),
-        );
-        sentCount += 1;
-        await this.addRoute(messageId, payload.session_id, recipient.chatId, "stop");
+        for (const card of buildStopCards(session, message)) {
+          const messageId = await this.feishu.sendCard(recipient.chatId, card);
+          sentCount += 1;
+          await this.addRoute(messageId, payload.session_id, recipient.chatId, "stop");
+        }
       } catch (error) {
         console.error("[stop] Failed to send a Feishu completion card:", error);
       }
@@ -1392,9 +1420,11 @@ export class BridgeController {
           );
         }
         this.remoteInputLocks.add(session.sessionId);
+        this.rememberRemotePrompt(session.sessionId, prompt);
         try {
           await this.managedTerminals.send(runningSession, prompt, submitMode);
         } catch (error) {
+          this.forgetRemotePrompt(session.sessionId, prompt);
           if (submitMode === "queue") {
             this.decrementManagedQueueDepth(session.sessionId);
           }
@@ -1550,11 +1580,10 @@ export class BridgeController {
       : reason;
     for (const recipient of await this.notificationRecipients(failedSession)) {
       try {
-        const messageId = await this.feishu.sendCard(
-          recipient.chatId,
-          buildErrorCard(failedSession, detail),
-        );
-        await this.addRoute(messageId, session.sessionId, recipient.chatId, "error");
+        for (const card of buildErrorCards(failedSession, detail)) {
+          const messageId = await this.feishu.sendCard(recipient.chatId, card);
+          await this.addRoute(messageId, session.sessionId, recipient.chatId, "error");
+        }
       } catch (error) {
         console.error("[resume] Failed to send an error notification:", error);
       }
@@ -1680,6 +1709,71 @@ export class BridgeController {
     state.events = state.events.slice(-6);
     state.revision += 1;
     this.scheduleActivityFlush(session.sessionId);
+  }
+
+  private async handleUserPromptSubmit(
+    payload: ActivityHookPayload,
+    settings: BridgeSettings,
+  ): Promise<void> {
+    const prompt = payload.prompt;
+    if (!prompt?.trim()) {
+      return;
+    }
+    if (this.consumeRemotePrompt(payload.session_id, prompt)) {
+      return;
+    }
+    if (!settings.notifyUserPrompts) {
+      return;
+    }
+    const session = this.store.getSession(payload.session_id);
+    if (session?.managedByAssistant !== true) {
+      return;
+    }
+    for (const recipient of await this.notificationRecipients(session)) {
+      try {
+        for (const card of buildUserPromptCards(session, prompt)) {
+          const messageId = await this.feishu.sendCard(recipient.chatId, card);
+          await this.addRoute(messageId, session.sessionId, recipient.chatId, "user_prompt");
+        }
+      } catch (error) {
+        console.error("[prompt] Failed to send a PC prompt card:", error);
+      }
+    }
+  }
+
+  private rememberRemotePrompt(sessionId: string, prompt: string): void {
+    const now = Date.now();
+    const queue = (this.pendingRemotePrompts.get(sessionId) ?? [])
+      .filter((item) => now - item.createdAt <= 60_000);
+    queue.push({ prompt: normalizePromptForMatch(prompt), createdAt: now });
+    this.pendingRemotePrompts.set(sessionId, queue.slice(-12));
+  }
+
+  private forgetRemotePrompt(sessionId: string, prompt: string): void {
+    const queue = this.pendingRemotePrompts.get(sessionId);
+    if (!queue) return;
+    const normalized = normalizePromptForMatch(prompt);
+    const index = queue.findIndex((item) => item.prompt === normalized);
+    if (index >= 0) queue.splice(index, 1);
+    if (queue.length === 0) this.pendingRemotePrompts.delete(sessionId);
+  }
+
+  private consumeRemotePrompt(sessionId: string, prompt: string): boolean {
+    const queue = this.pendingRemotePrompts.get(sessionId);
+    if (!queue) return false;
+    const now = Date.now();
+    const normalized = normalizePromptForMatch(prompt);
+    const fresh = queue.filter((item) => now - item.createdAt <= 60_000);
+    const index = fresh.findIndex((item) => item.prompt === normalized);
+    if (index < 0) {
+      if (fresh.length === 0) this.pendingRemotePrompts.delete(sessionId);
+      else this.pendingRemotePrompts.set(sessionId, fresh);
+      return false;
+    }
+    fresh.splice(index, 1);
+    if (fresh.length === 0) this.pendingRemotePrompts.delete(sessionId);
+    else this.pendingRemotePrompts.set(sessionId, fresh);
+    return true;
   }
 
   private scheduleActivityFlush(sessionId: string): void {
@@ -2440,6 +2534,10 @@ function activityEventFromPayload(payload: ActivityHookPayload): ActivityCardEve
   }
 }
 
+function normalizePromptForMatch(value: string): string {
+  return value.normalize("NFC").replace(/\s+/gu, " ").trim();
+}
+
 function externalSessionInputBlockedMessage(session: SessionRecord): string {
   void session;
   return codexNotReceived("外部会话不支持飞书输入。请回到原窗口继续。");
@@ -2490,7 +2588,7 @@ function codexErrorFromMessage(value: string | null | undefined): string | undef
   ) {
     return undefined;
   }
-  return truncate(message, 2_000);
+  return message;
 }
 
 function retryDelayMs(

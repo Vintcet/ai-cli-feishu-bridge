@@ -24,6 +24,7 @@ function compactActivityPayload(value: unknown): unknown {
     turn_id: item.turn_id,
     cwd: item.cwd,
     model: item.model,
+    prompt: item.prompt,
     tool_name: item.tool_name,
     tool_preview: compactPreview(item.tool_input),
     tool_response_preview: compactPreview(

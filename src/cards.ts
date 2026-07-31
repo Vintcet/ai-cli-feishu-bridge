@@ -10,7 +10,10 @@ import {
   sessionLabel,
   truncate,
 } from "./domain.js";
-import { markdownToFeishuCardElements } from "./feishu-markdown.js";
+import {
+  markdownToFeishuCardElements,
+  splitTextForFeishu,
+} from "./feishu-markdown.js";
 
 type Card = Record<string, unknown>;
 
@@ -300,22 +303,91 @@ export function buildStopCard(
   session: SessionRecord,
   assistantMessage: string,
 ): Card {
+  return buildStopCards(session, assistantMessage)[0]!;
+}
+
+export function buildStopCards(
+  session: SessionRecord,
+  assistantMessage: string,
+): Card[] {
   const safeMessage = redactSensitiveText(assistantMessage).trim();
-  const messageElements = markdownToFeishuCardElements(safeMessage, {
-    maxCharacters: 3_200,
-    maxElements: 20,
-  });
   const waitingForReply = looksLikeQuestion(safeMessage);
   const continuationHint = session.managedByAssistant === true
     ? "下一轮请直接发送消息。"
     : "外部会话不支持飞书输入。";
+  const chunks = splitTextForFeishu(safeMessage || "Codex 已结束本轮处理。", 2_800);
+  return chunks.map((chunk, index) => buildMessageCard({
+    session,
+    text: chunk,
+    title: waitingForReply ? "Codex 等待你回复" : "Codex 本轮已完成",
+    template: waitingForReply ? "orange" : "green",
+    sectionTitle: "Codex 回复",
+    partIndex: index,
+    partCount: chunks.length,
+    footer: index === chunks.length - 1 ? continuationHint : undefined,
+  }));
+}
+
+export function buildUserPromptCards(
+  session: SessionRecord,
+  prompt: string,
+): Card[] {
+  const chunks = splitTextForFeishu(redactSensitiveText(prompt), 2_800);
+  return chunks.map((chunk, index) => buildMessageCard({
+    session,
+    text: chunk,
+    title: "电脑端已提交消息",
+    template: "blue",
+    sectionTitle: "你的消息",
+    partIndex: index,
+    partCount: chunks.length,
+  }));
+}
+
+export function buildErrorCard(session: SessionRecord, error: string): Card {
+  return buildErrorCards(session, error)[0]!;
+}
+
+export function buildErrorCards(session: SessionRecord, error: string): Card[] {
+  const chunks = splitTextForFeishu(redactSensitiveText(error), 2_800);
+  return (chunks.length > 0 ? chunks : ["未知错误"]).map((chunk, index) =>
+    buildMessageCard({
+      session,
+      text: chunk,
+      title: "Codex 运行错误",
+      template: "red",
+      sectionTitle: "错误信息",
+      partIndex: index,
+      partCount: Math.max(1, chunks.length),
+    })
+  );
+}
+
+function buildMessageCard(options: {
+  session: SessionRecord;
+  text: string;
+  title: string;
+  template: "blue" | "green" | "orange" | "red";
+  sectionTitle: string;
+  partIndex: number;
+  partCount: number;
+  footer?: string;
+}): Card {
+  const messageElements = markdownToFeishuCardElements(options.text, {
+    maxCharacters: Math.max(3_200, options.text.length + 1),
+    maxElements: 100,
+    truncate: false,
+  });
+  const partSuffix = options.partCount > 1
+    ? `（${options.partIndex + 1}/${options.partCount}）`
+    : "";
   return {
     config: { wide_screen_mode: true },
     header: {
-      template: waitingForReply ? "orange" : "green",
+      template: options.template,
       title: {
         tag: "plain_text",
-        content: waitingForReply ? "Codex 等待你回复" : "Codex 本轮已完成",
+        content: `${options.title}${partSuffix}`,
       },
     },
     elements: [
@@ -323,7 +395,7 @@ export function buildStopCard(
         tag: "div",
         text: {
           tag: "lark_md",
-          content: `**会话：** ${sessionLabel(session)}\n**项目：** ${session.projectName}`,
+          content: `**会话：** ${sessionLabel(options.session)}\n**项目：** ${options.session.projectName}`,
         },
       },
       { tag: "hr" },
@@ -331,52 +403,21 @@ export function buildStopCard(
         tag: "div",
         text: {
           tag: "lark_md",
-          content: "**Codex 回复**",
+          content: `**${options.sectionTitle}${partSuffix}**`,
         },
       },
       ...(messageElements.length > 0
         ? messageElements
         : [{
             tag: "div",
-            text: { tag: "plain_text", content: "Codex 已结束本轮处理。" },
+            text: { tag: "plain_text", content: options.text || "（空）" },
           }]),
-      {
-        tag: "note",
-        elements: [
-          {
-            tag: "plain_text",
-            content: continuationHint,
-          },
-        ],
-      },
-    ],
-  };
-}
-
-export function buildErrorCard(session: SessionRecord, error: string): Card {
-  const errorElements = markdownToFeishuCardElements(redactSensitiveText(error), {
-    maxCharacters: 1_600,
-    maxElements: 10,
-  });
-  return {
-    config: { wide_screen_mode: true },
-    header: {
-      template: "red",
-      title: { tag: "plain_text", content: "Codex 运行错误" },
-    },
-    elements: [
-      {
-        tag: "div",
-        text: {
-          tag: "lark_md",
-          content: `**会话：** ${sessionLabel(session)}\n**项目：** ${session.projectName}`,
-        },
-      },
-      { tag: "hr" },
-      { tag: "div", text: { tag: "lark_md", content: "**错误信息**" } },
-      ...(errorElements.length > 0
-        ? errorElements
-        : [{ tag: "div", text: { tag: "plain_text", content: "未知错误" } }]),
+      ...(options.footer
+        ? [{
+            tag: "note",
+            elements: [{ tag: "plain_text", content: options.footer }],
+          }]
+        : []),
     ],
   };
 }

@@ -23,6 +23,7 @@ const emptyRoutes = (): RouteStore => ({ messages: {}, processedInbound: {} });
 const emptyApprovals = (): ApprovalStore => ({ requests: {} });
 const defaultSettings = (): BridgeSettings => ({
   notifyActivity: false,
+  notifyUserPrompts: false,
   autoRetryErrors: false,
   retryMaxAttempts: 3,
   retryIntervalSeconds: 5,
@@ -91,6 +92,7 @@ export class BridgeStore {
       : {};
     this.settings = {
       notifyActivity: loadedSettings.notifyActivity === true,
+      notifyUserPrompts: loadedSettings.notifyUserPrompts === true,
       autoRetryErrors: loadedSettings.autoRetryErrors === true,
       retryMaxAttempts: integerInRange(
         loadedSettings.retryMaxAttempts,
@@ -186,6 +188,10 @@ export class BridgeStore {
           typeof value.notifyActivity === "boolean"
             ? value.notifyActivity
             : this.settings.notifyActivity,
+        notifyUserPrompts:
+          typeof value.notifyUserPrompts === "boolean"
+            ? value.notifyUserPrompts
+            : this.settings.notifyUserPrompts,
         autoRetryErrors:
           typeof value.autoRetryErrors === "boolean"
             ? value.autoRetryErrors
