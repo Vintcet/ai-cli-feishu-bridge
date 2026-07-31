@@ -562,11 +562,13 @@ test("an external session rejects ordinary Feishu replies without a background r
     ]);
     assert.equal(codex.resumeCount, 0);
     assert.equal(codex.prompts.length, 0);
-    assert.equal(
-      feishu.replies.filter((item) => /外部终端打开/.test(item.text)).length,
-      2,
+    assert.deepEqual(
+      feishu.replies.map((item) => item.text),
+      [
+        "Codex 未接收：外部会话不支持飞书输入。请回到原窗口继续。",
+        "Codex 未接收：外部会话不支持飞书输入。请回到原窗口继续。",
+      ],
     );
-    assert.ok(feishu.replies.every((item) => !/已发送给|桥接队列/.test(item.text)));
     assert.equal(controller.health().queuedPrompts, 0);
     assert.equal(
       store.getSession("019faef0-d0bb-7703-af82-17ee9b45397b")?.status,
@@ -602,9 +604,10 @@ test("a managed session steers by default and queues explicitly", async () => {
       managedTerminalId: "terminal999",
     });
     const terminals = new FakeManagedTerminals("terminal999", directory, sessionId);
+    const feishu = new FakeFeishu();
     const controller = new BridgeController(
       store,
-      new FakeFeishu() as unknown as FeishuGateway,
+      feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       terminals as unknown as ManagedTerminalRouter,
       controllerConfig(directory),
@@ -619,6 +622,10 @@ test("a managed session steers by default and queues explicitly", async () => {
       { prompt: "补充这个条件", submitMode: "steer" },
       { prompt: "下一轮再运行测试", submitMode: "queue" },
     ]);
+    assert.deepEqual(
+      feishu.replies.map((item) => item.text),
+      ["Codex 已接收。", "Codex 已接收。"],
+    );
     assert.equal(controller.health().queuedPrompts, 1);
   } finally {
     await rm(directory, { recursive: true, force: true });

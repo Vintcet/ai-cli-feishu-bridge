@@ -1000,7 +1000,7 @@ export class BridgeController {
       await this.respond(
         messageId,
         chatId,
-        "这个群没有绑定到本机 Codex 会话。请从 Codex 飞书助手创建的会话群中操作。",
+        codexNotReceived("当前群未绑定会话。"),
       );
       return;
     }
@@ -1113,7 +1113,7 @@ export class BridgeController {
       await this.respond(
         messageId,
         chatId,
-        completed ? "已把答案交给 Codex。" : "这组问题已经处理或失效。",
+        completed ? CODEX_RECEIVED : codexNotReceived("问题已处理或失效。"),
       );
       return;
     }
@@ -1170,10 +1170,10 @@ export class BridgeController {
           messageId,
           chatId,
           matches.length === 0
-            ? `没有找到 ${address} 对应的活跃会话。发送“会话”查看列表。`
+            ? codexNotReceived(`没有找到 ${address} 对应的活跃会话。`)
             : explicit.kind === "short"
-              ? `${address} 匹配到多个会话，请使用更长的短 ID。`
-              : `${address} 匹配到多个会话，请重新设置一个唯一别名。`,
+              ? codexNotReceived(`${address} 匹配到多个会话。`)
+              : codexNotReceived(`${address} 不是唯一别名。`),
         );
         return;
       }
@@ -1192,8 +1192,8 @@ export class BridgeController {
           messageId,
           chatId,
           activeSessions.length === 0
-            ? "当前没有活跃 Codex 会话。请先在电脑上打开一个 Codex 窗口并运行一轮任务。"
-            : "当前有多个 Codex 窗口，为避免串线，请引用对应通知回复，或发送 @别名 / #短ID 回复内容。发送“会话”可查看列表。",
+            ? codexNotReceived("当前没有活跃会话。")
+            : codexNotReceived("有多个活跃会话，请指定目标。"),
         );
         return;
       }
@@ -1204,8 +1204,8 @@ export class BridgeController {
         messageId,
         chatId,
         groupSession
-          ? `这个群对应的 Codex 窗口已经关闭。可在电脑端历史记录中继续 ${sessionLabel(groupSession)}。`
-          : "对应会话已经不可用，请发送“会话”查看当前列表。",
+          ? codexNotReceived("对应窗口已关闭。")
+          : codexNotReceived("对应会话不可用。"),
       );
       return;
     }
@@ -1214,7 +1214,7 @@ export class BridgeController {
     queueRequested ||= nestedDirectives.queue;
     fileReturnRequested ||= nestedDirectives.fileReturn;
     if (!prompt) {
-      await this.respond(messageId, chatId, "要发送给 Codex 的内容不能为空。");
+      await this.respond(messageId, chatId, codexNotReceived("内容为空。"));
       return;
     }
     if (!this.managedTerminals.isManaged(target)) {
@@ -1327,7 +1327,7 @@ export class BridgeController {
       await this.respond(
         sourceMessageId,
         chatId,
-        `会话 ${sessionLabel(session)} 正在等待审批，请先处理审批卡片。`,
+        codexNotReceived("请先处理待审批操作。"),
       );
       return;
     }
@@ -1335,7 +1335,7 @@ export class BridgeController {
       await this.respond(
         sourceMessageId,
         chatId,
-        `会话 ${sessionLabel(session)} 正在等待补充信息，请引用问题卡片回答，或点击“转回本机回答”。`,
+        codexNotReceived("请先回答待补充问题。"),
       );
       return;
     }
@@ -1344,7 +1344,7 @@ export class BridgeController {
       await this.respond(
         sourceMessageId,
         chatId,
-        `会话 ${sessionLabel(session)} 的窗口仍在启动，暂时不能接收飞书输入。请稍等几秒后再试。`,
+        codexNotReceived("窗口尚未就绪。"),
       );
       return;
     }
@@ -1362,7 +1362,7 @@ export class BridgeController {
       await this.respond(
         sourceMessageId,
         chatId,
-        `会话 ${sessionLabel(session)} 正在运行，已排到桥接队列第 ${queue.length} 位。外部会话会在上一轮退出后按顺序继续；桥接器重启会清空这类内存队列。`,
+        CODEX_RECEIVED,
       );
       return;
     }
@@ -1409,15 +1409,10 @@ export class BridgeController {
               : 0,
           );
         }
-        const acknowledgement = submitMode === "queue"
-          ? `已把消息排到 ${sessionLabel(runningSession)} 的下一轮。当前任务完成后，Codex 会在同一窗口继续处理。`
-          : busy
-            ? `已插入 ${sessionLabel(runningSession)} 当前正在执行的任务。Codex 会在同一窗口接收这条补充。`
-            : `已输入到 ${sessionLabel(runningSession)} 的可见窗口。本地窗口和飞书使用同一个 Codex 进程。`;
         const ackId = await this.respond(
           sourceMessageId,
           chatId,
-          acknowledgement,
+          CODEX_RECEIVED,
         );
         if (ackId) {
           await this.addRoute(ackId, session.sessionId, chatId, "resume_ack");
@@ -1447,7 +1442,7 @@ export class BridgeController {
       await this.respond(
         sourceMessageId,
         chatId,
-        `未能继续 ${sessionLabel(session)}：${truncate(message, 500)}`,
+        codexNotReceived(truncate(message, 160)),
       );
     }
   }
@@ -1470,7 +1465,7 @@ export class BridgeController {
       const ackId = await this.respond(
         item.sourceMessageId,
         item.chatId,
-        `已发送给 ${sessionLabel(session)}。外部会话的后续消息会在桥接侧按顺序排队。`,
+        CODEX_RECEIVED,
       );
       if (ackId) {
         await this.addRoute(ackId, session.sessionId, item.chatId, "resume_ack");
@@ -2446,7 +2441,14 @@ function activityEventFromPayload(payload: ActivityHookPayload): ActivityCardEve
 }
 
 function externalSessionInputBlockedMessage(session: SessionRecord): string {
-  return `会话 ${sessionLabel(session)} 是从外部终端打开的。为避免电脑端和飞书同时运行同一对话，助手不会把普通消息、排队任务或文件请求写入这个会话。请回到原 Codex 窗口继续，或使用桌面助手“新建 Codex”创建同步窗口。审批和补充信息仍可在飞书处理。`;
+  void session;
+  return codexNotReceived("外部会话不支持飞书输入。请回到原窗口继续。");
+}
+
+const CODEX_RECEIVED = "Codex 已接收。";
+
+function codexNotReceived(reason: string): string {
+  return `Codex 未接收：${reason}`;
 }
 
 function isRetryableCodexError(value: string): boolean {
