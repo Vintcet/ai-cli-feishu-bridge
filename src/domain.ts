@@ -14,6 +14,9 @@ export type SessionStatus =
 export interface BridgeSettings {
   notifyActivity: boolean;
   autoRetryErrors: boolean;
+  retryMaxAttempts: number;
+  retryIntervalSeconds: number;
+  retryJitterSeconds: number;
   autoApprove: boolean;
 }
 

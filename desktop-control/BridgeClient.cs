@@ -135,6 +135,9 @@ internal sealed class BridgeClient : IDisposable
             {
                 notifyActivity = settings.NotifyActivity,
                 autoRetryErrors = settings.AutoRetryErrors,
+                retryMaxAttempts = settings.RetryMaxAttempts,
+                retryIntervalSeconds = settings.RetryIntervalSeconds,
+                retryJitterSeconds = settings.RetryJitterSeconds,
                 autoApprove = settings.AutoApprove,
             }),
         };

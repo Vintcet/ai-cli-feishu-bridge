@@ -112,11 +112,17 @@ test("persists notification and automation settings", async () => {
     assert.deepEqual(store.getSettings(), {
       notifyActivity: false,
       autoRetryErrors: false,
+      retryMaxAttempts: 3,
+      retryIntervalSeconds: 5,
+      retryJitterSeconds: 3,
       autoApprove: false,
     });
     await store.updateSettings({
       notifyActivity: true,
       autoRetryErrors: true,
+      retryMaxAttempts: 7,
+      retryIntervalSeconds: 12,
+      retryJitterSeconds: 4,
       autoApprove: true,
     });
     const reopened = new BridgeStore(directory);
@@ -124,6 +130,9 @@ test("persists notification and automation settings", async () => {
     assert.deepEqual(reopened.getSettings(), {
       notifyActivity: true,
       autoRetryErrors: true,
+      retryMaxAttempts: 7,
+      retryIntervalSeconds: 12,
+      retryJitterSeconds: 4,
       autoApprove: true,
     });
   } finally {

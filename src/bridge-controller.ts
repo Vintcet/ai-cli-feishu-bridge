@@ -28,6 +28,7 @@ import type {
   ApprovalRecord,
   ApprovalResolution,
   Binding,
+  BridgeSettings,
   MessageRouteKind,
   PermissionHookPayload,
   RequestUserInputHookPayload,
@@ -356,9 +357,9 @@ export class BridgeController {
   async handleSettingsUpdate(
     value: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    const keys = ["notifyActivity", "autoRetryErrors", "autoApprove"] as const;
-    const update: Record<string, boolean> = {};
-    for (const key of keys) {
+    const booleanKeys = ["notifyActivity", "autoRetryErrors", "autoApprove"] as const;
+    const update: Record<string, boolean | number> = {};
+    for (const key of booleanKeys) {
       if (value[key] !== undefined) {
         if (typeof value[key] !== "boolean") {
           return { ok: false, error: "设置值必须是开关状态。" };
@@ -366,10 +367,33 @@ export class BridgeController {
         update[key] = value[key];
       }
     }
+    const numberSettings = [
+      ["retryMaxAttempts", 1, 20],
+      ["retryIntervalSeconds", 1, 600],
+      ["retryJitterSeconds", 0, 120],
+    ] as const;
+    for (const [key, minimum, maximum] of numberSettings) {
+      if (value[key] === undefined) continue;
+      if (
+        typeof value[key] !== "number" ||
+        !Number.isSafeInteger(value[key]) ||
+        value[key] < minimum ||
+        value[key] > maximum
+      ) {
+        return {
+          ok: false,
+          error: `${key} 必须是 ${minimum} 到 ${maximum} 之间的整数。`,
+        };
+      }
+      update[key] = value[key];
+    }
     if (Object.keys(update).length === 0) {
       return { ok: false, error: "没有可保存的设置。" };
     }
-    return { ok: true, settings: await this.store.updateSettings(update) };
+    return {
+      ok: true,
+      settings: await this.store.updateSettings(update as Partial<BridgeSettings>),
+    };
   }
 
   async handleSessionStartHook(
@@ -700,13 +724,14 @@ export class BridgeController {
     }
     if (codexError) {
       const retryCount = this.managedRetryCounts.get(payload.session_id) ?? 0;
-      const retryDelay = retryDelayMs(retryCount, this.config.retryBaseDelayMs);
+      const retrySettings = this.store.getSettings();
+      const retryDelay = retryDelayMs(retrySettings, this.config.retryBaseDelayMs);
       const canRetry =
-        this.store.getSettings().autoRetryErrors &&
-        retryCount < 3 &&
+        retrySettings.autoRetryErrors &&
+        retryCount < retrySettings.retryMaxAttempts &&
         this.managedTerminals.isReady(session);
       const detail = canRetry
-        ? `${codexError}\n\n助手将在 ${Math.ceil(retryDelay / 1_000)} 秒后自动重试（第 ${retryCount + 1}/3 次）。`
+        ? `${codexError}\n\n助手将在 ${Math.ceil(retryDelay / 1_000)} 秒后自动重试（第 ${retryCount + 1}/${retrySettings.retryMaxAttempts} 次）。`
         : codexError;
       const failedSession = await this.store.upsertSession({
         sessionId: session.sessionId,
@@ -731,8 +756,10 @@ export class BridgeController {
         this.managedRetryCounts.set(payload.session_id, retryCount + 1);
         setTimeout(() => {
           const current = this.store.getSession(payload.session_id);
+          const currentSettings = this.store.getSettings();
           if (
-            !this.store.getSettings().autoRetryErrors ||
+            !currentSettings.autoRetryErrors ||
+            retryCount >= currentSettings.retryMaxAttempts ||
             !current ||
             !this.managedTerminals.isReady(current)
           ) {
@@ -1377,13 +1404,14 @@ export class BridgeController {
       error: reason,
     });
     const attempt = item.retryAttempt ?? 0;
-    const retryDelay = retryDelayMs(attempt, this.config.retryBaseDelayMs);
+    const retrySettings = this.store.getSettings();
+    const retryDelay = retryDelayMs(retrySettings, this.config.retryBaseDelayMs);
     const retrying =
-      this.store.getSettings().autoRetryErrors &&
+      retrySettings.autoRetryErrors &&
       isRetryableCodexError(reason) &&
-      attempt < 3;
+      attempt < retrySettings.retryMaxAttempts;
     const detail = retrying
-      ? `${reason}\n\n助手将在 ${Math.ceil(retryDelay / 1_000)} 秒后自动重试（第 ${attempt + 1}/3 次）。`
+      ? `${reason}\n\n助手将在 ${Math.ceil(retryDelay / 1_000)} 秒后自动重试（第 ${attempt + 1}/${retrySettings.retryMaxAttempts} 次）。`
       : reason;
     for (const binding of this.uniqueChatBindings()) {
       try {
@@ -1400,8 +1428,10 @@ export class BridgeController {
       this.remoteInputLocks.add(session.sessionId);
       setTimeout(() => {
         const current = this.store.getSession(session.sessionId);
+        const currentSettings = this.store.getSettings();
         if (
-          !this.store.getSettings().autoRetryErrors ||
+          !currentSettings.autoRetryErrors ||
+          attempt >= currentSettings.retryMaxAttempts ||
           !current ||
           current.status === "ended"
         ) {
@@ -2169,8 +2199,17 @@ function codexErrorFromMessage(value: string | null | undefined): string | undef
   return truncate(message, 2_000);
 }
 
-function retryDelayMs(attempt: number, baseDelayMs = 3_000): number {
-  return Math.min(30_000, Math.max(1, baseDelayMs) * 2 ** Math.max(0, attempt));
+function retryDelayMs(
+  settings: BridgeSettings,
+  testDelayMs: number | undefined,
+): number {
+  if (testDelayMs !== undefined) {
+    return Math.max(1, testDelayMs);
+  }
+  const jitter = settings.retryJitterSeconds > 0
+    ? Math.floor(Math.random() * (settings.retryJitterSeconds + 1))
+    : 0;
+  return (settings.retryIntervalSeconds + jitter) * 1_000;
 }
 
 function humanizeToolName(toolName: string | undefined): string {

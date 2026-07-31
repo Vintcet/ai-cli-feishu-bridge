@@ -61,6 +61,15 @@ internal sealed class BridgeSettings
     [JsonPropertyName("autoRetryErrors")]
     public bool AutoRetryErrors { get; set; }
 
+    [JsonPropertyName("retryMaxAttempts")]
+    public int RetryMaxAttempts { get; set; } = 3;
+
+    [JsonPropertyName("retryIntervalSeconds")]
+    public int RetryIntervalSeconds { get; set; } = 5;
+
+    [JsonPropertyName("retryJitterSeconds")]
+    public int RetryJitterSeconds { get; set; } = 3;
+
     [JsonPropertyName("autoApprove")]
     public bool AutoApprove { get; set; }
 }

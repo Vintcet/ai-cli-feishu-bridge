@@ -24,8 +24,25 @@ const emptyApprovals = (): ApprovalStore => ({ requests: {} });
 const defaultSettings = (): BridgeSettings => ({
   notifyActivity: false,
   autoRetryErrors: false,
+  retryMaxAttempts: 3,
+  retryIntervalSeconds: 5,
+  retryJitterSeconds: 3,
   autoApprove: false,
 });
+
+function integerInRange(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  fallback: number,
+): number {
+  return typeof value === "number" &&
+      Number.isSafeInteger(value) &&
+      value >= minimum &&
+      value <= maximum
+    ? value
+    : fallback;
+}
 
 export class BridgeStore {
   private readonly bindingFile: string;
@@ -75,6 +92,24 @@ export class BridgeStore {
     this.settings = {
       notifyActivity: loadedSettings.notifyActivity === true,
       autoRetryErrors: loadedSettings.autoRetryErrors === true,
+      retryMaxAttempts: integerInRange(
+        loadedSettings.retryMaxAttempts,
+        1,
+        20,
+        3,
+      ),
+      retryIntervalSeconds: integerInRange(
+        loadedSettings.retryIntervalSeconds,
+        1,
+        600,
+        5,
+      ),
+      retryJitterSeconds: integerInRange(
+        loadedSettings.retryJitterSeconds,
+        0,
+        120,
+        3,
+      ),
       autoApprove: loadedSettings.autoApprove === true,
     };
 
@@ -151,6 +186,24 @@ export class BridgeStore {
           typeof value.autoRetryErrors === "boolean"
             ? value.autoRetryErrors
             : this.settings.autoRetryErrors,
+        retryMaxAttempts: integerInRange(
+          value.retryMaxAttempts,
+          1,
+          20,
+          this.settings.retryMaxAttempts,
+        ),
+        retryIntervalSeconds: integerInRange(
+          value.retryIntervalSeconds,
+          1,
+          600,
+          this.settings.retryIntervalSeconds,
+        ),
+        retryJitterSeconds: integerInRange(
+          value.retryJitterSeconds,
+          0,
+          120,
+          this.settings.retryJitterSeconds,
+        ),
         autoApprove:
           typeof value.autoApprove === "boolean"
             ? value.autoApprove

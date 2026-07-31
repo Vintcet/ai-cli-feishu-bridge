@@ -202,6 +202,50 @@ test("only a private-chat owner can bind and duplicate messages are ignored", as
   }
 });
 
+test("retry settings accept bounded integers and reject invalid values", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-settings-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const controller = new BridgeController(
+      store,
+      new FakeFeishu() as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      controllerConfig(directory),
+    );
+
+    const saved = await controller.handleSettingsUpdate({
+      autoRetryErrors: true,
+      retryMaxAttempts: 20,
+      retryIntervalSeconds: 600,
+      retryJitterSeconds: 120,
+    });
+    assert.equal(saved.ok, true);
+    assert.deepEqual(store.getSettings(), {
+      notifyActivity: false,
+      autoRetryErrors: true,
+      retryMaxAttempts: 20,
+      retryIntervalSeconds: 600,
+      retryJitterSeconds: 120,
+      autoApprove: false,
+    });
+
+    for (const invalid of [
+      { retryMaxAttempts: 0 },
+      { retryMaxAttempts: 1.5 },
+      { retryIntervalSeconds: 601 },
+      { retryJitterSeconds: -1 },
+      { retryJitterSeconds: "3" },
+    ]) {
+      const result = await controller.handleSettingsUpdate(invalid);
+      assert.equal(result.ok, false);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("an external session queues additional Feishu replies", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-lock-"));
   try {
