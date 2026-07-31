@@ -12,6 +12,7 @@ internal static class Program
             ("resume arguments", TestResumeArguments),
             ("full codex command", TestFullCodexCommand),
             ("quoted arguments", TestQuotedArguments),
+            ("opencode arguments", TestOpenCodeArguments),
             ("shell-looking text stays data", TestShellLookingText),
             ("terminal input defaults to steer", TestTerminalInputDefaultsToSteer),
             ("terminal input supports queue", TestTerminalInputSupportsQueue),
@@ -94,6 +95,18 @@ internal static class Program
             ["resume", "session with spaces", "--model", "gpt 5"],
             CodexArgumentParser.Parse(
                 "resume \"session with spaces\" --model \"gpt 5\""));
+    }
+
+    private static void TestOpenCodeArguments()
+    {
+        AssertSequence(
+            ["-s", "019faef0-d0bb-7703-af82-17ee9b45397b"],
+            CodexArgumentParser.ParseOpenCode(
+                "-s 019faef0-d0bb-7703-af82-17ee9b45397b"));
+        AssertSequence(
+            ["--port", "5100", "-s", "019faef0-d0bb-7703-af82-17ee9b45397b"],
+            CodexArgumentParser.ParseOpenCode(
+                "opencode --port 5100 -s 019faef0-d0bb-7703-af82-17ee9b45397b"));
     }
 
     private static void TestShellLookingText()

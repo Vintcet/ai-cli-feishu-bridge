@@ -1,6 +1,6 @@
 # Codex 飞书桥接器
 
-当前版本：`0.13.1`
+当前版本：`0.13.2`
 
 这个本地桥接器把普通 Codex CLI 窗口连接到飞书企业自建应用，支持：
 
@@ -106,8 +106,9 @@
 桌面助手也支持启动 opencode 同步窗口，流程与“新建 Codex”一致：
 
 1. 点击“新建 opencode”，选择项目目录；
-2. 桥接服务会在 `5100–5999` 端口池中为该窗口保留一个仅本机访问的端口；
-3. 助手随后在一个可见的 Windows Terminal 窗口中启动 `opencode --port <端口>`；未安装 Windows Terminal 时回退到普通控制台。
+2. 如需特殊启动方式，在“opencode 启动参数”中填写参数，例如 `-s 019faef0-d0bb-7703-af82-17ee9b45397b`（恢复历史会话）或 `-c`（继续上次会话）；
+3. 桥接服务会在 `5100–5999` 端口池中为该窗口保留一个仅本机访问的端口；
+4. 助手随后在一个可见的 Windows Terminal 窗口中启动 `opencode --port <端口>`（附加填写的参数）；未安装 Windows Terminal 时回退到普通控制台。
 
 opencode 需要先安装并可用：要求 `opencode` 命令在 PATH 中，或位于 `~\.local\bin`、`%APPDATA%\npm`、`%LOCALAPPDATA%\Programs\opencode` 等常见目录。
 

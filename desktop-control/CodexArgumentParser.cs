@@ -5,7 +5,28 @@ namespace CodexFeishuControl;
 
 internal static class CodexArgumentParser
 {
-    public static IReadOnlyList<string> Parse(string? rawArguments)
+    public static IReadOnlyList<string> Parse(string? rawArguments) =>
+        ParseArguments(
+            "codex",
+            "Codex 启动参数无效或过长。",
+            "无法解析 Codex 启动参数。",
+            rawArguments,
+            IsCodexCommand);
+
+    public static IReadOnlyList<string> ParseOpenCode(string? rawArguments) =>
+        ParseArguments(
+            "opencode",
+            "opencode 启动参数无效或过长。",
+            "无法解析 opencode 启动参数。",
+            rawArguments,
+            IsOpenCodeCommand);
+
+    private static IReadOnlyList<string> ParseArguments(
+        string toolCommand,
+        string invalidMessage,
+        string parseFailureMessage,
+        string? rawArguments,
+        Func<string, bool> isToolCommand)
     {
         if (string.IsNullOrWhiteSpace(rawArguments))
         {
@@ -13,13 +34,13 @@ internal static class CodexArgumentParser
         }
         if (rawArguments.Length > 4_000 || rawArguments.IndexOfAny(['\r', '\n']) >= 0)
         {
-            throw new InvalidOperationException("Codex 启动参数无效或过长。");
+            throw new InvalidOperationException(invalidMessage);
         }
 
-        var argumentVector = CommandLineToArgvW($"codex.exe {rawArguments}", out var argumentCount);
+        var argumentVector = CommandLineToArgvW($"{toolCommand}.exe {rawArguments}", out var argumentCount);
         if (argumentVector == IntPtr.Zero)
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "无法解析 Codex 启动参数。");
+            throw new Win32Exception(Marshal.GetLastWin32Error(), parseFailureMessage);
         }
 
         try
@@ -31,7 +52,7 @@ internal static class CodexArgumentParser
                 result.Add(Marshal.PtrToStringUni(valuePointer) ?? "");
             }
 
-            if (result.Count > 0 && IsCodexCommand(result[0]))
+            if (result.Count > 0 && isToolCommand(result[0]))
             {
                 result.RemoveAt(0);
             }
@@ -50,6 +71,14 @@ internal static class CodexArgumentParser
                fileName.Equals("codex.exe", StringComparison.OrdinalIgnoreCase) ||
                fileName.Equals("codex.cmd", StringComparison.OrdinalIgnoreCase) ||
                fileName.Equals("codex.ps1", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsOpenCodeCommand(string value)
+    {
+        var fileName = Path.GetFileName(value);
+        return fileName.Equals("opencode", StringComparison.OrdinalIgnoreCase) ||
+               fileName.Equals("opencode.exe", StringComparison.OrdinalIgnoreCase) ||
+               fileName.Equals("opencode.cmd", StringComparison.OrdinalIgnoreCase);
     }
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

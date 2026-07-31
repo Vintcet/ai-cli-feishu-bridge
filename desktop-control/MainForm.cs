@@ -1027,6 +1027,7 @@ internal sealed class MainForm : Form
             await bridgeClient.LaunchOpenCodeAsync(
                 dialog.SelectedDirectory,
                 dialog.RunAsAdministrator,
+                dialog.OpenCodeArguments,
                 lifetime.Token);
             operationLabel.Text = dialog.RunAsAdministrator
                 ? "已请求管理员启动；完成 UAC 确认后，Windows Terminal 窗口会自动登记 opencode"
