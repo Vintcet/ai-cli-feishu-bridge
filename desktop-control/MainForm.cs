@@ -185,16 +185,62 @@ internal sealed class MainForm : Form
             return;
         }
 
-        // Clear the minimized state before showing the form. Otherwise the
-        // Resize handler immediately hides it back to the tray.
+        var currentBoundsAreVisible = IsOnScreen(Bounds);
+        var restoreBounds = currentBoundsAreVisible
+            ? Bounds
+            : VisibleRestoreBounds();
+
+        // Windows may leave a hidden minimized form at (-32000, -32000).
+        // Restore its state and bounds before making it interactive again.
         if (WindowState == FormWindowState.Minimized)
         {
             WindowState = FormWindowState.Normal;
         }
+        if (!currentBoundsAreVisible)
+        {
+            StartPosition = FormStartPosition.Manual;
+            Bounds = restoreBounds;
+        }
         ShowInTaskbar = true;
         Show();
+        if (!IsOnScreen(Bounds))
+        {
+            Bounds = restoreBounds;
+        }
         BringToFront();
         Activate();
+    }
+
+    private Rectangle VisibleRestoreBounds()
+    {
+        if (IsOnScreen(RestoreBounds))
+        {
+            return RestoreBounds;
+        }
+
+        var area = Screen.FromPoint(Cursor.Position).WorkingArea;
+        var width = Math.Min(Math.Max(MinimumSize.Width, Width), area.Width);
+        var height = Math.Min(Math.Max(MinimumSize.Height, Height), area.Height);
+        return new Rectangle(
+            area.Left + Math.Max(0, (area.Width - width) / 2),
+            area.Top + Math.Max(0, (area.Height - height) / 2),
+            width,
+            height);
+    }
+
+    private static bool IsOnScreen(Rectangle bounds)
+    {
+        if (bounds.Width <= 0 || bounds.Height <= 0)
+        {
+            return false;
+        }
+
+        return Screen.AllScreens.Any(screen =>
+        {
+            var visible = Rectangle.Intersect(screen.WorkingArea, bounds);
+            return visible.Width >= Math.Min(160, bounds.Width) &&
+                visible.Height >= Math.Min(80, bounds.Height);
+        });
     }
 
     private void ExitFromTray()
