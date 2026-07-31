@@ -18,6 +18,11 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 2_000 };
     private readonly CancellationTokenSource lifetime = new();
     private readonly Font gridBoldFont = new("Microsoft YaHei UI", 9F, FontStyle.Bold);
+    private readonly EventWaitHandle activateEvent;
+    private readonly RegisteredWaitHandle activationRegistration;
+    private readonly System.Windows.Forms.Timer activationTimer = new() { Interval = 200 };
+    private readonly NotifyIcon trayIcon = new();
+    private readonly ContextMenuStrip trayMenu = new();
 
     private readonly Label headerStatusLabel = new();
     private readonly Panel headerStatusDot = new();
@@ -40,13 +45,17 @@ internal sealed class MainForm : Form
     private bool refreshing;
     private bool operating;
     private bool closing;
+    private bool exitRequested;
+    private bool trayHintShown;
+    private int activationRequested;
     private string? lastProjectDirectory;
     private BridgeStatus? lastStatus;
     private ApprovalDialog? approvalDialog;
     private readonly HashSet<string> dismissedApprovalIds = [];
 
-    public MainForm()
+    public MainForm(EventWaitHandle activateEvent)
     {
+        this.activateEvent = activateEvent;
         Text = "Codex 飞书助手";
         Icon = SystemIcons.Application;
         StartPosition = FormStartPosition.CenterScreen;
@@ -57,11 +66,48 @@ internal sealed class MainForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
 
         BuildLayout();
+        ConfigureTrayIcon();
+        activationRegistration = ThreadPool.RegisterWaitForSingleObject(
+            activateEvent,
+            (_, timedOut) =>
+            {
+                if (!timedOut)
+                {
+                    Interlocked.Exchange(ref activationRequested, 1);
+                }
+            },
+            null,
+            Timeout.Infinite,
+            executeOnlyOnce: false);
+        activationTimer.Tick += (_, _) =>
+        {
+            if (Interlocked.Exchange(ref activationRequested, 0) == 1)
+            {
+                RestoreFromTray();
+            }
+        };
+        activationTimer.Start();
         refreshTimer.Tick += async (_, _) => await RefreshStatusAsync();
         Shown += async (_, _) =>
         {
+            RestoreFromTray();
             await RefreshStatusAsync();
             refreshTimer.Start();
+        };
+        FormClosing += (_, eventArgs) =>
+        {
+            if (!exitRequested && eventArgs.CloseReason == CloseReason.UserClosing)
+            {
+                eventArgs.Cancel = true;
+                HideToTray(showHint: true);
+            }
+        };
+        Resize += (_, _) =>
+        {
+            if (WindowState == FormWindowState.Minimized)
+            {
+                HideToTray(showHint: false);
+            }
         };
         FormClosed += (_, _) =>
         {
@@ -72,7 +118,68 @@ internal sealed class MainForm : Form
             bridgeClient.Dispose();
             lifetime.Dispose();
             gridBoldFont.Dispose();
+            activationRegistration.Unregister(null);
+            activationTimer.Stop();
+            activationTimer.Dispose();
+            trayIcon.Visible = false;
+            trayIcon.Dispose();
+            trayMenu.Dispose();
         };
+    }
+
+    private void ConfigureTrayIcon()
+    {
+        var openItem = new ToolStripMenuItem("打开 Codex 飞书助手");
+        openItem.Font = new Font(openItem.Font, FontStyle.Bold);
+        openItem.Click += (_, _) => RestoreFromTray();
+        var exitItem = new ToolStripMenuItem("退出");
+        exitItem.Click += (_, _) => ExitFromTray();
+        trayMenu.Items.Add(openItem);
+        trayMenu.Items.Add(new ToolStripSeparator());
+        trayMenu.Items.Add(exitItem);
+
+        trayIcon.Icon = Icon ?? SystemIcons.Application;
+        trayIcon.Text = "Codex 飞书助手";
+        trayIcon.ContextMenuStrip = trayMenu;
+        trayIcon.Visible = true;
+        trayIcon.DoubleClick += (_, _) => RestoreFromTray();
+    }
+
+    private void HideToTray(bool showHint)
+    {
+        ShowInTaskbar = false;
+        Hide();
+        if (showHint && !trayHintShown)
+        {
+            trayHintShown = true;
+            trayIcon.ShowBalloonTip(
+                2500,
+                "Codex 飞书助手仍在运行",
+                "双击托盘图标可重新打开；右键选择“退出”才会完全关闭。",
+                ToolTipIcon.Info);
+        }
+    }
+
+    private void RestoreFromTray()
+    {
+        if (closing || IsDisposed)
+        {
+            return;
+        }
+        ShowInTaskbar = true;
+        Show();
+        if (WindowState == FormWindowState.Minimized)
+        {
+            WindowState = FormWindowState.Normal;
+        }
+        BringToFront();
+        Activate();
+    }
+
+    private void ExitFromTray()
+    {
+        exitRequested = true;
+        Close();
     }
 
     private void BuildLayout()
@@ -922,12 +1029,7 @@ internal sealed class MainForm : Form
             dialog.Dispose();
         };
         approvalDialog = dialog;
-        if (WindowState == FormWindowState.Minimized)
-        {
-            WindowState = FormWindowState.Normal;
-        }
-        Show();
-        BringToFront();
+        RestoreFromTray();
         dialog.Show(this);
         dialog.BringToFront();
         dialog.Activate();
