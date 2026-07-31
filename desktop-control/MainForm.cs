@@ -35,8 +35,7 @@ internal sealed class MainForm : Form
     private readonly DataGridView sessionGrid = new();
     private readonly DataGridView historyGrid = new();
     private readonly TabControl sessionTabs = new();
-    private readonly Button connectButton = new();
-    private readonly Button disconnectButton = new();
+    private readonly Button connectionButton = new();
     private readonly Button newCodexButton = new();
     private readonly Button approvalButton = new();
     private readonly Button aliasButton = new();
@@ -367,8 +366,7 @@ internal sealed class MainForm : Form
             Margin = Padding.Empty,
         };
 
-        ConfigureButton(connectButton, "连接", Primary, Color.White);
-        ConfigureButton(disconnectButton, "断开", Color.White, Danger, Border);
+        ConfigureButton(connectionButton, "连接", Primary, Color.White);
         ConfigureButton(newCodexButton, "新建 Codex", Success, Color.White);
         newCodexButton.Size = new Size(112, 38);
         ConfigureButton(approvalButton, "本机审批", Color.White, Warning, Warning);
@@ -376,23 +374,28 @@ internal sealed class MainForm : Form
         approvalButton.Enabled = false;
         ConfigureButton(refreshButton, "刷新", Color.White, Color.FromArgb(51, 65, 85), Border);
         ConfigureButton(settingsButton, "设置", Color.White, Color.FromArgb(51, 65, 85), Border);
-        ConfigureButton(folderButton, "打开目录", Color.White, Color.FromArgb(51, 65, 85), Border);
 
-        connectButton.Click += async (_, _) => await ConnectAsync();
-        disconnectButton.Click += async (_, _) => await DisconnectAsync();
+        connectionButton.Click += async (_, _) =>
+        {
+            if (lastStatus is null)
+            {
+                await ConnectAsync();
+            }
+            else
+            {
+                await DisconnectAsync();
+            }
+        };
         newCodexButton.Click += async (_, _) => await NewCodexAsync();
         approvalButton.Click += (_, _) => OpenPendingApproval();
         refreshButton.Click += async (_, _) => await RefreshStatusAsync(force: true);
         settingsButton.Click += async (_, _) => await EditSettingsAsync();
-        folderButton.Click += (_, _) => bridgeClient.OpenBridgeFolder();
 
-        buttons.Controls.Add(connectButton);
-        buttons.Controls.Add(disconnectButton);
+        buttons.Controls.Add(connectionButton);
         buttons.Controls.Add(newCodexButton);
         buttons.Controls.Add(approvalButton);
         buttons.Controls.Add(refreshButton);
         buttons.Controls.Add(settingsButton);
-        buttons.Controls.Add(folderButton);
         toolbar.Controls.Add(operationLabel, 0, 0);
         toolbar.Controls.Add(buttons, 1, 0);
         return toolbar;
@@ -495,6 +498,17 @@ internal sealed class MainForm : Form
         aliasButton.Enabled = false;
         aliasButton.Click += async (_, _) => await EditSelectedAliasAsync();
 
+        ConfigureButton(folderButton, "打开目录", Color.White, Color.FromArgb(51, 65, 85), Border);
+        folderButton.Size = new Size(100, 34);
+        folderButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        folderButton.Location = new Point(titlePanel.Width - folderButton.Width - 2, 7);
+        folderButton.Enabled = false;
+        folderButton.Click += (_, _) => OpenSelectedSessionDirectory();
+
+        aliasButton.Location = new Point(
+            folderButton.Left - aliasButton.Width - 8,
+            folderButton.Top);
+
         ConfigureButton(retryGroupButton, "创建飞书群", Color.White, Primary, Border);
         retryGroupButton.Size = new Size(112, 34);
         retryGroupButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
@@ -522,19 +536,23 @@ internal sealed class MainForm : Form
 
         titlePanel.Controls.Add(title);
         titlePanel.Controls.Add(hint);
+        titlePanel.Controls.Add(folderButton);
         titlePanel.Controls.Add(aliasButton);
         titlePanel.Controls.Add(retryGroupButton);
         titlePanel.Controls.Add(resumeSessionButton);
         titlePanel.Controls.Add(deleteHistoryButton);
         titlePanel.Resize += (_, _) =>
         {
-            aliasButton.Left = titlePanel.ClientSize.Width - aliasButton.Width - 2;
+            folderButton.Left = titlePanel.ClientSize.Width - folderButton.Width - 2;
+            aliasButton.Left = folderButton.Left - aliasButton.Width - 8;
             retryGroupButton.Left = aliasButton.Left - retryGroupButton.Width - 8;
             deleteHistoryButton.Left =
-                titlePanel.ClientSize.Width - deleteHistoryButton.Width - 2;
+                folderButton.Left - deleteHistoryButton.Width - 8;
             resumeSessionButton.Left =
                 deleteHistoryButton.Left - resumeSessionButton.Width - 8;
-            hint.Width = Math.Max(160, retryGroupButton.Left - hint.Left - 12);
+            hint.Width = Math.Max(
+                160,
+                Math.Min(retryGroupButton.Left, resumeSessionButton.Left) - hint.Left - 12);
         };
 
         ConfigureSessionGrid();
@@ -585,13 +603,11 @@ internal sealed class MainForm : Form
         sessionGrid.SelectionChanged += (_, _) => UpdateSessionActionState();
         sessionGrid.CellDoubleClick += (_, eventArgs) =>
         {
-            if (eventArgs.RowIndex < 0 ||
-                sessionGrid.Rows[eventArgs.RowIndex].Tag is not CodexSession session ||
-                !Directory.Exists(session.Cwd))
+            if (eventArgs.RowIndex >= 0)
             {
-                return;
+                sessionGrid.CurrentCell = sessionGrid.Rows[eventArgs.RowIndex].Cells[0];
+                OpenSelectedSessionDirectory();
             }
-            Process.Start(new ProcessStartInfo("explorer.exe", session.Cwd) { UseShellExecute = true });
         };
     }
 
@@ -732,6 +748,35 @@ internal sealed class MainForm : Form
             SetOperating(false);
             UpdateSessionActionState();
         }
+    }
+
+    private void OpenSelectedSessionDirectory()
+    {
+        if (operating)
+        {
+            return;
+        }
+        var session = sessionTabs.SelectedIndex == 1
+            ? historyGrid.CurrentRow?.Tag as CodexSession
+            : sessionGrid.CurrentRow?.Tag as CodexSession;
+        if (session is null)
+        {
+            return;
+        }
+        if (!Directory.Exists(session.Cwd))
+        {
+            MessageBox.Show(
+                this,
+                $"工作目录不存在：\r\n{session.Cwd}",
+                "无法打开目录",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+        Process.Start(new ProcessStartInfo("explorer.exe", session.Cwd)
+        {
+            UseShellExecute = true,
+        });
     }
 
     private async Task RetrySelectedSessionGroupAsync()
@@ -1050,13 +1095,12 @@ internal sealed class MainForm : Form
 
         lastStatus = status;
         var feishuState = status.Feishu.State.ToLowerInvariant();
-        var feishuConnected = feishuState == "connected";
         serviceValue.Text = "运行中";
         feishuValue.Text = FeishuStateLabel(feishuState);
         bindingsValue.Text = status.Bindings.ToString();
         sessionsValue.Text = status.ActiveSessions.ToString();
 
-        if (feishuConnected)
+        if (feishuState == "connected")
         {
             SetHeaderStatus("飞书已连接", Success);
         }
@@ -1094,8 +1138,11 @@ internal sealed class MainForm : Form
         {
             operationLabel.Text = $"桥接版本 {status.Version} · 服务运行正常";
         }
-        connectButton.Enabled = !operating && !feishuConnected;
-        disconnectButton.Enabled = !operating;
+        connectionButton.Text = "断开";
+        connectionButton.BackColor = Color.White;
+        connectionButton.ForeColor = Danger;
+        connectionButton.FlatAppearance.BorderColor = Border;
+        connectionButton.Enabled = !operating;
         newCodexButton.Enabled = !operating;
         approvalButton.Enabled =
             !operating && !status.Settings.AutoApprove && status.PendingApprovals > 0;
@@ -1214,8 +1261,11 @@ internal sealed class MainForm : Form
         bindingsValue.Text = "—";
         sessionsValue.Text = "0";
         SetHeaderStatus("服务未运行", Danger);
-        connectButton.Enabled = !operating;
-        disconnectButton.Enabled = false;
+        connectionButton.Text = "连接";
+        connectionButton.BackColor = Primary;
+        connectionButton.ForeColor = Color.White;
+        connectionButton.FlatAppearance.BorderColor = Primary;
+        connectionButton.Enabled = !operating;
         newCodexButton.Enabled = !operating;
         approvalButton.Text = "本机审批";
         approvalButton.Enabled = false;
@@ -1249,8 +1299,7 @@ internal sealed class MainForm : Form
     private void SetOperating(bool value, string? message = null)
     {
         operating = value;
-        connectButton.Enabled = !value;
-        disconnectButton.Enabled = !value;
+        connectionButton.Enabled = !value;
         newCodexButton.Enabled = !value;
         approvalButton.Enabled =
             !value &&
@@ -1271,6 +1320,7 @@ internal sealed class MainForm : Form
         var historySelected = sessionTabs.SelectedIndex == 1;
         aliasButton.Visible = !historySelected;
         retryGroupButton.Visible = !historySelected;
+        folderButton.Visible = true;
         resumeSessionButton.Visible = historySelected;
         deleteHistoryButton.Visible = historySelected;
         aliasButton.Enabled =
@@ -1286,6 +1336,10 @@ internal sealed class MainForm : Form
             historySelected &&
             historyGrid.CurrentRow?.Tag is CodexSession;
         deleteHistoryButton.Enabled = resumeSessionButton.Enabled;
+        folderButton.Enabled = !operating &&
+            (historySelected
+                ? historyGrid.CurrentRow?.Tag is CodexSession
+                : sessionGrid.CurrentRow?.Tag is CodexSession);
     }
 
     private static string FeishuGroupLabel(CodexSession session) =>
