@@ -318,6 +318,7 @@ export class BridgeStore {
       .filter(
         (session) =>
           session.managedByAssistant === true &&
+          !session.historyHiddenAt &&
           !session.sessionId.startsWith("managed-terminal-"),
       )
       .sort(
@@ -402,6 +403,7 @@ export class BridgeStore {
           input.managedByAssistant ??
           current?.managedByAssistant ??
           Boolean(input.managedTerminalId),
+        historyHiddenAt: current?.historyHiddenAt,
       };
       this.sessions.sessions[input.sessionId] = next;
       await this.writeJson(this.sessionFile, this.sessions);
@@ -419,6 +421,24 @@ export class BridgeStore {
         return undefined;
       }
       session.alias = alias;
+      await this.writeJson(this.sessionFile, this.sessions);
+      return session;
+    });
+  }
+
+  async hideSessionFromHistory(
+    sessionId: string,
+  ): Promise<SessionRecord | undefined> {
+    return this.mutate(async () => {
+      const session = this.sessions.sessions[sessionId];
+      if (
+        !session ||
+        session.managedByAssistant !== true ||
+        session.sessionId.startsWith("managed-terminal-")
+      ) {
+        return undefined;
+      }
+      session.historyHiddenAt ??= new Date().toISOString();
       await this.writeJson(this.sessionFile, this.sessions);
       return session;
     });

@@ -54,6 +54,7 @@ export interface SessionRecord {
   managedTerminalId?: string;
   managedTerminalElevated?: boolean;
   managedByAssistant?: boolean;
+  historyHiddenAt?: string;
 }
 
 export interface SessionStore {

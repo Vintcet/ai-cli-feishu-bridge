@@ -74,7 +74,7 @@ const hookServer = startHookHttpServer(
   {
     health: () => ({
       ...controller.health(),
-      version: "0.11.4",
+      version: "0.11.5",
       processId: process.pid,
       startedAt: serviceStartedAt,
       feishu: wsClient.getConnectionStatus(),
@@ -84,6 +84,7 @@ const hookServer = startHookHttpServer(
     managedTerminalUnregister: (payload) =>
       controller.handleManagedTerminalUnregistration(payload),
     sessionAlias: (payload) => controller.handleSessionAliasUpdate(payload),
+    sessionHistoryHide: (payload) => controller.handleSessionHistoryHide(payload),
     localApproval: (payload) => controller.handleLocalApproval(payload),
     settingsUpdate: (payload) => controller.handleSettingsUpdate(payload),
     sessionStart: (payload) => controller.handleSessionStartHook(payload),

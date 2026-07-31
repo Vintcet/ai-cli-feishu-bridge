@@ -173,6 +173,15 @@ internal sealed class AliasUpdateResult
     public string Error { get; set; } = "";
 }
 
+internal sealed class HistoryHideResult
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; set; }
+
+    [JsonPropertyName("error")]
+    public string Error { get; set; } = "";
+}
+
 internal sealed class BridgeApproval
 {
     [JsonPropertyName("requestId")]

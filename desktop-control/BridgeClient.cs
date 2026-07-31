@@ -125,6 +125,43 @@ internal sealed class BridgeClient : IDisposable
         return result;
     }
 
+    public async Task HideSessionFromHistoryAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            throw new InvalidOperationException("会话 ID 参数不正确。");
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "sessions/history/hide")
+        {
+            Content = JsonContent.Create(new { sessionId }),
+        };
+        request.Headers.Add(
+            "X-Codex-Feishu-Control-Token",
+            ReadControlToken(BridgeRoot));
+        using var response = await httpClient.SendAsync(request, cancellationToken);
+        HistoryHideResult? result = null;
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            result = await JsonSerializer.DeserializeAsync<HistoryHideResult>(
+                stream,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
+                cancellationToken);
+        }
+        catch (JsonException)
+        {
+        }
+
+        if (!response.IsSuccessStatusCode || result?.Ok != true)
+        {
+            throw new InvalidOperationException(
+                string.IsNullOrWhiteSpace(result?.Error) ? "删除历史记录失败。" : result.Error);
+        }
+    }
+
     public async Task<BridgeSettings> UpdateSettingsAsync(
         BridgeSettings settings,
         CancellationToken cancellationToken = default)
@@ -476,7 +513,7 @@ internal sealed class BridgeClient : IDisposable
         {
         }
         throw new InvalidOperationException(
-            "找不到本机审批控制令牌。请先点击“连接”，再重新打开 Codex 飞书助手。");
+            "找不到本机控制令牌。请先点击“连接”，再重新打开 Codex 飞书助手。");
     }
 
     public void Dispose() => httpClient.Dispose();

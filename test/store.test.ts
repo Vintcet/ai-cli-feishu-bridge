@@ -248,3 +248,44 @@ test("reopening an ended session records a new openedAt", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("hides assistant history persistently without deleting the session", async () => {
+  const directory = await temporaryDirectory();
+  try {
+    const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const store = new BridgeStore(directory);
+    await store.init();
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "ended",
+      managedByAssistant: true,
+    });
+    await store.upsertSession({
+      sessionId: "external-session",
+      cwd: directory,
+      status: "ended",
+    });
+
+    assert.equal(store.listAssistantManagedSessions().length, 1);
+    const hidden = await store.hideSessionFromHistory(sessionId);
+    assert.ok(hidden?.historyHiddenAt);
+    assert.equal(store.listAssistantManagedSessions().length, 0);
+    assert.equal(store.getSession(sessionId)?.sessionId, sessionId);
+    assert.equal(await store.hideSessionFromHistory("external-session"), undefined);
+
+    const reopened = new BridgeStore(directory);
+    await reopened.init();
+    assert.equal(reopened.listAssistantManagedSessions().length, 0);
+    assert.ok(reopened.getSession(sessionId)?.historyHiddenAt);
+    await reopened.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "running",
+    });
+    assert.equal(reopened.listAssistantManagedSessions().length, 0);
+    assert.ok(reopened.getSession(sessionId)?.historyHiddenAt);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

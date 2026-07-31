@@ -322,6 +322,20 @@ export class BridgeController {
       : { ok: false, error: result.error };
   }
 
+  async handleSessionHistoryHide(
+    value: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const sessionId = typeof value.sessionId === "string" ? value.sessionId.trim() : "";
+    if (!sessionId || sessionId.length > 256) {
+      return { ok: false, error: "会话 ID 参数不正确。" };
+    }
+
+    const session = await this.store.hideSessionFromHistory(sessionId);
+    return session
+      ? { ok: true, sessionId: session.sessionId }
+      : { ok: false, error: "历史记录不存在，或不是由助手创建的会话。" };
+  }
+
   async handleLocalApproval(
     value: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {

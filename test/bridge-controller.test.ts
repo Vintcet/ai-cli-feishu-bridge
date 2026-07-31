@@ -208,6 +208,51 @@ test("only a private-chat owner can bind and duplicate messages are ignored", as
   }
 });
 
+test("history removal hides only assistant-managed sessions", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-history-hide-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const controller = new BridgeController(
+      store,
+      new FakeFeishu() as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      controllerConfig(directory),
+    );
+    const managedSessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    await store.upsertSession({
+      sessionId: managedSessionId,
+      cwd: directory,
+      status: "ended",
+      managedByAssistant: true,
+    });
+    await store.upsertSession({
+      sessionId: "external-session",
+      cwd: directory,
+      status: "ended",
+    });
+
+    assert.equal(
+      (await controller.handleSessionHistoryHide({})).ok,
+      false,
+    );
+    assert.equal(
+      (await controller.handleSessionHistoryHide({ sessionId: "external-session" })).ok,
+      false,
+    );
+    assert.equal(
+      (await controller.handleSessionHistoryHide({ sessionId: managedSessionId })).ok,
+      true,
+    );
+    assert.equal(store.getSession(managedSessionId)?.sessionId, managedSessionId);
+    const health = controller.health() as { historySessions: unknown[] };
+    assert.equal(health.historySessions.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("retry settings accept bounded integers and reject invalid values", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-settings-"));
   try {

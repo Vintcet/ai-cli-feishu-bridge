@@ -41,6 +41,7 @@ internal sealed class MainForm : Form
     private readonly Button approvalButton = new();
     private readonly Button aliasButton = new();
     private readonly Button resumeSessionButton = new();
+    private readonly Button deleteHistoryButton = new();
     private readonly Button settingsButton = new();
     private readonly Button refreshButton = new();
     private readonly Button folderButton = new();
@@ -439,15 +440,26 @@ internal sealed class MainForm : Form
         resumeSessionButton.Visible = false;
         resumeSessionButton.Click += (_, _) => ContinueSelectedHistory();
 
+        ConfigureButton(deleteHistoryButton, "删除记录", Color.White, Danger, Border);
+        deleteHistoryButton.Size = new Size(100, 34);
+        deleteHistoryButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        deleteHistoryButton.Enabled = false;
+        deleteHistoryButton.Visible = false;
+        deleteHistoryButton.Click += async (_, _) => await DeleteSelectedHistoryAsync();
+
         titlePanel.Controls.Add(title);
         titlePanel.Controls.Add(hint);
         titlePanel.Controls.Add(aliasButton);
         titlePanel.Controls.Add(resumeSessionButton);
+        titlePanel.Controls.Add(deleteHistoryButton);
         titlePanel.Resize += (_, _) =>
         {
             aliasButton.Left = titlePanel.ClientSize.Width - aliasButton.Width - 2;
-            resumeSessionButton.Left = titlePanel.ClientSize.Width - resumeSessionButton.Width - 2;
-            hint.Width = Math.Max(160, aliasButton.Left - hint.Left - 12);
+            deleteHistoryButton.Left =
+                titlePanel.ClientSize.Width - deleteHistoryButton.Width - 2;
+            resumeSessionButton.Left =
+                deleteHistoryButton.Left - resumeSessionButton.Width - 8;
+            hint.Width = Math.Max(160, resumeSessionButton.Left - hint.Left - 12);
         };
 
         ConfigureSessionGrid();
@@ -681,6 +693,47 @@ internal sealed class MainForm : Form
         catch (Exception error)
         {
             ShowOperationError("继续对话失败", error);
+        }
+        finally
+        {
+            SetOperating(false);
+            UpdateSessionActionState();
+        }
+    }
+
+    private async Task DeleteSelectedHistoryAsync()
+    {
+        if (operating || historyGrid.CurrentRow?.Tag is not CodexSession session)
+        {
+            return;
+        }
+
+        var confirmation = MessageBox.Show(
+            this,
+            $"确定从助手的历史记录中删除 {SessionDisplayName(session)} 吗？\r\n\r\n" +
+            "这不会删除 Codex 原始对话或项目文件，之后仍可使用完整会话 ID 手动恢复。",
+            "删除历史记录",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+        if (confirmation != DialogResult.Yes)
+        {
+            return;
+        }
+
+        SetOperating(true, $"正在删除 {SessionDisplayName(session)} 的历史记录…");
+        try
+        {
+            await bridgeClient.HideSessionFromHistoryAsync(session.SessionId, lifetime.Token);
+            await RefreshStatusAsync(force: true);
+            operationLabel.Text = $"已从助手历史记录中删除 {SessionDisplayName(session)}";
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception error)
+        {
+            ShowOperationError("删除历史记录失败", error);
         }
         finally
         {
@@ -1089,12 +1142,14 @@ internal sealed class MainForm : Form
         var historySelected = sessionTabs.SelectedIndex == 1;
         aliasButton.Visible = !historySelected;
         resumeSessionButton.Visible = historySelected;
+        deleteHistoryButton.Visible = historySelected;
         aliasButton.Enabled =
             !operating && !historySelected && sessionGrid.CurrentRow?.Tag is CodexSession;
         resumeSessionButton.Enabled =
             !operating &&
             historySelected &&
             historyGrid.CurrentRow?.Tag is CodexSession;
+        deleteHistoryButton.Enabled = resumeSessionButton.Enabled;
     }
 
     private void SyncApprovalDialog(BridgeStatus status)
