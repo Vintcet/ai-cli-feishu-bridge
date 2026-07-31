@@ -40,6 +40,7 @@ internal sealed class MainForm : Form
     private readonly Button newCodexButton = new();
     private readonly Button approvalButton = new();
     private readonly Button aliasButton = new();
+    private readonly Button retryGroupButton = new();
     private readonly Button resumeSessionButton = new();
     private readonly Button deleteHistoryButton = new();
     private readonly Button settingsButton = new();
@@ -445,6 +446,15 @@ internal sealed class MainForm : Form
         aliasButton.Enabled = false;
         aliasButton.Click += async (_, _) => await EditSelectedAliasAsync();
 
+        ConfigureButton(retryGroupButton, "创建飞书群", Color.White, Primary, Border);
+        retryGroupButton.Size = new Size(112, 34);
+        retryGroupButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        retryGroupButton.Location = new Point(
+            aliasButton.Left - retryGroupButton.Width - 8,
+            aliasButton.Top);
+        retryGroupButton.Enabled = false;
+        retryGroupButton.Click += async (_, _) => await RetrySelectedSessionGroupAsync();
+
         ConfigureButton(resumeSessionButton, "继续对话", Success, Color.White);
         resumeSessionButton.Size = new Size(100, 34);
         resumeSessionButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
@@ -464,16 +474,18 @@ internal sealed class MainForm : Form
         titlePanel.Controls.Add(title);
         titlePanel.Controls.Add(hint);
         titlePanel.Controls.Add(aliasButton);
+        titlePanel.Controls.Add(retryGroupButton);
         titlePanel.Controls.Add(resumeSessionButton);
         titlePanel.Controls.Add(deleteHistoryButton);
         titlePanel.Resize += (_, _) =>
         {
             aliasButton.Left = titlePanel.ClientSize.Width - aliasButton.Width - 2;
+            retryGroupButton.Left = aliasButton.Left - retryGroupButton.Width - 8;
             deleteHistoryButton.Left =
                 titlePanel.ClientSize.Width - deleteHistoryButton.Width - 2;
             resumeSessionButton.Left =
                 deleteHistoryButton.Left - resumeSessionButton.Width - 8;
-            hint.Width = Math.Max(160, resumeSessionButton.Left - hint.Left - 12);
+            hint.Width = Math.Max(160, retryGroupButton.Left - hint.Left - 12);
         };
 
         ConfigureSessionGrid();
@@ -511,6 +523,7 @@ internal sealed class MainForm : Form
         sessionGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Queue", HeaderText = "排队", Width = 65 });
         sessionGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Model", HeaderText = "模型", Width = 125 });
         sessionGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Source", HeaderText = "方式", Width = 105 });
+        sessionGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "FeishuGroup", HeaderText = "飞书群", Width = 135 });
         sessionGrid.Columns.Add(new DataGridViewTextBoxColumn
         {
             Name = "Cwd",
@@ -541,6 +554,7 @@ internal sealed class MainForm : Form
         historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ShortId", HeaderText = "会话 ID", Width = 95 });
         historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Model", HeaderText = "模型", Width = 125 });
         historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Mode", HeaderText = "启动方式", Width = 90 });
+        historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "FeishuGroup", HeaderText = "飞书群", Width = 135 });
         historyGrid.Columns.Add(new DataGridViewTextBoxColumn
         {
             Name = "Cwd",
@@ -663,6 +677,33 @@ internal sealed class MainForm : Form
         catch (Exception error)
         {
             ShowOperationError("设置别名失败", error);
+        }
+        finally
+        {
+            SetOperating(false);
+            UpdateSessionActionState();
+        }
+    }
+
+    private async Task RetrySelectedSessionGroupAsync()
+    {
+        if (operating || sessionGrid.CurrentRow?.Tag is not CodexSession session)
+        {
+            return;
+        }
+        SetOperating(true, $"正在为 {SessionDisplayName(session)} 创建飞书群…");
+        try
+        {
+            await bridgeClient.RetrySessionGroupAsync(session.SessionId, lifetime.Token);
+            operationLabel.Text = $"已为 {SessionDisplayName(session)} 创建飞书群";
+            await RefreshStatusAsync(force: true);
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception error)
+        {
+            ShowOperationError("创建飞书群失败", error);
         }
         finally
         {
@@ -1016,7 +1057,7 @@ internal sealed class MainForm : Form
         sessionTabs.TabPages[1].Text = $"历史记录 ({status.HistorySessions.Count})";
 
         sessionGrid.Rows.Clear();
-        foreach (var session in status.Sessions.OrderByDescending(item => ParseTime(item.LastSeenAt)))
+        foreach (var session in status.Sessions)
         {
             var displayedStatus = session.RemoteResumeRunning
                 ? "远程运行中"
@@ -1038,6 +1079,7 @@ internal sealed class MainForm : Form
                 session.QueuedPrompts > 0 ? session.QueuedPrompts.ToString() : "—",
                 session.Model,
                 mode,
+                FeishuGroupLabel(session),
                 session.Cwd,
                 FormatTime(session.OpenedAt),
                 FormatTime(session.LastSeenAt));
@@ -1072,6 +1114,16 @@ internal sealed class MainForm : Form
             {
                 row.Cells["Status"].Style.ForeColor = Success;
             }
+            if (session.FeishuChatStatus == "error")
+            {
+                row.Cells["FeishuGroup"].Style.ForeColor = Danger;
+                row.Cells["FeishuGroup"].ToolTipText = session.FeishuChatError;
+            }
+            else if (session.FeishuChatStatus == "pending")
+            {
+                row.Cells["FeishuGroup"].Style.ForeColor = Warning;
+                row.Cells["FeishuGroup"].ToolTipText = "等待飞书建群权限或正在创建会话群。";
+            }
         }
         RestoreGridState(sessionGrid, selectedSessionId, sessionScrollIndex);
         historyGrid.Rows.Clear();
@@ -1086,6 +1138,7 @@ internal sealed class MainForm : Form
                 $"#{session.ShortId}",
                 string.IsNullOrWhiteSpace(session.Model) ? "—" : session.Model,
                 session.ManagedTerminalElevated ? "管理员" : "普通",
+                FeishuGroupLabel(session),
                 session.Cwd,
                 FormatTime(session.OpenedAt),
                 FormatTime(string.IsNullOrWhiteSpace(session.EndedAt)
@@ -1168,16 +1221,34 @@ internal sealed class MainForm : Form
     {
         var historySelected = sessionTabs.SelectedIndex == 1;
         aliasButton.Visible = !historySelected;
+        retryGroupButton.Visible = !historySelected;
         resumeSessionButton.Visible = historySelected;
         deleteHistoryButton.Visible = historySelected;
         aliasButton.Enabled =
             !operating && !historySelected && sessionGrid.CurrentRow?.Tag is CodexSession;
+        retryGroupButton.Enabled =
+            !operating &&
+            !historySelected &&
+            sessionGrid.CurrentRow?.Tag is CodexSession session &&
+            session.ManagedByAssistant &&
+            session.FeishuChatStatus != "connected";
         resumeSessionButton.Enabled =
             !operating &&
             historySelected &&
             historyGrid.CurrentRow?.Tag is CodexSession;
         deleteHistoryButton.Enabled = resumeSessionButton.Enabled;
     }
+
+    private static string FeishuGroupLabel(CodexSession session) =>
+        session.FeishuChatStatus switch
+        {
+            "connected" when !string.IsNullOrWhiteSpace(session.FeishuChatName) =>
+                session.FeishuChatName,
+            "connected" => "已连接",
+            "pending" => "待创建",
+            "error" => "创建失败",
+            _ => "—",
+        };
 
     private void SyncApprovalDialog(BridgeStatus status)
     {

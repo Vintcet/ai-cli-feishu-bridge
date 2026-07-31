@@ -160,6 +160,18 @@ internal sealed class CodexSession
     [JsonPropertyName("managedByAssistant")]
     public bool ManagedByAssistant { get; set; }
 
+    [JsonPropertyName("feishuChatId")]
+    public string FeishuChatId { get; set; } = "";
+
+    [JsonPropertyName("feishuChatName")]
+    public string FeishuChatName { get; set; } = "";
+
+    [JsonPropertyName("feishuChatStatus")]
+    public string FeishuChatStatus { get; set; } = "not_applicable";
+
+    [JsonPropertyName("feishuChatError")]
+    public string FeishuChatError { get; set; } = "";
+
     [JsonPropertyName("queuedPrompts")]
     public int QueuedPrompts { get; set; }
 }
@@ -168,6 +180,18 @@ internal sealed class AliasUpdateResult
 {
     [JsonPropertyName("ok")]
     public bool Ok { get; set; }
+
+    [JsonPropertyName("error")]
+    public string Error { get; set; } = "";
+}
+
+internal sealed class SessionGroupRetryResult
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; set; }
+
+    [JsonPropertyName("chatName")]
+    public string ChatName { get; set; } = "";
 
     [JsonPropertyName("error")]
     public string Error { get; set; } = "";

@@ -344,6 +344,11 @@ export class BridgeStore {
     managedTerminalElevated?: boolean | null;
     managedByAssistant?: boolean;
     openedAt?: string;
+    feishuChatId?: string;
+    feishuChatName?: string;
+    feishuChatCreatedAt?: string;
+    feishuChatError?: string | null;
+    feishuChatErrorAt?: string | null;
   }): Promise<SessionRecord> {
     return this.mutate(async () => {
       const current = this.sessions.sessions[input.sessionId];
@@ -363,6 +368,14 @@ export class BridgeStore {
       const hasManagedTerminalElevated = Object.prototype.hasOwnProperty.call(
         input,
         "managedTerminalElevated",
+      );
+      const hasFeishuChatError = Object.prototype.hasOwnProperty.call(
+        input,
+        "feishuChatError",
+      );
+      const hasFeishuChatErrorAt = Object.prototype.hasOwnProperty.call(
+        input,
+        "feishuChatErrorAt",
       );
       const next: SessionRecord = {
         sessionId: input.sessionId,
@@ -404,6 +417,16 @@ export class BridgeStore {
           current?.managedByAssistant ??
           Boolean(input.managedTerminalId),
         historyHiddenAt: current?.historyHiddenAt,
+        feishuChatId: input.feishuChatId ?? current?.feishuChatId,
+        feishuChatName: input.feishuChatName ?? current?.feishuChatName,
+        feishuChatCreatedAt:
+          input.feishuChatCreatedAt ?? current?.feishuChatCreatedAt,
+        feishuChatError: hasFeishuChatError
+          ? input.feishuChatError ?? undefined
+          : current?.feishuChatError,
+        feishuChatErrorAt: hasFeishuChatErrorAt
+          ? input.feishuChatErrorAt ?? undefined
+          : current?.feishuChatErrorAt,
       };
       this.sessions.sessions[input.sessionId] = next;
       await this.writeJson(this.sessionFile, this.sessions);
@@ -421,6 +444,56 @@ export class BridgeStore {
         return undefined;
       }
       session.alias = alias;
+      await this.writeJson(this.sessionFile, this.sessions);
+      return session;
+    });
+  }
+
+  findSessionByFeishuChatId(chatId: string): SessionRecord | undefined {
+    return Object.values(this.sessions.sessions).find(
+      (session) => session.feishuChatId === chatId,
+    );
+  }
+
+  async setSessionFeishuChat(
+    sessionId: string,
+    value: {
+      chatId: string;
+      chatName: string;
+      createdAt?: string;
+    },
+  ): Promise<SessionRecord | undefined> {
+    return this.mutate(async () => {
+      const session = this.sessions.sessions[sessionId];
+      if (!session) {
+        return undefined;
+      }
+      session.feishuChatId = value.chatId;
+      session.feishuChatName = value.chatName;
+      session.feishuChatCreatedAt = value.createdAt ?? new Date().toISOString();
+      delete session.feishuChatError;
+      delete session.feishuChatErrorAt;
+      await this.writeJson(this.sessionFile, this.sessions);
+      return session;
+    });
+  }
+
+  async setSessionFeishuChatError(
+    sessionId: string,
+    error: string | undefined,
+  ): Promise<SessionRecord | undefined> {
+    return this.mutate(async () => {
+      const session = this.sessions.sessions[sessionId];
+      if (!session) {
+        return undefined;
+      }
+      if (error) {
+        session.feishuChatError = error;
+        session.feishuChatErrorAt = new Date().toISOString();
+      } else {
+        delete session.feishuChatError;
+        delete session.feishuChatErrorAt;
+      }
       await this.writeJson(this.sessionFile, this.sessions);
       return session;
     });
@@ -452,6 +525,17 @@ export class BridgeStore {
       return;
     }
     await this.mutate(async () => {
+      const sourceSession = this.sessions.sessions[sourceSessionId];
+      const targetSession = this.sessions.sessions[targetSessionId];
+      if (sourceSession && targetSession) {
+        targetSession.alias ??= sourceSession.alias;
+        targetSession.managedByAssistant ??= sourceSession.managedByAssistant;
+        targetSession.feishuChatId ??= sourceSession.feishuChatId;
+        targetSession.feishuChatName ??= sourceSession.feishuChatName;
+        targetSession.feishuChatCreatedAt ??= sourceSession.feishuChatCreatedAt;
+        targetSession.feishuChatError ??= sourceSession.feishuChatError;
+        targetSession.feishuChatErrorAt ??= sourceSession.feishuChatErrorAt;
+      }
       delete this.sessions.sessions[sourceSessionId];
       for (const route of Object.values(this.routes.messages)) {
         if (route.sessionId === sourceSessionId) {

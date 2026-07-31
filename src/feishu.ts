@@ -24,6 +24,53 @@ export class FeishuGateway {
     return this.messageIdFromResponse(response, "send text");
   }
 
+  async createSessionGroup(
+    ownerOpenId: string,
+    name: string,
+    description: string,
+  ): Promise<{ chatId: string; name: string }> {
+    const response = await this.client.im.v1.chat.create({
+      params: { user_id_type: "open_id" },
+      data: {
+        name,
+        description,
+        owner_id: ownerOpenId,
+        user_id_list: [ownerOpenId],
+        group_message_type: "chat",
+        chat_mode: "group",
+        chat_type: "private",
+        join_message_visibility: "only_owner",
+        leave_message_visibility: "only_owner",
+        membership_approval: "approval_required",
+      },
+    }).catch((error: unknown) => {
+      throw new Error(`Feishu create group failed: ${feishuRequestError(error)}`);
+    });
+    if (response.code !== 0 || !response.data?.chat_id) {
+      throw new Error(
+        `Feishu create group failed: ${response.code ?? "unknown"} ${response.msg ?? "unknown error"}`,
+      );
+    }
+    return {
+      chatId: response.data.chat_id,
+      name: response.data.name?.trim() || name,
+    };
+  }
+
+  async updateSessionGroupName(chatId: string, name: string): Promise<void> {
+    const response = await this.client.im.v1.chat.update({
+      path: { chat_id: chatId },
+      data: { name },
+    }).catch((error: unknown) => {
+      throw new Error(`Feishu update group failed: ${feishuRequestError(error)}`);
+    });
+    if (response.code !== 0) {
+      throw new Error(
+        `Feishu update group failed: ${response.code ?? "unknown"} ${response.msg ?? "unknown error"}`,
+      );
+    }
+  }
+
   async replyText(messageId: string, text: string): Promise<string> {
     const response = await this.client.im.v1.message.reply({
       path: { message_id: messageId },
@@ -166,6 +213,37 @@ export class FeishuGateway {
     }
     return response.data.message_id;
   }
+}
+
+function feishuRequestError(error: unknown): string {
+  if (!error || typeof error !== "object") {
+    return String(error);
+  }
+  const item = error as {
+    message?: unknown;
+    response?: {
+      status?: unknown;
+      data?: unknown;
+    };
+  };
+  const status = typeof item.response?.status === "number"
+    ? `HTTP ${item.response.status}`
+    : "";
+  const data = item.response?.data;
+  let detail = "";
+  if (data && typeof data === "object") {
+    const payload = data as Record<string, unknown>;
+    const code = payload.code;
+    const msg = payload.msg ?? payload.message;
+    detail = [
+      typeof code === "number" || typeof code === "string" ? `code ${code}` : "",
+      typeof msg === "string" ? msg : "",
+    ].filter(Boolean).join(" ");
+  } else if (typeof data === "string") {
+    detail = data.trim();
+  }
+  const fallback = typeof item.message === "string" ? item.message : String(error);
+  return [status, detail || fallback].filter(Boolean).join(": ");
 }
 
 function feishuFileType(

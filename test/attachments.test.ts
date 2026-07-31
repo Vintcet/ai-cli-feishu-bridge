@@ -54,6 +54,17 @@ test("parses Feishu image, file, and post content", () => {
   assert.equal(post.attachments.length, 1);
 });
 
+test("removes the bot mention prefix from a group text message", () => {
+  assert.deepEqual(
+    parseFeishuContent({
+      message_type: "text",
+      content: JSON.stringify({ text: "@_user_1 请继续处理" }),
+      mentions: [{ key: "@_user_1" }],
+    }),
+    { text: "请继续处理", attachments: [] },
+  );
+});
+
 test("attachment paths are added to the Codex prompt", () => {
   const prompt = appendAttachmentsToPrompt("分析它", [
     { absolutePath: "K:\\project\\shot.png", fileName: "shot.png", size: 100 },

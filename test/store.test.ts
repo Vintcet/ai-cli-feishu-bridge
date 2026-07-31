@@ -289,3 +289,42 @@ test("hides assistant history persistently without deleting the session", async 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("moves a managed placeholder's Feishu group to the real session", async () => {
+  const directory = await temporaryDirectory();
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    await store.upsertSession({
+      sessionId: "managed-terminal-placeholder",
+      cwd: directory,
+      status: "ready",
+      source: "managed_window",
+      managedTerminalId: "terminal-placeholder",
+      managedByAssistant: true,
+    });
+    await store.setSessionFeishuChat("managed-terminal-placeholder", {
+      chatId: "oc_session_group",
+      chatName: "Codex｜project",
+    });
+    await store.upsertSession({
+      sessionId: "019faef0-d0bb-7703-af82-17ee9b45397b",
+      cwd: directory,
+      status: "waiting",
+      managedTerminalId: "terminal-placeholder",
+      managedByAssistant: true,
+    });
+
+    await store.replaceSessionReferences(
+      "managed-terminal-placeholder",
+      "019faef0-d0bb-7703-af82-17ee9b45397b",
+    );
+    assert.equal(store.getSession("managed-terminal-placeholder"), undefined);
+    assert.equal(
+      store.getSession("019faef0-d0bb-7703-af82-17ee9b45397b")?.feishuChatId,
+      "oc_session_group",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

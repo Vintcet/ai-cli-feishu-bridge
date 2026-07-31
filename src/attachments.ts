@@ -91,7 +91,9 @@ export function parseFeishuContent(message: Record<string, unknown> | undefined)
 
   if (messageType === "text") {
     return {
-      text: typeof content.text === "string" ? content.text.trim() : "",
+      text: typeof content.text === "string"
+        ? stripLeadingMentions(content.text, message?.mentions)
+        : "",
       attachments: [],
     };
   }
@@ -123,6 +125,37 @@ export function parseFeishuContent(message: Record<string, unknown> | undefined)
     return parsePostContent(content);
   }
   return { text: "", attachments: [] };
+}
+
+function stripLeadingMentions(text: string, value: unknown): string {
+  let normalized = text.trim();
+  if (!Array.isArray(value)) {
+    return normalized;
+  }
+  const keys = value
+    .map((mention) =>
+      mention && typeof mention === "object" && !Array.isArray(mention) &&
+          typeof (mention as Record<string, unknown>).key === "string"
+        ? String((mention as Record<string, unknown>).key)
+        : "",
+    )
+    .filter(Boolean);
+  let changed = true;
+  while (changed && normalized) {
+    changed = false;
+    for (const key of keys) {
+      const pattern = new RegExp(`^${escapeRegExp(key)}[\\s:：,，]*`, "u");
+      if (pattern.test(normalized)) {
+        normalized = normalized.replace(pattern, "").trim();
+        changed = true;
+      }
+    }
+  }
+  return normalized;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export function appendAttachmentsToPrompt(

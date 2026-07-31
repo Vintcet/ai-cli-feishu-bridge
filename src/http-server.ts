@@ -23,6 +23,9 @@ export interface HookHttpHandlers {
     payload: Record<string, unknown>,
   ) => Promise<Record<string, unknown>>;
   sessionAlias: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  sessionGroupRetry: (
+    payload: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>;
   sessionHistoryHide: (
     payload: Record<string, unknown>,
   ) => Promise<Record<string, unknown>>;
@@ -120,6 +123,21 @@ async function routeRequest(
       return;
     }
     const result = await handlers.sessionAlias(body as Record<string, unknown>);
+    sendJson(response, result.ok === true ? 200 : 400, result);
+    return;
+  }
+
+  if (url.pathname === "/sessions/feishu-group/retry") {
+    if (!hasValidControlToken(request, controlToken)) {
+      sendJson(response, 401, { ok: false, error: "本机控制身份验证失败。" });
+      return;
+    }
+    const body = await readJsonBody(request);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      sendJson(response, 400, { ok: false, error: "请求格式不正确。" });
+      return;
+    }
+    const result = await handlers.sessionGroupRetry(body as Record<string, unknown>);
     sendJson(response, result.ok === true ? 200 : 400, result);
     return;
   }

@@ -55,6 +55,11 @@ export interface SessionRecord {
   managedTerminalElevated?: boolean;
   managedByAssistant?: boolean;
   historyHiddenAt?: string;
+  feishuChatId?: string;
+  feishuChatName?: string;
+  feishuChatCreatedAt?: string;
+  feishuChatError?: string;
+  feishuChatErrorAt?: string;
 }
 
 export interface SessionStore {

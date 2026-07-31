@@ -85,6 +85,37 @@ internal sealed class BridgeClient : IDisposable
         }
     }
 
+    public async Task RetrySessionGroupAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "sessions/feishu-group/retry")
+        {
+            Content = JsonContent.Create(new { sessionId }),
+        };
+        request.Headers.Add(
+            "X-Codex-Feishu-Control-Token",
+            ReadControlToken(BridgeRoot));
+        using var response = await httpClient.SendAsync(request, cancellationToken);
+        SessionGroupRetryResult? result = null;
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            result = await JsonSerializer.DeserializeAsync<SessionGroupRetryResult>(
+                stream,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
+                cancellationToken);
+        }
+        catch (JsonException)
+        {
+        }
+        if (!response.IsSuccessStatusCode || result?.Ok != true)
+        {
+            throw new InvalidOperationException(
+                string.IsNullOrWhiteSpace(result?.Error) ? "创建飞书会话群失败。" : result.Error);
+        }
+    }
+
     public async Task<ApprovalResolveResult> ResolveApprovalAsync(
         string requestId,
         string resolution,

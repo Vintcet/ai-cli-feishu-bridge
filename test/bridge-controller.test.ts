@@ -16,7 +16,15 @@ class FakeFeishu {
   readonly cards: Array<{ chatId: string; card: Record<string, unknown>; messageId: string }> = [];
   readonly patchedCards: Array<{ messageId: string; card: Record<string, unknown> }> = [];
   readonly localFiles: Array<{ chatId: string; filePath: string }> = [];
+  readonly createdGroups: Array<{
+    ownerOpenId: string;
+    name: string;
+    description: string;
+    chatId: string;
+  }> = [];
+  readonly renamedGroups: Array<{ chatId: string; name: string }> = [];
   private counter = 0;
+  createGroupError?: Error;
 
   async replyText(messageId: string, text: string): Promise<string> {
     this.replies.push({ messageId, text });
@@ -26,6 +34,23 @@ class FakeFeishu {
   async sendText(_chatId: string, text: string): Promise<string> {
     this.replies.push({ messageId: "new", text });
     return `message-${++this.counter}`;
+  }
+
+  async createSessionGroup(
+    ownerOpenId: string,
+    name: string,
+    description: string,
+  ): Promise<{ chatId: string; name: string }> {
+    if (this.createGroupError) {
+      throw this.createGroupError;
+    }
+    const chatId = `session-chat-${++this.counter}`;
+    this.createdGroups.push({ ownerOpenId, name, description, chatId });
+    return { chatId, name };
+  }
+
+  async updateSessionGroupName(chatId: string, name: string): Promise<void> {
+    this.renamedGroups.push({ chatId, name });
   }
 
   async sendCard(chatId: string, card: Record<string, unknown>): Promise<string> {
@@ -166,6 +191,24 @@ function messageEvent(
   };
 }
 
+function groupMessageEvent(
+  messageId: string,
+  openId: string,
+  chatId: string,
+  text: string,
+): Record<string, unknown> {
+  return {
+    sender: { sender_id: { open_id: openId } },
+    message: {
+      message_id: messageId,
+      chat_id: chatId,
+      chat_type: "group",
+      message_type: "text",
+      content: JSON.stringify({ text }),
+    },
+  };
+}
+
 test("only a private-chat owner can bind and duplicate messages are ignored", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-controller-"));
   try {
@@ -187,7 +230,7 @@ test("only a private-chat owner can bind and duplicate messages are ignored", as
       messageEvent("bind-group", "owner", `绑定 ${code}`, "group"),
     );
     assert.equal(store.listBindings().length, 0);
-    assert.match(feishu.replies.at(-1)?.text ?? "", /私聊/);
+    assert.match(feishu.replies.at(-1)?.text ?? "", /请先.*绑定/);
 
     await controller.handleFeishuMessage(
       messageEvent("bind-owner", "owner", `绑定 ${code}`),
@@ -203,6 +246,143 @@ test("only a private-chat owner can bind and duplicate messages are ignored", as
     await controller.handleFeishuMessage(statusEvent);
     await controller.handleFeishuMessage(statusEvent);
     assert.equal(feishu.replies.length, repliesBeforeStatus + 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("creates one private session group and routes group replies to that session", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-session-group-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      { openId: "owner", chatId: "chat-owner", chatType: "p2p", boundAt: new Date().toISOString() },
+      code,
+    );
+    const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const terminalId = "terminal-session-group";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "waiting",
+      source: "startup",
+      managedTerminalId: terminalId,
+      managedByAssistant: true,
+    });
+    const feishu = new FakeFeishu();
+    const terminals = new FakeManagedTerminals(terminalId, directory, sessionId);
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      terminals as unknown as ManagedTerminalRouter,
+      controllerConfig(directory),
+    );
+
+    const approval = controller.handlePermissionHook({
+      hook_event_name: "PermissionRequest",
+      session_id: sessionId,
+      turn_id: "group-create-turn",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      tool_name: "shell_command",
+      tool_input: { command: "echo test" },
+      transcript_path: null,
+      managed_terminal_id: terminalId,
+    });
+    for (let attempt = 0; attempt < 20 && feishu.createdGroups.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(feishu.createdGroups.length, 1);
+    const groupId = feishu.createdGroups[0]!.chatId;
+    assert.equal(store.getSession(sessionId)?.feishuChatId, groupId);
+    const approvalRecord = store.listApprovals().at(-1);
+    assert.ok(approvalRecord);
+    await controller.handleLocalApproval({
+      requestId: approvalRecord.requestId,
+      resolution: "allow",
+    });
+    await approval;
+
+    await controller.handleFeishuMessage(
+      groupMessageEvent("group-prompt", "owner", groupId, "请继续处理"),
+    );
+    assert.equal(terminals.sends.length, 1);
+    assert.equal(terminals.sends[0]?.prompt, "请继续处理");
+
+    await controller.handleFeishuMessage(
+      groupMessageEvent("group-status-prompt", "owner", groupId, "状态"),
+    );
+    await controller.handleFeishuMessage(
+      groupMessageEvent("group-help-prompt", "owner", groupId, "帮助"),
+    );
+    await controller.handleFeishuMessage(
+      groupMessageEvent("group-bind-prompt", "owner", groupId, "绑定"),
+    );
+    await controller.handleFeishuMessage(
+      groupMessageEvent("group-unbind-prompt", "owner", groupId, "解绑"),
+    );
+    assert.deepEqual(
+      terminals.sends.slice(-4).map((item) => item.prompt),
+      ["状态", "帮助", "绑定", "解绑"],
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failed session group create waits for an explicit desktop retry", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-group-retry-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      { openId: "owner", chatId: "chat-owner", chatType: "p2p", boundAt: new Date().toISOString() },
+      code,
+    );
+    const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const terminalId = "terminal-session-group-retry";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "waiting",
+      managedTerminalId: terminalId,
+      managedByAssistant: true,
+    });
+    const feishu = new FakeFeishu();
+    feishu.createGroupError = new Error("missing create chat permission");
+    let attempts = 0;
+    const originalCreate = feishu.createSessionGroup.bind(feishu);
+    feishu.createSessionGroup = async (...args) => {
+      attempts += 1;
+      return await originalCreate(...args);
+    };
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new FakeManagedTerminals(terminalId, directory, sessionId) as unknown as ManagedTerminalRouter,
+      controllerConfig(directory),
+    );
+
+    await controller.initializeSessionGroups();
+    assert.equal(attempts, 1);
+    assert.match(store.getSession(sessionId)?.feishuChatError ?? "", /permission/);
+
+    await controller.initializeSessionGroups();
+    assert.equal(attempts, 1);
+
+    feishu.createGroupError = undefined;
+    const retry = await controller.handleSessionGroupRetry({ sessionId });
+    assert.equal(retry.ok, true);
+    assert.equal(attempts, 2);
+    assert.ok(store.getSession(sessionId)?.feishuChatId);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

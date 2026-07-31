@@ -158,6 +158,10 @@ export class BridgeController {
   private readonly fileReturnRequests = new Map<string, FileReturnRequest[]>();
   private readonly activityStates = new Map<string, ActivityState>();
   private readonly managedRetryCounts = new Map<string, number>();
+  private readonly sessionGroupCreates = new Map<
+    string,
+    Promise<SessionRecord | undefined>
+  >();
   private readonly attachmentStore: LocalAttachmentStore;
 
   constructor(
@@ -173,6 +177,18 @@ export class BridgeController {
       config.inboundAttachmentMaxCount,
       config.uploadTtlMs,
     );
+  }
+
+  async initializeSessionGroups(): Promise<void> {
+    if (!this.store.getOwnerOpenId()) {
+      return;
+    }
+    const sessions = this.store
+      .listOpenSessions()
+      .filter((session) => session.managedByAssistant === true);
+    for (const session of sessions) {
+      await this.ensureSessionGroup(session.sessionId);
+    }
   }
 
   health(): Record<string, unknown> {
@@ -212,6 +228,16 @@ export class BridgeController {
       managedTerminalOnline: this.managedTerminals.isOnline(session),
       managedTerminalReady: this.managedTerminals.isReady(session),
       managedByAssistant: session.managedByAssistant === true,
+      feishuChatId: session.feishuChatId ?? "",
+      feishuChatName: session.feishuChatName ?? "",
+      feishuChatStatus: session.feishuChatId
+        ? "connected"
+        : session.managedByAssistant === true
+          ? session.feishuChatError
+            ? "error"
+            : "pending"
+          : "not_applicable",
+      feishuChatError: session.feishuChatError ?? "",
       queuedPrompts:
         (this.externalQueues.get(session.sessionId)?.length ?? 0) +
         (this.managedQueueDepth.get(session.sessionId) ?? 0),
@@ -325,6 +351,40 @@ export class BridgeController {
           },
         }
       : { ok: false, error: result.error };
+  }
+
+  async handleSessionGroupRetry(
+    value: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const sessionId = typeof value.sessionId === "string" ? value.sessionId.trim() : "";
+    if (!sessionId || sessionId.length > 256) {
+      return { ok: false, error: "会话 ID 参数不正确。" };
+    }
+    const session = this.store.getSession(sessionId);
+    if (!session || session.managedByAssistant !== true) {
+      return { ok: false, error: "这个会话不存在，或不是由助手创建的。" };
+    }
+    if (session.feishuChatId) {
+      return {
+        ok: true,
+        alreadyConnected: true,
+        chatId: session.feishuChatId,
+        chatName: session.feishuChatName ?? "",
+      };
+    }
+    await this.store.setSessionFeishuChatError(sessionId, undefined);
+    const updated = await this.ensureSessionGroup(sessionId, true);
+    return updated?.feishuChatId
+      ? {
+          ok: true,
+          alreadyConnected: false,
+          chatId: updated.feishuChatId,
+          chatName: updated.feishuChatName ?? "",
+        }
+      : {
+          ok: false,
+          error: updated?.feishuChatError || "飞书群创建失败，请检查应用权限后重试。",
+        };
   }
 
   async handleSessionHistoryHide(
@@ -498,9 +558,13 @@ export class BridgeController {
       }
       await this.store.replaceSessionReferences(placeholder.sessionId, session.sessionId);
     }
+    const currentSession = this.store.getSession(session.sessionId) ?? session;
     console.log(
-      `[session] ${payload.source} registered session #${session.shortId}.`,
+      `[session] ${payload.source} registered session #${currentSession.shortId}.`,
     );
+    if (currentSession.managedByAssistant === true && !currentSession.feishuChatId) {
+      void this.ensureSessionGroup(currentSession.sessionId);
+    }
     return {};
   }
 
@@ -561,7 +625,7 @@ export class BridgeController {
     };
     await this.store.createApproval(approval);
 
-    const bindings = this.uniqueChatBindings();
+    const recipients = await this.notificationRecipients(session);
     const resultPromise = new Promise<ApprovalResolution>((resolve) => {
       const timer = setTimeout(() => {
         void this.completeApproval(approval.requestId, "timeout");
@@ -570,10 +634,10 @@ export class BridgeController {
     });
 
     let sentCount = 0;
-    for (const binding of bindings) {
+    for (const recipient of recipients) {
       try {
         const messageId = await this.feishu.sendCard(
-          binding.chatId,
+          recipient.chatId,
           buildApprovalCard(session, approval),
         );
         sentCount += 1;
@@ -581,7 +645,7 @@ export class BridgeController {
         await this.addRoute(
           messageId,
           payload.session_id,
-          binding.chatId,
+          recipient.chatId,
           "approval",
           approval.requestId,
         );
@@ -647,8 +711,8 @@ export class BridgeController {
         ? { managedTerminalElevated: payload.managed_terminal_elevated }
         : {}),
     });
-    const bindings = this.uniqueChatBindings();
-    if (bindings.length === 0) {
+    const recipients = await this.notificationRecipients(session);
+    if (recipients.length === 0) {
       return {};
     }
 
@@ -673,10 +737,10 @@ export class BridgeController {
     });
 
     let sentCount = 0;
-    for (const binding of bindings) {
+    for (const recipient of recipients) {
       try {
         const messageId = await this.feishu.sendCard(
-          binding.chatId,
+          recipient.chatId,
           buildUserInputCard(session, requestId, payload.tool_input.questions),
         );
         sentCount += 1;
@@ -684,7 +748,7 @@ export class BridgeController {
         await this.addRoute(
           messageId,
           payload.session_id,
-          binding.chatId,
+          recipient.chatId,
           "input",
           requestId,
         );
@@ -775,13 +839,13 @@ export class BridgeController {
         status: "error",
         error: codexError,
       });
-      for (const binding of this.uniqueChatBindings()) {
+      for (const recipient of await this.notificationRecipients(failedSession)) {
         try {
           const messageId = await this.feishu.sendCard(
-            binding.chatId,
+            recipient.chatId,
             buildErrorCard(failedSession, detail),
           );
-          await this.addRoute(messageId, payload.session_id, binding.chatId, "error");
+          await this.addRoute(messageId, payload.session_id, recipient.chatId, "error");
         } catch (error) {
           console.error("[stop] Failed to send a Codex error card:", error);
         }
@@ -818,14 +882,14 @@ export class BridgeController {
     );
     const message = fileDirectives.displayMessage || "Codex 已结束本轮处理。";
     let sentCount = 0;
-    for (const binding of this.uniqueChatBindings()) {
+    for (const recipient of await this.notificationRecipients(session)) {
       try {
         const messageId = await this.feishu.sendCard(
-          binding.chatId,
+          recipient.chatId,
           buildStopCard(session, message),
         );
         sentCount += 1;
-        await this.addRoute(messageId, payload.session_id, binding.chatId, "stop");
+        await this.addRoute(messageId, payload.session_id, recipient.chatId, "stop");
       } catch (error) {
         console.error("[stop] Failed to send a Feishu completion card:", error);
       }
@@ -870,16 +934,10 @@ export class BridgeController {
       `[message] Received Feishu ${String(message?.message_type ?? "text")} (${text.length} chars, ${parsedContent.attachments.length} attachments, ${chatType}).`,
     );
 
-    const bindAttempt = parseBindCommand(text, this.config.bindCommand);
+    const bindAttempt = chatType === "p2p"
+      ? parseBindCommand(text, this.config.bindCommand)
+      : { matched: false };
     if (bindAttempt.matched) {
-      if (chatType !== "p2p") {
-        await this.respond(
-          messageId,
-          chatId,
-          "为保护本机 Codex，绑定只能在与机器人的私聊中完成。",
-        );
-        return;
-      }
       const result = await this.store.bindOwner(
         {
           openId,
@@ -912,10 +970,13 @@ export class BridgeController {
           ? "绑定成功，你已成为这台电脑上 Codex 助手的唯一管理员。"
           : "管理员绑定已恢复。现在可以继续接收通知和回复 Codex。",
       );
+      void this.initializeSessionGroups().catch((error) => {
+        console.warn("[feishu] Could not initialize existing session groups:", error);
+      });
       return;
     }
 
-    if (text === "解绑") {
+    if (chatType === "p2p" && text === "解绑") {
       const removed = await this.store.removeBinding(openId);
       await this.respond(messageId, chatId, removed ? "已解绑。" : "当前账号还没有绑定。");
       return;
@@ -928,6 +989,18 @@ export class BridgeController {
         this.store.getOwnerOpenId()
           ? "飞书连接正常，但这个助手只允许已设置的管理员账号操作。"
           : `飞书连接正常。请先在电脑端查看随机绑定码，然后私聊发送“${this.config.bindCommand} 绑定码”。`,
+      );
+      return;
+    }
+
+    const groupSession = chatType === "p2p"
+      ? undefined
+      : this.store.findSessionByFeishuChatId(chatId);
+    if (chatType !== "p2p" && !groupSession) {
+      await this.respond(
+        messageId,
+        chatId,
+        "这个群没有绑定到本机 Codex 会话。请从 Codex 飞书助手创建的会话群中操作。",
       );
       return;
     }
@@ -951,13 +1024,20 @@ export class BridgeController {
         await this.respond(
           messageId,
           chatId,
-          `已安全保存 ${parsedContent.attachments.length} 个附件（当前暂存 ${staged.length} 个）。下一条请发送处理要求；有多个窗口时请写成“@别名 要求”或“#短ID 要求”。`,
+          groupSession
+            ? `已安全保存 ${parsedContent.attachments.length} 个附件（当前暂存 ${staged.length} 个）。下一条直接发送处理要求即可。`
+            : `已安全保存 ${parsedContent.attachments.length} 个附件（当前暂存 ${staged.length} 个）。下一条请发送处理要求；有多个窗口时请写成“@别名 要求”或“#短ID 要求”。`,
         );
         return;
       }
     }
 
-    if (text === "状态") {
+    // Session groups are a direct Codex input surface. Keep bridge
+    // administration in the bot's private chat so words such as “状态” or
+    // “帮助” can still be sent to the corresponding Codex session.
+    const isPrivateChat = chatType === "p2p";
+
+    if (isPrivateChat && text === "状态") {
       const sessions = this.listActiveSessions();
       const pending = sessions.filter((session) => session.status === "pending_approval").length;
       const queued = [...this.externalQueues.values()].reduce(
@@ -975,22 +1055,24 @@ export class BridgeController {
       return;
     }
 
-    if (text === "会话" || text.toLowerCase() === "sessions") {
+    if (isPrivateChat && (text === "会话" || text.toLowerCase() === "sessions")) {
       await this.respond(messageId, chatId, this.formatSessionList());
       return;
     }
 
-    const aliasCommand = parseAliasCommand(text);
-    if (aliasCommand) {
-      await this.handleFeishuAliasCommand(aliasCommand, messageId, chatId);
-      return;
-    }
-    if (/^别名(?:\s|$)/.test(text)) {
-      await this.respond(messageId, chatId, aliasCommandUsage());
-      return;
+    if (isPrivateChat) {
+      const aliasCommand = parseAliasCommand(text);
+      if (aliasCommand) {
+        await this.handleFeishuAliasCommand(aliasCommand, messageId, chatId);
+        return;
+      }
+      if (/^别名(?:\s|$)/.test(text)) {
+        await this.respond(messageId, chatId, aliasCommandUsage());
+        return;
+      }
     }
 
-    if (text === "帮助") {
+    if (isPrivateChat && text === "帮助") {
       await this.respond(
         messageId,
         chatId,
@@ -1067,7 +1149,16 @@ export class BridgeController {
     let queueRequested = leadingDirectives.queue;
     let fileReturnRequested = leadingDirectives.fileReturn;
 
-    if (explicit) {
+    if (groupSession) {
+      target = this.listActiveSessions().find(
+        (session) => session.sessionId === groupSession.sessionId,
+      );
+      // A session group is already an unambiguous route. Ignore @alias/#id
+      // prefixes here so one group can never accidentally steer another session.
+      if (explicit) {
+        prompt = explicit.prompt;
+      }
+    } else if (explicit) {
       const matches = explicit.kind === "short"
         ? this.findActiveSessionsByShortToken(explicit.token)
         : this.findActiveSessionsByAlias(explicit.token);
@@ -1109,7 +1200,13 @@ export class BridgeController {
     }
 
     if (!target) {
-      await this.respond(messageId, chatId, "对应会话已经不可用，请发送“会话”查看当前列表。");
+      await this.respond(
+        messageId,
+        chatId,
+        groupSession
+          ? `这个群对应的 Codex 窗口已经关闭。可在电脑端历史记录中继续 ${sessionLabel(groupSession)}。`
+          : "对应会话已经不可用，请发送“会话”查看当前列表。",
+      );
       return;
     }
     const nestedDirectives = parsePromptDirectives(prompt);
@@ -1456,13 +1553,13 @@ export class BridgeController {
     const detail = retrying
       ? `${reason}\n\n助手将在 ${Math.ceil(retryDelay / 1_000)} 秒后自动重试（第 ${attempt + 1}/${retrySettings.retryMaxAttempts} 次）。`
       : reason;
-    for (const binding of this.uniqueChatBindings()) {
+    for (const recipient of await this.notificationRecipients(failedSession)) {
       try {
         const messageId = await this.feishu.sendCard(
-          binding.chatId,
+          recipient.chatId,
           buildErrorCard(failedSession, detail),
         );
-        await this.addRoute(messageId, session.sessionId, binding.chatId, "error");
+        await this.addRoute(messageId, session.sessionId, recipient.chatId, "error");
       } catch (error) {
         console.error("[resume] Failed to send an error notification:", error);
       }
@@ -1623,15 +1720,15 @@ export class BridgeController {
         state.startedAt,
         state.completed,
       );
-      for (const binding of this.uniqueChatBindings()) {
+      for (const recipient of await this.notificationRecipients(session)) {
         try {
-          const existingMessageId = state.messageIds.get(binding.chatId);
+          const existingMessageId = state.messageIds.get(recipient.chatId);
           if (existingMessageId) {
             await this.feishu.patchCard(existingMessageId, card);
           } else {
-            const messageId = await this.feishu.sendCard(binding.chatId, card);
-            state.messageIds.set(binding.chatId, messageId);
-            await this.addRoute(messageId, sessionId, binding.chatId, "activity");
+            const messageId = await this.feishu.sendCard(recipient.chatId, card);
+            state.messageIds.set(recipient.chatId, messageId);
+            await this.addRoute(messageId, sessionId, recipient.chatId, "activity");
           }
         } catch (error) {
           console.error("[activity] Failed to send or patch a progress card:", error);
@@ -1964,6 +2061,11 @@ export class BridgeController {
         persistentSession.sessionId,
         undefined,
       );
+      if (updated?.feishuChatId) {
+        await this.renameSessionGroup(updated).catch((error) => {
+          console.warn("[feishu] Could not rename session group:", error);
+        });
+      }
       return updated
         ? { ok: true, session: updated }
         : { ok: false, error: "会话不存在或已经失效。" };
@@ -1989,6 +2091,11 @@ export class BridgeController {
     }
 
     const updated = await this.store.setSessionAlias(persistentSession.sessionId, alias);
+    if (updated?.feishuChatId) {
+      await this.renameSessionGroup(updated).catch((error) => {
+        console.warn("[feishu] Could not rename session group:", error);
+      });
+    }
     return updated
       ? { ok: true, session: updated }
       : { ok: false, error: "会话不存在或已经失效。" };
@@ -2100,6 +2207,109 @@ export class BridgeController {
       byChat.set(binding.chatId, binding);
     }
     return [...byChat.values()];
+  }
+
+  private async notificationRecipients(
+    session: SessionRecord,
+  ): Promise<Array<{ chatId: string; binding?: Binding }>> {
+    if (session.managedByAssistant === true) {
+      const ensured = await this.ensureSessionGroup(session.sessionId);
+      if (ensured?.feishuChatId) {
+        return [{ chatId: ensured.feishuChatId }];
+      }
+    }
+    return this.uniqueChatBindings().map((binding) => ({
+      chatId: binding.chatId,
+      binding,
+    }));
+  }
+
+  private async ensureSessionGroup(
+    sessionId: string,
+    forceRetry = false,
+  ): Promise<SessionRecord | undefined> {
+    const session = this.store.getSession(sessionId);
+    if (!session || session.managedByAssistant !== true) {
+      return session;
+    }
+    if (session.feishuChatId) {
+      return session;
+    }
+    // Persisted failures are retried only from the desktop action. This keeps
+    // ordinary Codex notifications from repeatedly calling the create-chat
+    // API while permissions are still missing.
+    if (session.feishuChatError && !forceRetry) {
+      return session;
+    }
+    const ownerOpenId = this.store.getOwnerOpenId();
+    if (!ownerOpenId) {
+      return session;
+    }
+    const pending = this.sessionGroupCreates.get(sessionId);
+    if (pending) {
+      return await pending;
+    }
+    const operation = this.createSessionGroup(session, ownerOpenId);
+    this.sessionGroupCreates.set(sessionId, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.sessionGroupCreates.get(sessionId) === operation) {
+        this.sessionGroupCreates.delete(sessionId);
+      }
+    }
+  }
+
+  private async createSessionGroup(
+    session: SessionRecord,
+    ownerOpenId: string,
+  ): Promise<SessionRecord | undefined> {
+    const name = this.sessionGroupName(session);
+    try {
+      const group = await this.feishu.createSessionGroup(
+        ownerOpenId,
+        name,
+        `Codex 会话 ${session.shortId} · ${session.cwd}`,
+      );
+      const updated = await this.store.setSessionFeishuChat(session.sessionId, {
+        chatId: group.chatId,
+        chatName: group.name,
+      });
+      if (updated) {
+        try {
+          await this.feishu.sendText(
+            group.chatId,
+            `已连接到 ${sessionLabel(updated)}。以后这个群里的消息都会发送到对应 Codex 窗口。`,
+          );
+        } catch (error) {
+          console.warn("[feishu] Session group created, but welcome message failed:", error);
+        }
+      }
+      console.log(`[feishu] Created session group ${group.chatId} for #${session.shortId}.`);
+      return updated ?? session;
+    } catch (error) {
+      const detail = truncate(error instanceof Error ? error.message : String(error), 500);
+      await this.store.setSessionFeishuChatError(session.sessionId, detail);
+      console.warn(`[feishu] Could not create session group for #${session.shortId}: ${detail}`);
+      return this.store.getSession(session.sessionId) ?? session;
+    }
+  }
+
+  private async renameSessionGroup(session: SessionRecord): Promise<void> {
+    if (!session.feishuChatId) {
+      return;
+    }
+    const name = this.sessionGroupName(session);
+    await this.feishu.updateSessionGroupName(session.feishuChatId, name);
+    await this.store.setSessionFeishuChat(session.sessionId, {
+      chatId: session.feishuChatId,
+      chatName: name,
+      createdAt: session.feishuChatCreatedAt,
+    });
+  }
+
+  private sessionGroupName(session: SessionRecord): string {
+    return `Codex｜${session.alias || session.projectName || session.shortId}`.slice(0, 60);
   }
 
   private async respond(

@@ -74,7 +74,7 @@ const hookServer = startHookHttpServer(
   {
     health: () => ({
       ...controller.health(),
-      version: "0.11.9",
+      version: "0.12.0",
       processId: process.pid,
       startedAt: serviceStartedAt,
       feishu: wsClient.getConnectionStatus(),
@@ -84,6 +84,7 @@ const hookServer = startHookHttpServer(
     managedTerminalUnregister: (payload) =>
       controller.handleManagedTerminalUnregistration(payload),
     sessionAlias: (payload) => controller.handleSessionAliasUpdate(payload),
+    sessionGroupRetry: (payload) => controller.handleSessionGroupRetry(payload),
     sessionHistoryHide: (payload) => controller.handleSessionHistoryHide(payload),
     localApproval: (payload) => controller.handleLocalApproval(payload),
     settingsUpdate: (payload) => controller.handleSettingsUpdate(payload),
@@ -115,5 +116,9 @@ console.log(`Starting Feishu long connection for app ${bridgeConfig.appId.slice(
 console.log(
   `Commands: “${bridgeConfig.bindCommand}”, “状态”, “会话”, “别名”, “排队”, “发文件”, “帮助”. Multiple Codex windows are routed by alias or session id.`,
 );
+
+void controller.initializeSessionGroups().catch((error) => {
+  console.warn("[feishu] Could not initialize session groups:", error);
+});
 
 void wsClient.start({ eventDispatcher });
