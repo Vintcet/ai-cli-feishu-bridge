@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.ComponentModel;
 using System.IO.Pipes;
 using System.Net.Http.Json;
 using System.Runtime.InteropServices;
@@ -88,7 +89,11 @@ internal static class ManagedTerminalHost
                 elevated,
                 powershell,
                 cancellation.Token);
-            var pipeTask = RunPipeServerAsync(terminalId, powershell, cancellation.Token);
+            var pipeTask = RunPipeServerAsync(
+                terminalId,
+                elevated,
+                powershell,
+                cancellation.Token);
             powershell.WaitForExit();
             cancellation.Cancel();
             try { pipeTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
@@ -245,6 +250,7 @@ internal static class ManagedTerminalHost
 
     private static async Task RunPipeServerAsync(
         string terminalId,
+        bool elevated,
         Process powershell,
         CancellationToken cancellationToken)
     {
@@ -253,7 +259,7 @@ internal static class ManagedTerminalHost
         {
             try
             {
-                await using var pipe = CreatePipeServer(pipeName);
+                await using var pipe = CreatePipeServer(pipeName, elevated);
                 await pipe.WaitForConnectionAsync(cancellationToken);
                 object response;
                 try
@@ -289,7 +295,7 @@ internal static class ManagedTerminalHost
         }
     }
 
-    private static NamedPipeServerStream CreatePipeServer(string pipeName)
+    private static NamedPipeServerStream CreatePipeServer(string pipeName, bool elevated)
     {
         using var identity = WindowsIdentity.GetCurrent();
         var user = identity.User
@@ -301,7 +307,7 @@ internal static class ManagedTerminalHost
             user,
             PipeAccessRights.FullControl,
             AccessControlType.Allow));
-        return NamedPipeServerStreamAcl.Create(
+        var pipe = NamedPipeServerStreamAcl.Create(
             pipeName,
             PipeDirection.InOut,
             1,
@@ -310,6 +316,61 @@ internal static class ManagedTerminalHost
             16_384,
             16_384,
             security);
+        if (elevated)
+        {
+            SetMediumIntegrityLabel(pipe);
+        }
+        return pipe;
+    }
+
+    private static void SetMediumIntegrityLabel(NamedPipeServerStream pipe)
+    {
+        const string mediumIntegritySddl = "S:(ML;;NW;;;ME)";
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptor(
+                mediumIntegritySddl,
+                1,
+                out var securityDescriptor,
+                out _))
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "无法创建同步管道的完整性标签。");
+        }
+        try
+        {
+            if (!GetSecurityDescriptorSacl(
+                    securityDescriptor,
+                    out var saclPresent,
+                    out var sacl,
+                    out _) ||
+                !saclPresent ||
+                sacl == IntPtr.Zero)
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "无法读取同步管道的完整性标签。");
+            }
+            const uint labelSecurityInformation = 0x00000010;
+            const int kernelObject = 6;
+            var result = SetSecurityInfo(
+                pipe.SafePipeHandle.DangerousGetHandle(),
+                kernelObject,
+                labelSecurityInformation,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                sacl);
+            if (result != 0)
+            {
+                throw new Win32Exception(
+                    (int)result,
+                    "无法允许桌面助手连接管理员 Codex 窗口。");
+            }
+        }
+        finally
+        {
+            LocalFree(securityDescriptor);
+        }
     }
 
     private static void InjectPrompt(TerminalInputRequest input)
@@ -544,4 +605,33 @@ internal static class ManagedTerminalHost
     private static extern bool AssignProcessToJobObject(
         SafeFileHandle job,
         IntPtr process);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(
+        string stringSecurityDescriptor,
+        uint stringSecurityDescriptorRevision,
+        out IntPtr securityDescriptor,
+        out uint securityDescriptorSize);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetSecurityDescriptorSacl(
+        IntPtr securityDescriptor,
+        [MarshalAs(UnmanagedType.Bool)] out bool saclPresent,
+        out IntPtr sacl,
+        [MarshalAs(UnmanagedType.Bool)] out bool saclDefaulted);
+
+    [DllImport("advapi32.dll")]
+    private static extern uint SetSecurityInfo(
+        IntPtr handle,
+        int objectType,
+        uint securityInformation,
+        IntPtr owner,
+        IntPtr group,
+        IntPtr dacl,
+        IntPtr sacl);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
 }

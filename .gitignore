@@ -9,6 +9,7 @@ desktop-control/**/bin/
 desktop-control/**/obj/
 desktop-control/publish/
 desktop-control/**/publish*/
+/publish/
 desktop-control/ui-test*.png
 *.exe
 *.exe.bak-*
