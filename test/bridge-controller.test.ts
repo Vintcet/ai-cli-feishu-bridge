@@ -297,6 +297,53 @@ test("retry settings accept bounded integers and reject invalid values", async (
   }
 });
 
+test("health keeps active sessions in opening order when activity changes", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-order-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const olderId = "019faef0-d0bb-7703-af82-17ee9b453971";
+    const newerId = "019faef0-d0bb-7703-af82-17ee9b453972";
+    await store.upsertSession({
+      sessionId: olderId,
+      cwd: path.join(directory, "older"),
+      status: "waiting",
+      source: "startup",
+      clientProcessId: process.pid,
+      openedAt: "2026-07-31T08:00:00.000Z",
+    });
+    await store.upsertSession({
+      sessionId: newerId,
+      cwd: path.join(directory, "newer"),
+      status: "waiting",
+      source: "startup",
+      clientProcessId: process.pid,
+      openedAt: "2026-07-31T09:00:00.000Z",
+    });
+    await store.upsertSession({
+      sessionId: olderId,
+      cwd: path.join(directory, "older"),
+      status: "running",
+      source: "startup",
+      clientProcessId: process.pid,
+    });
+    const controller = new BridgeController(
+      store,
+      new FakeFeishu() as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      controllerConfig(directory),
+    );
+
+    const sessions = (controller.health() as {
+      sessions: Array<{ sessionId: string }>;
+    }).sessions;
+    assert.deepEqual(sessions.map((item) => item.sessionId), [olderId, newerId]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("an external session rejects ordinary Feishu replies without a background resume", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-lock-"));
   try {

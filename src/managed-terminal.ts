@@ -214,6 +214,27 @@ export class ManagedTerminalRouter {
     prompt: string,
     submitMode: TerminalSubmitMode,
   ): Promise<void> {
+    let lastError: Error | undefined;
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      try {
+        await this.sendOnce(terminalId, prompt, submitMode);
+        return;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (!isRetryablePipeError(lastError) || attempt === 4) {
+          throw lastError;
+        }
+        await new Promise((resolve) => setTimeout(resolve, attempt * 150));
+      }
+    }
+    throw lastError ?? new Error("无法连接托管 Codex 窗口。");
+  }
+
+  private async sendOnce(
+    terminalId: string,
+    prompt: string,
+    submitMode: TerminalSubmitMode,
+  ): Promise<void> {
     const pipePath = `\\\\.\\pipe\\CodexFeishu.${terminalId}`;
     await new Promise<void>((resolve, reject) => {
       const socket = net.createConnection(pipePath);
@@ -248,13 +269,25 @@ export class ManagedTerminalRouter {
           finish(new Error("托管终端返回了无法识别的结果。"));
         }
       });
-      socket.once("timeout", () => finish(new Error("连接托管 Codex 窗口超时。")));
-      socket.once("error", () =>
-        finish(new Error("对应的 Codex 窗口已经关闭或暂时无法接收输入。")),
+      socket.once("timeout", () =>
+        finish(pipeError("ETIMEDOUT", "连接托管 Codex 窗口超时。")),
       );
+      socket.once("error", (error: NodeJS.ErrnoException) => {
+        if (error.code === "EACCES") {
+          finish(pipeError(
+            error.code,
+            "管理员 Codex 窗口拒绝了桥接连接。请用最新版桌面助手重新打开这个会话。",
+          ));
+          return;
+        }
+        finish(pipeError(
+          error.code ?? "EPIPE",
+          "对应的 Codex 窗口暂时无法接收输入。",
+        ));
+      });
       socket.once("close", () => {
         if (!settled) {
-          finish(new Error("对应的 Codex 窗口在接收回复前已关闭。"));
+          finish(pipeError("ECONNRESET", "对应的 Codex 窗口在接收回复前已关闭。"));
         }
       });
     });
@@ -267,6 +300,22 @@ export class ManagedTerminalRouter {
       }
     }
   }
+}
+
+function pipeError(code: string, message: string): Error {
+  const error = new Error(message) as NodeJS.ErrnoException;
+  error.code = code;
+  return error;
+}
+
+function isRetryablePipeError(error: Error): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" ||
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "EBUSY" ||
+    code === "EPIPE" ||
+    code === "ETIMEDOUT";
 }
 
 function normalizeCwd(cwd: string): string {

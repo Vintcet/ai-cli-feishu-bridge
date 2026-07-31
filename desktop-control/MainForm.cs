@@ -61,7 +61,7 @@ internal sealed class MainForm : Form
     {
         this.activateEvent = activateEvent;
         Text = "Codex 飞书助手";
-        Icon = SystemIcons.Application;
+        Icon = LoadApplicationIcon();
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(1280, 760);
         MinimumSize = new Size(1040, 640);
@@ -129,6 +129,19 @@ internal sealed class MainForm : Form
             trayIcon.Dispose();
             trayMenu.Dispose();
         };
+    }
+
+    private static Icon LoadApplicationIcon()
+    {
+        try
+        {
+            return Icon.ExtractAssociatedIcon(Application.ExecutablePath)
+                ?? (Icon)SystemIcons.Application.Clone();
+        }
+        catch (Exception)
+        {
+            return (Icon)SystemIcons.Application.Clone();
+        }
     }
 
     private void ConfigureTrayIcon()

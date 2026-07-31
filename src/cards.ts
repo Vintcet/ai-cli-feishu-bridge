@@ -11,6 +11,7 @@ import {
   sessionLabel,
   truncate,
 } from "./domain.js";
+import { markdownToFeishuCardElements } from "./feishu-markdown.js";
 
 type Card = Record<string, unknown>;
 
@@ -243,12 +244,21 @@ export function buildActivityCard(
   startedAt: string,
   completed = false,
 ): Card {
-  const eventText = events
-    .map((event) => {
-      const detail = event.detail ? `\n> ${truncate(redactSensitiveText(event.detail), 500)}` : "";
-      return `- ${formatActivityTime(event.at)}　${event.label}${detail}`;
-    })
-    .join("\n");
+  const eventElements = events.flatMap((event) => [
+    {
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: `**${formatActivityTime(event.at)}　${event.label}**`,
+      },
+    },
+    ...(event.detail
+      ? markdownToFeishuCardElements(redactSensitiveText(event.detail), {
+          maxCharacters: 500,
+          maxElements: 2,
+        })
+      : []),
+  ]);
   return {
     config: { wide_screen_mode: true, update_multi: true },
     header: {
@@ -267,13 +277,9 @@ export function buildActivityCard(
         },
       },
       { tag: "hr" },
-      {
-        tag: "div",
-        text: {
-          tag: "lark_md",
-          content: eventText || "正在准备任务…",
-        },
-      },
+      ...(eventElements.length > 0
+        ? eventElements
+        : [{ tag: "div", text: { tag: "plain_text", content: "正在准备任务…" } }]),
       ...(!completed
         ? [
             {
@@ -295,10 +301,11 @@ export function buildStopCard(
   session: SessionRecord,
   assistantMessage: string,
 ): Card {
-  const safeMessage = truncate(
-    formatForFeishu(redactSensitiveText(assistantMessage)),
-    3200,
-  );
+  const safeMessage = redactSensitiveText(assistantMessage).trim();
+  const messageElements = markdownToFeishuCardElements(safeMessage, {
+    maxCharacters: 3_200,
+    maxElements: 20,
+  });
   const waitingForReply = looksLikeQuestion(safeMessage);
   const replyHint = session.alias
     ? `引用回复本消息即可继续；也可发送 @${session.alias} 回复内容，或 #${session.shortId} 回复内容。`
@@ -325,9 +332,15 @@ export function buildStopCard(
         tag: "div",
         text: {
           tag: "lark_md",
-          content: `**Codex 回复**\n\n${safeMessage || "Codex 已结束本轮处理。"}`,
+          content: "**Codex 回复**",
         },
       },
+      ...(messageElements.length > 0
+        ? messageElements
+        : [{
+            tag: "div",
+            text: { tag: "plain_text", content: "Codex 已结束本轮处理。" },
+          }]),
       {
         tag: "note",
         elements: [
@@ -342,6 +355,10 @@ export function buildStopCard(
 }
 
 export function buildErrorCard(session: SessionRecord, error: string): Card {
+  const errorElements = markdownToFeishuCardElements(redactSensitiveText(error), {
+    maxCharacters: 1_600,
+    maxElements: 10,
+  });
   return {
     config: { wide_screen_mode: true },
     header: {
@@ -353,21 +370,16 @@ export function buildErrorCard(session: SessionRecord, error: string): Card {
         tag: "div",
         text: {
           tag: "lark_md",
-          content: `**会话：** ${sessionLabel(session)}\n**项目：** ${session.projectName}\n\n**错误信息**\n${truncate(redactSensitiveText(error), 1600)}`,
+          content: `**会话：** ${sessionLabel(session)}\n**项目：** ${session.projectName}`,
         },
       },
+      { tag: "hr" },
+      { tag: "div", text: { tag: "lark_md", content: "**错误信息**" } },
+      ...(errorElements.length > 0
+        ? errorElements
+        : [{ tag: "div", text: { tag: "plain_text", content: "未知错误" } }]),
     ],
   };
-}
-
-function formatForFeishu(value: string): string {
-  return value
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/^#{1,6}\s+(.+)$/gm, "**$1**")
-    .replace(/^\s*(?:---+|___+|\*\*\*+)\s*$/gm, "")
-    .replace(/[ \t]+$/gm, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
 }
 
 function formatActivityTime(value: string): string {

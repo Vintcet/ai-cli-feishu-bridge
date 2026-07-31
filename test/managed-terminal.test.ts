@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import net from "node:net";
 import path from "node:path";
 import test from "node:test";
 
@@ -78,4 +79,28 @@ test("rejects an invalid terminal submit mode before connecting", async () => {
     router.send(target, "hello", "invalid" as never),
     /提交模式无效/,
   );
+});
+
+test("retries while a managed terminal pipe is being recreated", async (context) => {
+  if (process.platform !== "win32") {
+    context.skip("Windows named pipe behavior");
+    return;
+  }
+  const terminalId = "terminal" + Date.now();
+  const cwd = path.resolve("pipe-retry");
+  const router = new ManagedTerminalRouter();
+  router.register({ terminalId, cwd, elevated: false, ready: true });
+  const target = session(terminalId, cwd);
+  const pipePath = "\\\\.\\pipe\\CodexFeishu." + terminalId;
+  const server = net.createServer((socket) => {
+    socket.setEncoding("utf8");
+    socket.once("data", () => socket.end('{"ok":true}\n'));
+  });
+  const listenTimer = setTimeout(() => server.listen(pipePath), 220);
+  try {
+    await router.send(target, "hello");
+  } finally {
+    clearTimeout(listenTimer);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO.Pipes;
 using System.Net.Http.Json;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
@@ -252,14 +253,7 @@ internal static class ManagedTerminalHost
         {
             try
             {
-                await using var pipe = new NamedPipeServerStream(
-                    pipeName,
-                    PipeDirection.InOut,
-                    1,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
-                    16_384,
-                    16_384);
+                await using var pipe = CreatePipeServer(pipeName);
                 await pipe.WaitForConnectionAsync(cancellationToken);
                 object response;
                 try
@@ -293,6 +287,29 @@ internal static class ManagedTerminalHost
                 // A failed client connection is isolated; the next connection can still retry.
             }
         }
+    }
+
+    private static NamedPipeServerStream CreatePipeServer(string pipeName)
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        var user = identity.User
+            ?? throw new InvalidOperationException("无法识别当前 Windows 用户。");
+        var security = new PipeSecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.SetOwner(user);
+        security.AddAccessRule(new PipeAccessRule(
+            user,
+            PipeAccessRights.FullControl,
+            AccessControlType.Allow));
+        return NamedPipeServerStreamAcl.Create(
+            pipeName,
+            PipeDirection.InOut,
+            1,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous,
+            16_384,
+            16_384,
+            security);
     }
 
     private static void InjectPrompt(TerminalInputRequest input)

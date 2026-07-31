@@ -177,6 +177,11 @@ export class BridgeController {
 
   health(): Record<string, unknown> {
     const sessions = this.listActiveSessions();
+    const displayedSessions = [...sessions].sort(
+      (left, right) =>
+        left.openedAt.localeCompare(right.openedAt) ||
+        left.sessionId.localeCompare(right.sessionId),
+    );
     const activeSessionIds = new Set(sessions.map((session) => session.sessionId));
     const historySessions = this.store
       .listAssistantManagedSessions()
@@ -236,7 +241,7 @@ export class BridgeController {
         .length,
       activeSessionDefinition: this.activeSessionDefinition(),
       settings: this.store.getSettings(),
-      sessions: sessions.map(sessionView),
+      sessions: displayedSessions.map(sessionView),
       historySessions: historySessions.map(sessionView),
     };
   }
