@@ -229,6 +229,7 @@ test("only a private-chat owner can bind and duplicate messages are ignored", as
       feishu as unknown as FeishuGateway,
       codex as unknown as CodexRunner,
       new ManagedTerminalRouter(),
+      undefined,
       controllerConfig(directory),
     );
     const code = store.getPairingCode();
@@ -287,6 +288,7 @@ test("creates one private session group and routes group replies to that session
       feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       terminals as unknown as ManagedTerminalRouter,
+      undefined,
       controllerConfig(directory),
     );
 
@@ -376,6 +378,7 @@ test("a failed session group create waits for an explicit desktop retry", async 
       feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       new FakeManagedTerminals(terminalId, directory, sessionId) as unknown as ManagedTerminalRouter,
+      undefined,
       controllerConfig(directory),
     );
 
@@ -406,6 +409,7 @@ test("history removal hides only assistant-managed sessions", async () => {
       new FakeFeishu() as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       new ManagedTerminalRouter(),
+      undefined,
       controllerConfig(directory),
     );
     const managedSessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
@@ -451,6 +455,7 @@ test("retry settings accept bounded integers and reject invalid values", async (
       new FakeFeishu() as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       new ManagedTerminalRouter(),
+      undefined,
       controllerConfig(directory),
     );
 
@@ -521,6 +526,7 @@ test("health keeps active sessions in opening order when activity changes", asyn
       new FakeFeishu() as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       new ManagedTerminalRouter(),
+      undefined,
       controllerConfig(directory),
     );
 
@@ -562,6 +568,7 @@ test("an external session rejects ordinary Feishu replies without a background r
       feishu as unknown as FeishuGateway,
       codex as unknown as CodexRunner,
       new ManagedTerminalRouter(),
+      undefined,
       controllerConfig(directory),
     );
 
@@ -619,6 +626,7 @@ test("a managed session steers by default and queues explicitly", async () => {
       feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       terminals as unknown as ManagedTerminalRouter,
+      undefined,
       controllerConfig(directory),
     );
 
@@ -671,6 +679,7 @@ test("local and Feishu approval resolutions share one atomic result", async () =
       feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       new ManagedTerminalRouter(),
+      undefined,
       controllerConfig(directory),
     );
 
@@ -763,6 +772,7 @@ test("an approval completed in Feishu is visible as resolved to the desktop", as
       feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       new ManagedTerminalRouter(),
+      undefined,
       controllerConfig(directory),
     );
 
@@ -835,6 +845,7 @@ test("automatic approval allows the hook and resolves the Feishu card", async ()
       feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       new ManagedTerminalRouter(),
+      undefined,
       controllerConfig(directory),
     );
     const result = await controller.handlePermissionHook({
@@ -892,6 +903,7 @@ test("request_user_input can be answered by replying to the Feishu card", async 
       feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       new ManagedTerminalRouter(),
+      undefined,
       controllerConfig(directory),
     );
 
@@ -964,6 +976,7 @@ test("activity hooks reuse one progress card and complete it on Stop", async () 
       feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       new ManagedTerminalRouter(),
+      undefined,
       controllerConfig(directory),
     );
 
@@ -1036,6 +1049,7 @@ test("PC prompts can be synchronized to the managed session group without remote
       feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       terminals as unknown as ManagedTerminalRouter,
+      undefined,
       controllerConfig(directory),
     );
     await controller.handleSessionStartHook({
@@ -1113,6 +1127,7 @@ test("a managed temporary error is notified and retried when enabled", async () 
       feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       terminals as unknown as ManagedTerminalRouter,
+      undefined,
       controllerConfig(directory),
     );
     await controller.handleStopHook({
@@ -1165,6 +1180,7 @@ test("normal explanatory replies containing status codes and error words are not
       feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       new ManagedTerminalRouter(),
+      undefined,
       controllerConfig(directory),
     );
     await controller.handleStopHook({
@@ -1213,6 +1229,7 @@ test("compact service error lines still produce an error card", async () => {
       feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       new ManagedTerminalRouter(),
+      undefined,
       controllerConfig(directory),
     );
     await controller.handleStopHook({
@@ -1266,6 +1283,7 @@ test("an explicit file request returns only project files and hides the protocol
       feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       terminals as unknown as ManagedTerminalRouter,
+      undefined,
       controllerConfig(directory),
     );
 
@@ -1328,6 +1346,7 @@ test("a Feishu image is staged and attached to the next routed prompt", async ()
       feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       terminals as unknown as ManagedTerminalRouter,
+      undefined,
       controllerConfig(directory),
     );
 
@@ -1365,6 +1384,7 @@ test("an explicit managed terminal id wins when two windows share a cwd", async 
       new FakeFeishu() as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       router,
+      undefined,
       controllerConfig(directory),
     );
 
@@ -1441,6 +1461,7 @@ test("resuming outside the helper clears stale managed-window metadata", async (
       new FakeFeishu() as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       new ManagedTerminalRouter(),
+      undefined,
       controllerConfig(directory),
     );
 
@@ -1497,6 +1518,7 @@ test("external sessions follow their real process and untracked records expire q
       new FakeFeishu() as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       new ManagedTerminalRouter(),
+      undefined,
       {
         ...controllerConfig(directory),
         sessionActiveMs: 24 * 60 * 60 * 1000,

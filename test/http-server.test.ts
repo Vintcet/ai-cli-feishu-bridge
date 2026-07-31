@@ -18,6 +18,9 @@ function handlers(): HookHttpHandlers {
     sessionStart: async () => ({}),
     sessionEnd: async () => ({}),
     stop: async () => ({}),
+    opencodeLaunch: async (payload) => ({ ok: true, port: 5100, cwd: payload.cwd }),
+    opencodeRegister: async (payload) => ({ ok: true, port: payload.port }),
+    opencodeUnregister: async (payload) => ({ ok: true, port: payload.port }),
   };
 }
 
@@ -122,6 +125,70 @@ test("history hide endpoint requires the persistent control token", async () => 
       (await authorized.json() as { sessionId?: string }).sessionId,
       "session-1",
     );
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+});
+
+test("opencode control endpoints require the persistent control token", async () => {
+  const token = "d".repeat(64);
+  const server = startHookHttpServer("127.0.0.1", 0, handlers(), token);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("listening", resolve);
+      server.once("error", reject);
+    });
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const base = `http://127.0.0.1:${address.port}`;
+
+    const unauthorizedLaunch = await fetch(`${base}/opencode/launch`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cwd: "C:/demo" }),
+    });
+    assert.equal(unauthorizedLaunch.status, 401);
+
+    const authorizedLaunch = await fetch(`${base}/opencode/launch`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-codex-feishu-control-token": token,
+      },
+      body: JSON.stringify({ cwd: "C:/demo" }),
+    });
+    assert.equal(authorizedLaunch.status, 200);
+    assert.equal((await authorizedLaunch.json() as { port?: number }).port, 5100);
+
+    const unauthorizedRegister = await fetch(`${base}/opencode/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ port: 5101, cwd: "C:/demo" }),
+    });
+    assert.equal(unauthorizedRegister.status, 401);
+
+    const authorizedRegister = await fetch(`${base}/opencode/register`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-codex-feishu-control-token": token,
+      },
+      body: JSON.stringify({ port: 5101, cwd: "C:/demo" }),
+    });
+    assert.equal(authorizedRegister.status, 200);
+    assert.equal((await authorizedRegister.json() as { port?: number }).port, 5101);
+
+    const authorizedUnregister = await fetch(`${base}/opencode/unregister`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-codex-feishu-control-token": token,
+      },
+      body: JSON.stringify({ port: 5101 }),
+    });
+    assert.equal(authorizedUnregister.status, 200);
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());

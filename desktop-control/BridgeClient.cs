@@ -32,6 +32,9 @@ internal sealed class BridgeClient : IDisposable
             using var response = await httpClient.GetAsync("health", cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
+                AppLog.WarnThrottled(
+                    $"/health 返回 HTTP {(int)response.StatusCode} {response.ReasonPhrase}",
+                    TimeSpan.FromSeconds(10));
                 return null;
             }
 
@@ -44,17 +47,26 @@ internal sealed class BridgeClient : IDisposable
         catch (Exception error) when (
             error is HttpRequestException or TaskCanceledException or JsonException)
         {
+            AppLog.WarnThrottled(
+                $"/health 请求失败 {error.GetType().Name}: {error.Message}",
+                TimeSpan.FromSeconds(10));
             return null;
         }
     }
 
     public async Task StartAsync()
     {
+        AppLog.Info($"启动桥接（root={BridgeRoot}，port={Port}）...");
         await RunPowerShellScriptAsync("install-hooks.ps1", TimeSpan.FromSeconds(10));
         await RunPowerShellScriptAsync("start-bridge.ps1", TimeSpan.FromSeconds(10));
+        AppLog.Info("桥接启动命令已执行。");
     }
 
-    public Task StopAsync() => RunPowerShellScriptAsync("stop-bridge.ps1", TimeSpan.FromSeconds(10));
+    public Task StopAsync()
+    {
+        AppLog.Info("停止桥接...");
+        return RunPowerShellScriptAsync("stop-bridge.ps1", TimeSpan.FromSeconds(10));
+    }
 
     public async Task SetSessionAliasAsync(
         string sessionId,
@@ -297,6 +309,143 @@ internal sealed class BridgeClient : IDisposable
             throw new OperationCanceledException("已取消管理员权限确认。", error);
         }
         return terminalId;
+    }
+
+    public async Task<int> LaunchOpenCodeAsync(
+        string cwd,
+        bool elevated,
+        CancellationToken cancellationToken = default)
+    {
+        var fullPath = Path.GetFullPath(cwd);
+        if (!Directory.Exists(fullPath))
+        {
+            throw new DirectoryNotFoundException("选择的项目目录不存在。");
+        }
+
+        var port = await ReserveOpenCodePortAsync(fullPath, cancellationToken);
+        var openCodeCommand = FindOpenCodeCommand();
+        if (openCodeCommand is null)
+        {
+            throw new InvalidOperationException(
+                "找不到 opencode 命令。请先安装 opencode，并确保其在 PATH 中。");
+        }
+
+        var windowsTerminal = FindWindowsTerminal();
+        var startInfo = BuildOpenCodeTerminalStartInfo(
+            windowsTerminal,
+            openCodeCommand,
+            port,
+            fullPath,
+            elevated);
+        try
+        {
+            Process.Start(startInfo);
+        }
+        catch (Win32Exception error) when (error.NativeErrorCode == 1223)
+        {
+            throw new OperationCanceledException("已取消管理员权限确认。", error);
+        }
+        return port;
+    }
+
+    private async Task<int> ReserveOpenCodePortAsync(
+        string cwd,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "opencode/launch")
+        {
+            Content = JsonContent.Create(new { cwd }),
+        };
+        request.Headers.Add(
+            "X-Codex-Feishu-Control-Token",
+            ReadControlToken(BridgeRoot));
+        using var response = await httpClient.SendAsync(request, cancellationToken);
+        OpenCodeLaunchResult? result = null;
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            result = await JsonSerializer.DeserializeAsync<OpenCodeLaunchResult>(
+                stream,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
+                cancellationToken);
+        }
+        catch (JsonException)
+        {
+        }
+        if (!response.IsSuccessStatusCode || result?.Ok != true)
+        {
+            throw new InvalidOperationException(
+                string.IsNullOrWhiteSpace(result?.Error) ? "申请 opencode 端口失败。" : result.Error);
+        }
+        return result.Port;
+    }
+
+    private ProcessStartInfo BuildOpenCodeTerminalStartInfo(
+        string? windowsTerminal,
+        string openCodeCommand,
+        int port,
+        string cwd,
+        bool elevated)
+    {
+        var isScript = openCodeCommand.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) ||
+            openCodeCommand.EndsWith(".bat", StringComparison.OrdinalIgnoreCase);
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = windowsTerminal ?? openCodeCommand,
+            WorkingDirectory = cwd,
+            UseShellExecute = true,
+            WindowStyle = ProcessWindowStyle.Normal,
+        };
+        if (elevated)
+        {
+            startInfo.Verb = "runas";
+        }
+        if (windowsTerminal is not null)
+        {
+            startInfo.ArgumentList.Add("--window");
+            startInfo.ArgumentList.Add("new");
+            startInfo.ArgumentList.Add("new-tab");
+            startInfo.ArgumentList.Add("--title");
+            startInfo.ArgumentList.Add($"opencode · {new DirectoryInfo(cwd).Name}{(elevated ? " · 管理员" : "")}");
+            startInfo.ArgumentList.Add("--startingDirectory");
+            startInfo.ArgumentList.Add(cwd);
+            if (isScript)
+            {
+                startInfo.ArgumentList.Add("cmd.exe");
+                startInfo.ArgumentList.Add("/d");
+                startInfo.ArgumentList.Add("/c");
+            }
+        }
+        startInfo.ArgumentList.Add(openCodeCommand);
+        startInfo.ArgumentList.Add("--port");
+        startInfo.ArgumentList.Add(port.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        return startInfo;
+    }
+
+    private static string? FindOpenCodeCommand()
+    {
+        var candidates = new List<string>();
+        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (var entry in path.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            candidates.Add(Path.Combine(entry.Trim('"'), "opencode.exe"));
+            candidates.Add(Path.Combine(entry.Trim('"'), "opencode.cmd"));
+        }
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        candidates.Add(Path.Combine(userProfile, ".local", "bin", "opencode.exe"));
+        candidates.Add(Path.Combine(userProfile, ".local", "bin", "opencode.cmd"));
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        candidates.Add(Path.Combine(appData, "npm", "opencode.cmd"));
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        candidates.Add(Path.Combine(localAppData, "Programs", "opencode", "opencode.exe"));
+        foreach (var candidate in candidates)
+        {
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     private ProcessStartInfo BuildWindowsTerminalStartInfo(

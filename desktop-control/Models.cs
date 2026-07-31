@@ -1,6 +1,46 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace CodexFeishuControl;
+
+internal sealed class ModelStringConverter : JsonConverter<string>
+{
+    public override string Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            return reader.GetString() ?? "";
+        }
+
+        if (reader.TokenType is JsonTokenType.Null or JsonTokenType.None)
+        {
+            return "";
+        }
+
+        if (reader.TokenType == JsonTokenType.StartObject)
+        {
+            using var doc = JsonDocument.ParseValue(ref reader);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                doc.RootElement.TryGetProperty("id", out var id) &&
+                id.ValueKind == JsonValueKind.String)
+            {
+                return id.GetString() ?? "";
+            }
+            return "";
+        }
+
+        using var fallback = JsonDocument.ParseValue(ref reader);
+        return fallback.RootElement.GetRawText();
+    }
+
+    public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value);
+    }
+}
 
 internal sealed class BridgeStatus
 {
@@ -128,6 +168,7 @@ internal sealed class CodexSession
     public string Cwd { get; set; } = "";
 
     [JsonPropertyName("model")]
+    [JsonConverter(typeof(ModelStringConverter))]
     public string Model { get; set; } = "";
 
     [JsonPropertyName("status")]
@@ -207,6 +248,21 @@ internal sealed class HistoryHideResult
 {
     [JsonPropertyName("ok")]
     public bool Ok { get; set; }
+
+    [JsonPropertyName("error")]
+    public string Error { get; set; } = "";
+}
+
+internal sealed class OpenCodeLaunchResult
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; set; }
+
+    [JsonPropertyName("port")]
+    public int Port { get; set; }
+
+    [JsonPropertyName("cwd")]
+    public string Cwd { get; set; } = "";
 
     [JsonPropertyName("error")]
     public string Error { get; set; } = "";

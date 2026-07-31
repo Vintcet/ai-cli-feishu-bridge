@@ -15,7 +15,7 @@ import type {
   SessionStatus,
   SessionStore,
 } from "./domain.js";
-import { projectNameFromCwd, shortSessionId } from "./domain.js";
+import { projectNameFromCwd, shortSessionId, stringifyModel } from "./domain.js";
 
 const emptyBindings = (): BindingStore => ({ users: {} });
 const emptySessions = (): SessionStore => ({ sessions: {} });
@@ -344,6 +344,7 @@ export class BridgeStore {
     assistantMessage?: string | null;
     error?: string;
     source?: string;
+    runtime?: "codex" | "opencode" | null;
     clientProcessId?: number | null;
     clientProcessStartedAt?: string | null;
     managedTerminalId?: string | null;
@@ -389,7 +390,7 @@ export class BridgeStore {
         alias: input.alias ?? current?.alias,
         cwd: input.cwd,
         projectName: projectNameFromCwd(input.cwd),
-        model: input.model ?? current?.model,
+        model: stringifyModel(input.model ?? current?.model),
         status: input.status,
         openedAt:
           input.openedAt ??
@@ -405,6 +406,7 @@ export class BridgeStore {
         lastNotificationTurnId: current?.lastNotificationTurnId,
         lastError: input.error ?? (input.status === "error" ? current?.lastError : undefined),
         source: input.source ?? current?.source,
+        runtime: input.runtime ?? current?.runtime,
         endedAt: input.status === "ended" ? now : undefined,
         clientProcessId: hasClientProcessId
           ? input.clientProcessId ?? undefined

@@ -23,6 +23,13 @@ import {
   managedTerminalSessionId,
   ManagedTerminalRouter,
 } from "./managed-terminal.js";
+import { OpenCodeManager } from "./opencode-manager.js";
+import type {
+  OpenCodeMessage,
+  OpenCodeMessagePartUpdatedProperties,
+  OpenCodePermission,
+  OpenCodeSession,
+} from "./opencode-client.js";
 import {
   captureLiveTrackedCodexProcessIds,
   type ClientProcessMetadata,
@@ -52,6 +59,7 @@ import {
   sessionLabel,
   shortSessionId,
   statusLabel,
+  stringifyModel,
   truncate,
 } from "./domain.js";
 import { FeishuGateway } from "./feishu.js";
@@ -165,6 +173,9 @@ export class BridgeController {
   private readonly activityStates = new Map<string, ActivityState>();
   private readonly pendingRemotePrompts = new Map<string, PendingRemotePrompt[]>();
   private readonly managedRetryCounts = new Map<string, number>();
+  private readonly opencodeQueues = new Map<string, QueuedRemotePrompt[]>();
+  private readonly opencodePortSessions = new Map<number, Set<string>>();
+  private readonly opencodeToolParts = new Map<string, Map<string, string>>();
   private readonly sessionGroupCreates = new Map<
     string,
     Promise<SessionRecord | undefined>
@@ -176,6 +187,7 @@ export class BridgeController {
     private readonly feishu: FeishuGateway,
     private readonly codex: CodexRunner,
     private readonly managedTerminals: ManagedTerminalRouter,
+    private readonly opencode: OpenCodeManager | undefined,
     private readonly config: ControllerConfig,
   ) {
     this.attachmentStore = new LocalAttachmentStore(
@@ -221,10 +233,11 @@ export class BridgeController {
       alias: session.alias ?? "",
       projectName: session.projectName,
       cwd: session.cwd,
-      model: session.model ?? "",
+      model: stringifyModel(session.model),
       status: session.status,
       statusLabel: statusLabel(session.status),
       source: session.source ?? "",
+      runtime: session.runtime ?? "codex",
       openedAt: session.openedAt,
       lastSeenAt: session.lastSeenAt,
       endedAt: session.endedAt ?? "",
@@ -272,6 +285,7 @@ export class BridgeController {
         ),
       runningResumes: sessions.filter((session) => this.codex.isRunning(session.sessionId))
         .length,
+      opencodeInstances: this.opencode?.listInstances().length ?? 0,
       activeSessionDefinition: this.activeSessionDefinition(),
       settings: this.store.getSettings(),
       sessions: displayedSessions.map(sessionView),
@@ -502,6 +516,364 @@ export class BridgeController {
       ok: true,
       settings: await this.store.updateSettings(update as Partial<BridgeSettings>),
     };
+  }
+
+  async handleOpenCodeLaunch(
+    value: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const cwd = typeof value.cwd === "string" ? value.cwd.trim() : "";
+    if (!cwd || cwd.length > 1024) {
+      return { ok: false, error: "目录参数不正确。" };
+    }
+    if (!this.opencode) {
+      return { ok: false, error: "opencode 支持未启用。" };
+    }
+    try {
+      const result = await this.opencode.launch(cwd);
+      return { ok: true, port: result.port, cwd };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  async handleOpenCodeRegister(
+    value: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const port = typeof value.port === "number" ? value.port : Number(value.port);
+    const cwd = typeof value.cwd === "string" ? value.cwd.trim() : "";
+    if (!Number.isSafeInteger(port) || port <= 0 || port > 65535) {
+      return { ok: false, error: "端口参数不正确。" };
+    }
+    if (!cwd || cwd.length > 1024) {
+      return { ok: false, error: "目录参数不正确。" };
+    }
+    if (!this.opencode) {
+      return { ok: false, error: "opencode 支持未启用。" };
+    }
+    try {
+      await this.opencode.register(port, cwd);
+      return { ok: true, port, cwd };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  async handleOpenCodeUnregister(
+    value: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const port = typeof value.port === "number" ? value.port : Number(value.port);
+    if (!Number.isSafeInteger(port) || port <= 0 || port > 65535) {
+      return { ok: false, error: "端口参数不正确。" };
+    }
+    if (!this.opencode) {
+      return { ok: false, error: "opencode 支持未启用。" };
+    }
+    await this.opencode.unregister(port);
+    return { ok: true, port };
+  }
+
+  async handleOpenCodeSessionCreated(session: OpenCodeSession): Promise<void> {
+    const sessionId = session.id;
+    const instance = this.opencode?.findInstanceBySession(sessionId);
+    const cwd = session.directory || instance?.cwd || "";
+    if (!cwd) {
+      return;
+    }
+    const existing = this.store.getSession(sessionId);
+    const record = await this.store.upsertSession({
+      sessionId,
+      cwd,
+      model: session.model,
+      status: existing?.status ?? "waiting",
+      source: "opencode",
+      runtime: "opencode",
+      managedByAssistant: true,
+    });
+    const port = instance?.port;
+    if (port !== undefined) {
+      let sessionIds = this.opencodePortSessions.get(port);
+      if (!sessionIds) {
+        sessionIds = new Set();
+        this.opencodePortSessions.set(port, sessionIds);
+      }
+      sessionIds.add(sessionId);
+    }
+    console.log(`[opencode] Registered session #${record.shortId} (${cwd}).`);
+    if (!record.feishuChatId) {
+      void this.ensureSessionGroup(sessionId).catch((error) => {
+        console.warn("[opencode] Could not create Feishu group:", error);
+      });
+    }
+  }
+
+  async handleOpenCodeSessionDeleted(sessionId: string): Promise<void> {
+    this.forgetOpenCodeSession(sessionId, "会话已关闭");
+  }
+
+  async handleOpenCodeSessionStatus(sessionId: string, status: string): Promise<void> {
+    const current = this.store.getSession(sessionId);
+    if (!current || current.runtime !== "opencode" || current.status === "ended") {
+      return;
+    }
+    if (status === "busy") {
+      await this.store.upsertSession({
+        sessionId,
+        cwd: current.cwd,
+        model: current.model,
+        status: "running",
+        runtime: "opencode",
+        managedByAssistant: true,
+      });
+    }
+  }
+
+  async handleOpenCodeSessionCompacted(sessionId: string): Promise<void> {
+    const current = this.store.getSession(sessionId);
+    if (!current || current.runtime !== "opencode") {
+      return;
+    }
+    if (this.store.getSettings().notifyActivity) {
+      await this.recordOpenCodeActivity(sessionId, {
+        hook_event_name: "PreCompact",
+        cwd: current.cwd,
+      });
+    }
+  }
+
+  async handleOpenCodeSessionIdle(sessionId: string): Promise<void> {
+    this.remoteInputLocks.delete(sessionId);
+    const current = this.store.getSession(sessionId);
+    if (!current || current.runtime !== "opencode" || current.status === "ended") {
+      return;
+    }
+    const result = await this.opencode?.lastAssistantText(sessionId);
+    const assistantMessage = result?.text || undefined;
+    const hasError = result?.hasError === true;
+    const session = await this.store.upsertSession({
+      sessionId,
+      cwd: current.cwd,
+      model: current.model,
+      turnId: `opencode-${Date.now()}`,
+      status: "waiting",
+      assistantMessage,
+      runtime: "opencode",
+      managedByAssistant: true,
+    });
+    await this.finishActivity(sessionId, hasError ? "本轮发生错误" : "本轮处理完成");
+
+    const fileDirectives = extractBridgeFileDirectives(
+      assistantMessage?.trim() || "opencode 已结束本轮处理。",
+    );
+    const message =
+      fileDirectives.displayMessage ||
+      (hasError ? assistantMessage || "opencode 本轮发生错误。" : assistantMessage || "opencode 已结束本轮处理。");
+    for (const recipient of await this.notificationRecipients(session)) {
+      try {
+        const cards = hasError
+          ? buildErrorCards(session, message)
+          : buildStopCards(session, message);
+        for (const card of cards) {
+          const messageId = await this.feishu.sendCard(recipient.chatId, card);
+          await this.addRoute(messageId, sessionId, recipient.chatId, hasError ? "error" : "stop");
+        }
+      } catch (error) {
+        console.error("[opencode] Failed to send a completion card:", error);
+      }
+    }
+    await this.store.markStopNotified(sessionId, session.lastTurnId ?? "");
+
+    const fileReturnRequest = this.advanceFileReturnRequests(sessionId);
+    if (fileReturnRequest && fileDirectives.paths.length > 0) {
+      void this.sendRequestedFiles(
+        session,
+        fileReturnRequest.chatId,
+        fileDirectives.paths,
+      ).catch((error) => {
+        console.error("[files] Asynchronous file return failed:", error);
+      });
+    }
+    void this.tryDrainOpenCodeQueue(sessionId);
+  }
+
+  async handleOpenCodeSessionError(
+    sessionId: string,
+    error: string | undefined,
+  ): Promise<void> {
+    const current = this.store.getSession(sessionId);
+    if (!current || current.runtime !== "opencode" || current.status === "ended") {
+      return;
+    }
+    const detail = truncate(error || "opencode 发生未知错误。", 500);
+    const session = await this.store.upsertSession({
+      sessionId,
+      cwd: current.cwd,
+      model: current.model,
+      status: "error",
+      error: detail,
+      runtime: "opencode",
+      managedByAssistant: true,
+    });
+    await this.finishActivity(sessionId, "本轮发生错误");
+    for (const recipient of await this.notificationRecipients(session)) {
+      try {
+        for (const card of buildErrorCards(session, detail)) {
+          const messageId = await this.feishu.sendCard(recipient.chatId, card);
+          await this.addRoute(messageId, sessionId, recipient.chatId, "error");
+        }
+      } catch (sendError) {
+        console.error("[opencode] Failed to send an error card:", sendError);
+      }
+    }
+  }
+
+  async handleOpenCodeInstanceDisconnected(port: number): Promise<void> {
+    const sessionIds = this.opencodePortSessions.get(port);
+    if (sessionIds) {
+      for (const sessionId of [...sessionIds]) {
+        await this.forgetOpenCodeSession(sessionId, "opencode 窗口已关闭");
+      }
+      this.opencodePortSessions.delete(port);
+    }
+  }
+
+  async handleOpenCodePermissionUpdated(permission: OpenCodePermission): Promise<void> {
+    const sessionId = permission.sessionID;
+    if (!sessionId) {
+      return;
+    }
+    const current = this.store.getSession(sessionId);
+    const instance = this.opencode?.findInstanceBySession(sessionId);
+    const cwd = current?.cwd || instance?.cwd || "";
+    const session = await this.store.upsertSession({
+      sessionId,
+      cwd,
+      model: current?.model,
+      status: "pending_approval",
+      runtime: "opencode",
+      managedByAssistant: true,
+    });
+    const now = Date.now();
+    const approval: ApprovalRecord = {
+      requestId: randomUUID(),
+      sessionId,
+      turnId: current?.lastTurnId ?? `opencode-${now}`,
+      cwd,
+      toolName: permission.type ?? "permission",
+      toolPreview: previewJson(permission.input ?? permission),
+      createdAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + this.config.approvalTimeoutMs).toISOString(),
+      status: "pending",
+      messageIds: [],
+      opencodePermissionId: permission.id,
+    };
+    await this.store.createApproval(approval);
+    const timeoutTimer = setTimeout(() => {
+      void this.completeApproval(approval.requestId, "timeout");
+    }, this.config.approvalTimeoutMs);
+    timeoutTimer.unref?.();
+
+    for (const recipient of await this.notificationRecipients(session)) {
+      try {
+        const messageId = await this.feishu.sendCard(
+          recipient.chatId,
+          buildApprovalCard(session, approval),
+        );
+        await this.store.addApprovalMessage(approval.requestId, messageId);
+        await this.addRoute(messageId, sessionId, recipient.chatId, "approval", approval.requestId);
+      } catch (error) {
+        console.error("[opencode] Failed to send an approval card:", error);
+      }
+    }
+    if (this.store.getSettings().autoApprove) {
+      await this.completeApproval(approval.requestId, "allow");
+      console.log(`[opencode] Auto-approved permission for #${session.shortId}.`);
+    }
+  }
+
+  async handleOpenCodeMessagePartUpdated(
+    properties: OpenCodeMessagePartUpdatedProperties,
+  ): Promise<void> {
+    const sessionId = properties.sessionID;
+    const part = properties.part;
+    if (!sessionId || !part || !this.store.getSettings().notifyActivity) {
+      return;
+    }
+    const status = part.state?.status;
+    if (!status || part.type !== "tool") {
+      return;
+    }
+    const current = this.store.getSession(sessionId);
+    if (!current || current.runtime !== "opencode") {
+      return;
+    }
+    let partsBySession = this.opencodeToolParts.get(sessionId);
+    if (!partsBySession) {
+      partsBySession = new Map();
+      this.opencodeToolParts.set(sessionId, partsBySession);
+    }
+    const partId = part.id || `${properties.messageID ?? "?"}-${part.tool}-${part.state?.title ?? ""}`;
+    const previous = partsBySession.get(partId);
+    if (previous === status) {
+      return;
+    }
+    partsBySession.set(partId, status);
+    const toolName = part.tool;
+    if (status === "running" || status === "pending") {
+      await this.recordOpenCodeActivity(sessionId, {
+        hook_event_name: "PreToolUse",
+        cwd: current.cwd,
+        tool_name: toolName,
+        tool_preview: previewJson(part.state?.input, 800),
+      });
+    } else if (status === "completed") {
+      await this.recordOpenCodeActivity(sessionId, {
+        hook_event_name: "PostToolUse",
+        cwd: current.cwd,
+        tool_name: toolName,
+        tool_response_preview: previewJson(part.state?.output, 800),
+      });
+    }
+  }
+
+  async handleOpenCodeMessageUpdated(message: OpenCodeMessage): Promise<void> {
+    if (message.role !== "user" || !message.sessionID) {
+      return;
+    }
+    const prompt = (message.parts ?? [])
+      .filter((part) => part.type === "text" && typeof part.text === "string")
+      .map((part) => part.text as string)
+      .join("\n")
+      .trim();
+    if (!prompt) {
+      return;
+    }
+    const sessionId = message.sessionID;
+    if (this.consumeRemotePrompt(sessionId, prompt)) {
+      return;
+    }
+    const settings = this.store.getSettings();
+    const session = this.store.getSession(sessionId);
+    if (!settings.notifyUserPrompts || session?.managedByAssistant !== true) {
+      return;
+    }
+    await this.store.upsertSession({
+      sessionId,
+      cwd: session.cwd,
+      model: session.model,
+      status: "running",
+      runtime: "opencode",
+      managedByAssistant: true,
+    });
+    for (const recipient of await this.notificationRecipients(session)) {
+      try {
+        for (const card of buildUserPromptCards(session, prompt)) {
+          const messageId = await this.feishu.sendCard(recipient.chatId, card);
+          await this.addRoute(messageId, sessionId, recipient.chatId, "user_prompt");
+        }
+      } catch (error) {
+        console.error("[opencode] Failed to send a PC prompt card:", error);
+      }
+    }
   }
 
   async handleSessionStartHook(
@@ -1245,11 +1617,19 @@ export class BridgeController {
       await this.respond(messageId, chatId, codexNotReceived("内容为空。"));
       return;
     }
-    if (!this.managedTerminals.isManaged(target)) {
+    if (!this.managedTerminals.isManaged(target) && target.runtime !== "opencode") {
       await this.respond(
         messageId,
         chatId,
         externalSessionInputBlockedMessage(target),
+      );
+      return;
+    }
+    if (target.runtime === "opencode" && !this.opencode?.findInstanceBySession(target.sessionId)) {
+      await this.respond(
+        messageId,
+        chatId,
+        notReceivedText(target, "opencode 窗口未连接。"),
       );
       return;
     }
@@ -1364,6 +1744,16 @@ export class BridgeController {
         sourceMessageId,
         chatId,
         codexNotReceived("请先回答待补充问题。"),
+      );
+      return;
+    }
+    if (session.runtime === "opencode") {
+      await this.resumeOpenCodeSession(
+        session,
+        prompt,
+        sourceMessageId,
+        chatId,
+        requestFileReturn,
       );
       return;
     }
@@ -1545,6 +1935,213 @@ export class BridgeController {
       );
       void this.tryDrainExternalQueue(sessionId);
     }
+  }
+
+  private async resumeOpenCodeSession(
+    session: SessionRecord,
+    prompt: string,
+    sourceMessageId: string,
+    chatId: string,
+    requestFileReturn: boolean,
+  ): Promise<void> {
+    if (!this.opencode?.findInstanceBySession(session.sessionId)) {
+      await this.respond(
+        sourceMessageId,
+        chatId,
+        notReceivedText(session, "opencode 窗口未连接。"),
+      );
+      return;
+    }
+    if (
+      this.remoteInputLocks.has(session.sessionId) ||
+      session.status === "running"
+    ) {
+      const queue = this.opencodeQueues.get(session.sessionId) ?? [];
+      queue.push({ prompt, sourceMessageId, chatId, requestFileReturn });
+      this.opencodeQueues.set(session.sessionId, queue);
+      await this.respond(sourceMessageId, chatId, receivedText(session));
+      return;
+    }
+    this.remoteInputLocks.add(session.sessionId);
+    try {
+      const runningSession = await this.store.upsertSession({
+        sessionId: session.sessionId,
+        alias: session.alias,
+        cwd: session.cwd,
+        model: session.model,
+        status: "running",
+        source: "opencode",
+        runtime: "opencode",
+        managedByAssistant: true,
+      });
+      this.rememberRemotePrompt(session.sessionId, prompt);
+      await this.opencode.sendPrompt(session.sessionId, prompt);
+      if (requestFileReturn) {
+        this.registerFileReturnRequest(session.sessionId, chatId, 0);
+      }
+      const ackId = await this.respond(
+        sourceMessageId,
+        chatId,
+        receivedText(runningSession),
+      );
+      if (ackId) {
+        await this.addRoute(ackId, session.sessionId, chatId, "resume_ack");
+      }
+    } catch (error) {
+      this.remoteInputLocks.delete(session.sessionId);
+      this.forgetRemotePrompt(session.sessionId, prompt);
+      const message = error instanceof Error ? error.message : String(error);
+      await this.store.upsertSession({
+        sessionId: session.sessionId,
+        alias: session.alias,
+        cwd: session.cwd,
+        model: session.model,
+        status: "error",
+        error: message,
+        runtime: "opencode",
+        managedByAssistant: true,
+      });
+      await this.respond(
+        sourceMessageId,
+        chatId,
+        notReceivedText(session, truncate(message, 160)),
+      );
+    }
+  }
+
+  private async tryDrainOpenCodeQueue(sessionId: string): Promise<void> {
+    if (this.remoteInputLocks.has(sessionId)) {
+      return;
+    }
+    const queue = this.opencodeQueues.get(sessionId);
+    const item = queue?.shift();
+    if (!item) {
+      this.opencodeQueues.delete(sessionId);
+      return;
+    }
+    if (queue?.length === 0) {
+      this.opencodeQueues.delete(sessionId);
+    }
+    const session = this.store.getSession(sessionId);
+    if (!session || session.runtime !== "opencode" || session.status === "ended") {
+      await this.respond(
+        item.sourceMessageId,
+        item.chatId,
+        notReceivedText({ runtime: "opencode" }, "对应的 opencode 窗口已经关闭。"),
+      );
+      return;
+    }
+    if (!this.opencode?.findInstanceBySession(sessionId)) {
+      this.remoteInputLocks.add(sessionId);
+      await this.respond(
+        item.sourceMessageId,
+        item.chatId,
+        notReceivedText(session, "opencode 窗口未连接。"),
+      );
+      this.remoteInputLocks.delete(sessionId);
+      void this.tryDrainOpenCodeQueue(sessionId);
+      return;
+    }
+    this.remoteInputLocks.add(sessionId);
+    try {
+      const runningSession = await this.store.upsertSession({
+        sessionId: session.sessionId,
+        alias: session.alias,
+        cwd: session.cwd,
+        model: session.model,
+        status: "running",
+        runtime: "opencode",
+        managedByAssistant: true,
+      });
+      this.rememberRemotePrompt(session.sessionId, item.prompt);
+      await this.opencode.sendPrompt(session.sessionId, item.prompt);
+      if (item.requestFileReturn) {
+        this.registerFileReturnRequest(session.sessionId, item.chatId, 0);
+      }
+      const ackId = await this.respond(
+        item.sourceMessageId,
+        item.chatId,
+        receivedText(runningSession),
+      );
+      if (ackId) {
+        await this.addRoute(ackId, session.sessionId, item.chatId, "resume_ack");
+      }
+    } catch (error) {
+      this.remoteInputLocks.delete(sessionId);
+      this.forgetRemotePrompt(sessionId, item.prompt);
+      const message = error instanceof Error ? error.message : String(error);
+      await this.respond(
+        item.sourceMessageId,
+        item.chatId,
+        notReceivedText(session, truncate(message, 500)),
+      );
+      void this.tryDrainOpenCodeQueue(sessionId);
+    }
+  }
+
+  private async forgetOpenCodeSession(
+    sessionId: string,
+    reason: string,
+  ): Promise<void> {
+    const session = this.store.getSession(sessionId);
+    if (session && session.status !== "ended") {
+      await this.store.upsertSession({
+        sessionId,
+        cwd: session.cwd,
+        model: session.model,
+        status: "ended",
+        runtime: "opencode",
+        managedByAssistant: true,
+      });
+    }
+    this.remoteInputLocks.delete(sessionId);
+    this.opencodeQueues.delete(sessionId);
+    this.pendingRemotePrompts.delete(sessionId);
+    this.fileReturnRequests.delete(sessionId);
+    this.managedRetryCounts.delete(sessionId);
+    this.opencodeToolParts.delete(sessionId);
+    if (session) {
+      void this.finishActivity(sessionId, reason).catch((error) => {
+        console.warn("[opencode] Could not finalize activity:", error);
+      });
+    }
+    this.opencode?.forgetSession(sessionId);
+    const queued = this.opencodeQueues.get(sessionId);
+    if (queued) {
+      this.opencodeQueues.delete(sessionId);
+      for (const item of queued) {
+        await this.respond(
+          item.sourceMessageId,
+          item.chatId,
+          notReceivedText({ runtime: "opencode" }, reason),
+        );
+      }
+    }
+  }
+
+  private async recordOpenCodeActivity(
+    sessionId: string,
+    input: {
+      hook_event_name: "PreToolUse" | "PostToolUse" | "PreCompact";
+      cwd: string;
+      turnId?: string;
+      tool_name?: string;
+      tool_preview?: string;
+      tool_response_preview?: string;
+    },
+  ): Promise<void> {
+    const payload: ActivityHookPayload = {
+      hook_event_name: input.hook_event_name,
+      session_id: sessionId,
+      turn_id: input.turnId,
+      cwd: input.cwd,
+      model: undefined,
+      prompt: undefined,
+      tool_name: input.tool_name,
+      tool_preview: input.tool_preview,
+      tool_response_preview: input.tool_response_preview,
+    };
+    await this.recordActivity(payload);
   }
 
   private async handleCodexExit(
@@ -1999,6 +2596,17 @@ export class BridgeController {
     void Promise.allSettled(
       approval.messageIds.map((messageId) => this.feishu.patchCard(messageId, card)),
     );
+    if (approval.opencodePermissionId && (resolution === "allow" || resolution === "deny")) {
+      try {
+        await this.opencode?.replyPermission(
+          approval.sessionId,
+          approval.opencodePermissionId,
+          resolution === "allow" ? "once" : "reject",
+        );
+      } catch (error) {
+        console.error("[approval] Failed to forward decision to opencode:", error);
+      }
+    }
     console.log(
       `[approval] ${resolution} for session #${session.shortId}.`,
     );
@@ -2057,6 +2665,10 @@ export class BridgeController {
     )(trackedClients);
     const sessions = openSessions
       .flatMap((session): SessionRecord[] => {
+        if (session.runtime === "opencode") {
+          const instance = this.opencode?.findInstanceBySession(session.sessionId);
+          return instance ? [session] : [];
+        }
         if (!this.managedTerminals.isManaged(session)) {
           if (session.clientProcessId) {
             return liveClientProcessIds.has(session.clientProcessId) ? [session] : [];
@@ -2252,7 +2864,7 @@ export class BridgeController {
 
   private activeSessionDefinition(): string {
     const fallbackMs = Math.min(this.config.sessionActiveMs, 5 * 60 * 1000);
-    return `活跃定义：助手打开的窗口从打开到关闭始终算活跃；外部会话会跟踪真实 Codex 进程，进程关闭后自动移除。无法取得进程信息时仅临时保留 ${formatDuration(fallbackMs)}。`;
+    return `活跃定义：助手打开的 Codex 窗口从打开到关闭始终算活跃；opencode 窗口从连接到关闭始终算活跃；外部会话会跟踪真实 Codex 进程，进程关闭后自动移除。无法取得进程信息时仅临时保留 ${formatDuration(fallbackMs)}。`;
   }
 
   private formatSessionList(): string {
@@ -2262,11 +2874,13 @@ export class BridgeController {
     }
     const lines = sessions.slice(0, 20).map(
       (session, index) => {
-        const mode = session.managedTerminalId
-          ? session.managedTerminalElevated
-            ? " · 管理员同步"
-            : " · 窗口同步"
-          : " · 外部会话（仅通知）";
+        const mode = session.runtime === "opencode"
+          ? " · opencode 窗口"
+          : session.managedTerminalId
+            ? session.managedTerminalElevated
+              ? " · 管理员同步"
+              : " · 窗口同步"
+            : " · 外部会话（仅通知）";
         const address = session.alias
           ? `@${session.alias}  (#${session.shortId})`
           : sessionAddress(session);
@@ -2354,11 +2968,12 @@ export class BridgeController {
     ownerOpenId: string,
   ): Promise<SessionRecord | undefined> {
     const name = this.sessionGroupName(session);
+    const kind = session.runtime === "opencode" ? "opencode" : "Codex";
     try {
       const group = await this.feishu.createSessionGroup(
         ownerOpenId,
         name,
-        `Codex 会话 ${session.shortId} · ${session.cwd}`,
+        `${kind} 会话 ${session.shortId} · ${session.cwd}`,
       );
       const updated = await this.store.setSessionFeishuChat(session.sessionId, {
         chatId: group.chatId,
@@ -2368,7 +2983,7 @@ export class BridgeController {
         try {
           await this.feishu.sendText(
             group.chatId,
-            `已连接到 ${sessionLabel(updated)}。以后这个群里的消息都会发送到对应 Codex 窗口。`,
+            `已连接到 ${sessionLabel(updated)}。以后这个群里的消息都会发送到对应 ${kind} 窗口。`,
           );
         } catch (error) {
           console.warn("[feishu] Session group created, but welcome message failed:", error);
@@ -2398,7 +3013,8 @@ export class BridgeController {
   }
 
   private sessionGroupName(session: SessionRecord): string {
-    return `Codex｜${session.alias || session.projectName || session.shortId}`.slice(0, 60);
+    const prefix = session.runtime === "opencode" ? "OpenCode｜" : "Codex｜";
+    return `${prefix}${session.alias || session.projectName || session.shortId}`.slice(0, 60);
   }
 
   private async respond(
@@ -2547,6 +3163,21 @@ const CODEX_RECEIVED = "Codex 已接收。";
 
 function codexNotReceived(reason: string): string {
   return `Codex 未接收：${reason}`;
+}
+
+function receivedText(
+  session: { runtime?: "codex" | "opencode" } | undefined,
+): string {
+  return session?.runtime === "opencode" ? "opencode 已接收。" : CODEX_RECEIVED;
+}
+
+function notReceivedText(
+  session: { runtime?: "codex" | "opencode" } | undefined,
+  reason: string,
+): string {
+  return session?.runtime === "opencode"
+    ? `opencode 未接收：${reason}`
+    : codexNotReceived(reason);
 }
 
 function isRetryableCodexError(value: string): boolean {

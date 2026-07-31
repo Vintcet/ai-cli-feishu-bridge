@@ -39,6 +39,13 @@ export interface HookHttpHandlers {
   sessionStart: (payload: SessionStartHookPayload) => Promise<Record<string, unknown>>;
   sessionEnd: (payload: SessionEndHookPayload) => Promise<Record<string, unknown>>;
   stop: (payload: StopHookPayload) => Promise<Record<string, unknown>>;
+  opencodeLaunch: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  opencodeRegister: (
+    payload: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>;
+  opencodeUnregister: (
+    payload: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>;
 }
 
 export function startHookHttpServer(
@@ -183,6 +190,51 @@ async function routeRequest(
       return;
     }
     const result = await handlers.settingsUpdate(body as Record<string, unknown>);
+    sendJson(response, result.ok === true ? 200 : 400, result);
+    return;
+  }
+
+  if (url.pathname === "/opencode/launch") {
+    if (!hasValidControlToken(request, controlToken)) {
+      sendJson(response, 401, { ok: false, error: "本机控制身份验证失败。" });
+      return;
+    }
+    const body = await readJsonBody(request);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      sendJson(response, 400, { ok: false, error: "请求格式不正确。" });
+      return;
+    }
+    const result = await handlers.opencodeLaunch(body as Record<string, unknown>);
+    sendJson(response, result.ok === true ? 200 : 400, result);
+    return;
+  }
+
+  if (url.pathname === "/opencode/register") {
+    if (!hasValidControlToken(request, controlToken)) {
+      sendJson(response, 401, { ok: false, error: "本机控制身份验证失败。" });
+      return;
+    }
+    const body = await readJsonBody(request);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      sendJson(response, 400, { ok: false, error: "请求格式不正确。" });
+      return;
+    }
+    const result = await handlers.opencodeRegister(body as Record<string, unknown>);
+    sendJson(response, result.ok === true ? 200 : 400, result);
+    return;
+  }
+
+  if (url.pathname === "/opencode/unregister") {
+    if (!hasValidControlToken(request, controlToken)) {
+      sendJson(response, 401, { ok: false, error: "本机控制身份验证失败。" });
+      return;
+    }
+    const body = await readJsonBody(request);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      sendJson(response, 400, { ok: false, error: "请求格式不正确。" });
+      return;
+    }
+    const result = await handlers.opencodeUnregister(body as Record<string, unknown>);
     sendJson(response, result.ok === true ? 200 : 400, result);
     return;
   }

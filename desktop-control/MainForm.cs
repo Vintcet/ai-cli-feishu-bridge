@@ -11,6 +11,7 @@ internal sealed class MainForm : Form
     private static readonly Color Success = Color.FromArgb(22, 163, 74);
     private static readonly Color Warning = Color.FromArgb(217, 119, 6);
     private static readonly Color Danger = Color.FromArgb(220, 38, 38);
+    private static readonly Color OpenCodeAccent = Color.FromArgb(234, 88, 12);
     private static readonly Color Muted = Color.FromArgb(100, 116, 139);
     private static readonly Color Border = Color.FromArgb(226, 232, 240);
 
@@ -37,6 +38,7 @@ internal sealed class MainForm : Form
     private readonly TabControl sessionTabs = new();
     private readonly Button connectionButton = new();
     private readonly Button newCodexButton = new();
+    private readonly Button newOpenCodeButton = new();
     private readonly Button approvalButton = new();
     private readonly Button aliasButton = new();
     private readonly Button retryGroupButton = new();
@@ -60,6 +62,18 @@ internal sealed class MainForm : Form
     public MainForm(EventWaitHandle activateEvent)
     {
         this.activateEvent = activateEvent;
+        try
+        {
+            AppLog.Initialize(Path.Combine(bridgeClient.BridgeRoot, "data"));
+            AppLog.Info(
+                $"面板启动 bridgeRoot={bridgeClient.BridgeRoot} " +
+                $"port={bridgeClient.Port} " +
+                $"controlToken存在={File.Exists(Path.Combine(bridgeClient.BridgeRoot, "data", "control.token"))}");
+        }
+        catch (Exception error)
+        {
+            AppLog.Error("面板启动日志初始化异常", error);
+        }
         Text = "Codex 飞书助手";
         Icon = LoadApplicationIcon();
         StartPosition = FormStartPosition.CenterScreen;
@@ -95,6 +109,7 @@ internal sealed class MainForm : Form
         Shown += async (_, _) =>
         {
             RestoreFromTray();
+            AppLog.Info("面板已显示，开始自动刷新。");
             await RefreshStatusAsync();
             refreshTimer.Start();
         };
@@ -369,6 +384,8 @@ internal sealed class MainForm : Form
         ConfigureButton(connectionButton, "连接", Primary, Color.White);
         ConfigureButton(newCodexButton, "新建 Codex", Success, Color.White);
         newCodexButton.Size = new Size(112, 38);
+        ConfigureButton(newOpenCodeButton, "新建 opencode", OpenCodeAccent, Color.White);
+        newOpenCodeButton.Size = new Size(124, 38);
         ConfigureButton(approvalButton, "本机审批", Color.White, Warning, Warning);
         approvalButton.Size = new Size(110, 38);
         approvalButton.Enabled = false;
@@ -387,12 +404,14 @@ internal sealed class MainForm : Form
             }
         };
         newCodexButton.Click += async (_, _) => await NewCodexAsync();
+        newOpenCodeButton.Click += async (_, _) => await NewOpenCodeAsync();
         approvalButton.Click += (_, _) => OpenPendingApproval();
         refreshButton.Click += async (_, _) => await RefreshStatusAsync(force: true);
         settingsButton.Click += async (_, _) => await EditSettingsAsync();
 
         buttons.Controls.Add(connectionButton);
         buttons.Controls.Add(newCodexButton);
+        buttons.Controls.Add(newOpenCodeButton);
         buttons.Controls.Add(approvalButton);
         buttons.Controls.Add(refreshButton);
         buttons.Controls.Add(settingsButton);
@@ -979,6 +998,50 @@ internal sealed class MainForm : Form
         }
     }
 
+    private async Task NewOpenCodeAsync()
+    {
+        if (operating) return;
+        try
+        {
+            var status = await bridgeClient.GetStatusAsync(lifetime.Token);
+            if (status is null)
+            {
+                await ConnectAsync();
+                status = await bridgeClient.GetStatusAsync(lifetime.Token);
+            }
+            if (status is null)
+            {
+                throw new InvalidOperationException("请先连接飞书桥接服务，再新建 opencode 窗口。");
+            }
+
+            var initialDirectory = lastProjectDirectory ??
+                Directory.GetParent(bridgeClient.BridgeRoot)?.FullName ??
+                bridgeClient.BridgeRoot;
+            using var dialog = new NewOpenCodeDialog(initialDirectory);
+            if (dialog.ShowDialog(this) != DialogResult.OK)
+            {
+                return;
+            }
+
+            lastProjectDirectory = dialog.SelectedDirectory;
+            await bridgeClient.LaunchOpenCodeAsync(
+                dialog.SelectedDirectory,
+                dialog.RunAsAdministrator,
+                lifetime.Token);
+            operationLabel.Text = dialog.RunAsAdministrator
+                ? "已请求管理员启动；完成 UAC 确认后，Windows Terminal 窗口会自动登记 opencode"
+                : "Windows Terminal / opencode 窗口已启动，正在等待会话登记";
+        }
+        catch (OperationCanceledException error) when (!lifetime.IsCancellationRequested)
+        {
+            operationLabel.Text = error.Message;
+        }
+        catch (Exception error)
+        {
+            ShowOperationError("新建 opencode 失败", error);
+        }
+    }
+
     private async Task ConnectAsync()
     {
         if (operating) return;
@@ -1072,6 +1135,7 @@ internal sealed class MainForm : Form
         }
         catch (Exception error)
         {
+            AppLog.Error("刷新状态异常", error);
             operationLabel.Text = $"刷新失败：{error.Message}";
         }
         finally
@@ -1082,6 +1146,13 @@ internal sealed class MainForm : Form
 
     private void ApplyStatus(BridgeStatus status)
     {
+        if (lastStatus is null)
+        {
+            AppLog.Info(
+                $"桥接在线：version={status.Version} feishu={status.Feishu.State} " +
+                $"activeSessions={status.ActiveSessions} sessions={status.Sessions.Count} " +
+                $"history={status.HistorySessions.Count}");
+        }
         var selectedSessionId =
             (sessionGrid.CurrentRow?.Tag as CodexSession)?.SessionId;
         var selectedHistorySessionId =
@@ -1144,6 +1215,7 @@ internal sealed class MainForm : Form
         connectionButton.FlatAppearance.BorderColor = Border;
         connectionButton.Enabled = !operating;
         newCodexButton.Enabled = !operating;
+        newOpenCodeButton.Enabled = !operating;
         approvalButton.Enabled =
             !operating && !status.Settings.AutoApprove && status.PendingApprovals > 0;
         refreshButton.Enabled = !operating;
@@ -1255,6 +1327,10 @@ internal sealed class MainForm : Form
 
     private void ApplyOfflineStatus()
     {
+        if (lastStatus is not null)
+        {
+            AppLog.Warn("桥接服务离线（/health 失败）。");
+        }
         lastStatus = null;
         serviceValue.Text = "未运行";
         feishuValue.Text = "已断开";
@@ -1267,6 +1343,7 @@ internal sealed class MainForm : Form
         connectionButton.FlatAppearance.BorderColor = Primary;
         connectionButton.Enabled = !operating;
         newCodexButton.Enabled = !operating;
+        newOpenCodeButton.Enabled = !operating;
         approvalButton.Text = "本机审批";
         approvalButton.Enabled = false;
         refreshButton.Enabled = !operating;
@@ -1301,6 +1378,7 @@ internal sealed class MainForm : Form
         operating = value;
         connectionButton.Enabled = !value;
         newCodexButton.Enabled = !value;
+        newOpenCodeButton.Enabled = !value;
         approvalButton.Enabled =
             !value &&
             lastStatus?.Settings.AutoApprove != true &&

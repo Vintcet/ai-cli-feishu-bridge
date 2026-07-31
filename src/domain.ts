@@ -49,6 +49,7 @@ export interface SessionRecord {
   lastNotificationTurnId?: string;
   lastError?: string;
   source?: string;
+  runtime?: "codex" | "opencode";
   endedAt?: string;
   clientProcessId?: number;
   clientProcessStartedAt?: string;
@@ -105,6 +106,7 @@ export interface ApprovalRecord {
   resolution?: ApprovalResolution;
   resolvedAt?: string;
   messageIds: string[];
+  opencodePermissionId?: string;
 }
 
 export interface ApprovalStore {
@@ -220,6 +222,28 @@ export interface SessionEndHookPayload {
 export function shortSessionId(sessionId: string): string {
   const compact = sessionId.replace(/[^a-zA-Z0-9]/g, "");
   return compact.slice(-8).toLowerCase() || sessionId.slice(-8).toLowerCase();
+}
+
+export function stringifyModel(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "";
+  }
+  const item = value as Record<string, unknown>;
+  if (typeof item.id === "string" && item.id) {
+    return typeof item.providerID === "string" &&
+      item.providerID !== "opencode" &&
+      item.providerID
+      ? `${item.providerID}/${item.id}`
+      : item.id;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 export function projectNameFromCwd(cwd: string): string {

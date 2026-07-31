@@ -48,4 +48,9 @@ export const bridgeConfig = {
     process.env.FEISHU_OUTBOUND_FILE_MAX_BYTES,
     30 * 1024 * 1024,
   ),
+  opencodeAutoDiscover: process.env.OPENCODE_AUTO_DISCOVER !== "0",
+  opencodeAutoDiscoverIntervalMs: positiveInteger(
+    process.env.OPENCODE_AUTO_DISCOVER_INTERVAL_MS,
+    20_000,
+  ),
 };

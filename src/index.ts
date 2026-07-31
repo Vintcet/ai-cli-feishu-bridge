@@ -6,6 +6,7 @@ import { bridgeConfig } from "./config.js";
 import { FeishuGateway } from "./feishu.js";
 import { startHookHttpServer } from "./http-server.js";
 import { ManagedTerminalRouter } from "./managed-terminal.js";
+import { OpenCodeManager } from "./opencode-manager.js";
 import { BridgeStore } from "./store.js";
 
 type FeishuEvent = Record<string, any>;
@@ -24,7 +25,75 @@ const controlToken = await store.getOrCreateControlToken();
 const feishu = new FeishuGateway(bridgeConfig.appId, bridgeConfig.appSecret);
 const codex = new CodexRunner(bridgeConfig.codexCommand);
 const managedTerminals = new ManagedTerminalRouter();
-const controller = new BridgeController(store, feishu, codex, managedTerminals, {
+const opencode = new OpenCodeManager(
+  {
+    onInstanceConnected: (port, cwd) => {
+      console.log(`[opencode] Connected to instance on port ${port} (${cwd}).`);
+    },
+    onInstanceDisconnected: (port) => {
+      console.warn(`[opencode] Instance on port ${port} disconnected.`);
+      void controller.handleOpenCodeInstanceDisconnected(port).catch((error) => {
+        console.error("[opencode] Could not finalize disconnected instance:", error);
+      });
+    },
+    eventHandlers: {
+      onSessionCreated: (session) => {
+        void controller.handleOpenCodeSessionCreated(session).catch((error) => {
+          console.error("[opencode] Could not register session:", error);
+        });
+      },
+      onSessionIdle: (sessionId) => {
+        void controller.handleOpenCodeSessionIdle(sessionId).catch((error) => {
+          console.error("[opencode] Could not handle session idle:", error);
+        });
+      },
+      onSessionError: (sessionId, error) => {
+        void controller.handleOpenCodeSessionError(sessionId, error).catch((failure) => {
+          console.error("[opencode] Could not handle session error:", failure);
+        });
+      },
+      onSessionDeleted: (sessionId) => {
+        void controller.handleOpenCodeSessionDeleted(sessionId).catch((error) => {
+          console.error("[opencode] Could not handle session deletion:", error);
+        });
+      },
+      onSessionStatus: (sessionId, status) => {
+        void controller.handleOpenCodeSessionStatus(sessionId, status).catch((error) => {
+          console.error("[opencode] Could not handle session status:", error);
+        });
+      },
+      onSessionCompacted: (sessionId) => {
+        void controller.handleOpenCodeSessionCompacted(sessionId).catch((error) => {
+          console.error("[opencode] Could not handle session compaction:", error);
+        });
+      },
+      onPermissionUpdated: (permission) => {
+        void controller.handleOpenCodePermissionUpdated(permission).catch((error) => {
+          console.error("[opencode] Could not handle permission update:", error);
+        });
+      },
+      onMessagePartUpdated: (properties) => {
+        void controller.handleOpenCodeMessagePartUpdated(properties).catch((error) => {
+          console.error("[opencode] Could not handle message part update:", error);
+        });
+      },
+      onMessageUpdated: (message) => {
+        void controller.handleOpenCodeMessageUpdated(message).catch((error) => {
+          console.error("[opencode] Could not handle message update:", error);
+        });
+      },
+      onDisconnected: () => {
+        // A per-instance disconnect is delivered by the manager's
+        // onInstanceDisconnected callback above.
+      },
+    },
+  },
+  {
+    autoDiscover: bridgeConfig.opencodeAutoDiscover,
+    scanIntervalMs: bridgeConfig.opencodeAutoDiscoverIntervalMs,
+  },
+);
+const controller = new BridgeController(store, feishu, codex, managedTerminals, opencode, {
   bindCommand: bridgeConfig.bindCommand,
   approvalTimeoutMs: bridgeConfig.approvalTimeoutMs,
   inputTimeoutMs: bridgeConfig.inputTimeoutMs,
@@ -35,6 +104,8 @@ const controller = new BridgeController(store, feishu, codex, managedTerminals, 
   uploadTtlMs: bridgeConfig.uploadTtlMs,
   outboundFileMaxBytes: bridgeConfig.outboundFileMaxBytes,
 });
+
+opencode.startAutoDiscovery();
 
 const eventDispatcher = new Lark.EventDispatcher({}).register({
   "im.message.receive_v1": async (data: FeishuEvent) => {
@@ -74,7 +145,7 @@ const hookServer = startHookHttpServer(
   {
     health: () => ({
       ...controller.health(),
-      version: "0.12.8",
+      version: "0.13.1",
       processId: process.pid,
       startedAt: serviceStartedAt,
       feishu: wsClient.getConnectionStatus(),
@@ -94,6 +165,9 @@ const hookServer = startHookHttpServer(
     requestUserInput: (payload) => controller.handleRequestUserInputHook(payload),
     activity: (payload) => controller.handleActivityHook(payload),
     stop: (payload) => controller.handleStopHook(payload),
+    opencodeLaunch: (payload) => controller.handleOpenCodeLaunch(payload),
+    opencodeRegister: (payload) => controller.handleOpenCodeRegister(payload),
+    opencodeUnregister: (payload) => controller.handleOpenCodeUnregister(payload),
   },
   controlToken,
 );
