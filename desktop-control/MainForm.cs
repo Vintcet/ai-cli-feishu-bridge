@@ -31,13 +31,18 @@ internal sealed class MainForm : Form
     private readonly Button connectButton = new();
     private readonly Button disconnectButton = new();
     private readonly Button newCodexButton = new();
+    private readonly Button approvalButton = new();
     private readonly Button aliasButton = new();
     private readonly Button refreshButton = new();
     private readonly Button folderButton = new();
 
     private bool refreshing;
     private bool operating;
+    private bool closing;
     private string? lastProjectDirectory;
+    private BridgeStatus? lastStatus;
+    private ApprovalDialog? approvalDialog;
+    private readonly HashSet<string> dismissedApprovalIds = [];
 
     public MainForm()
     {
@@ -59,6 +64,8 @@ internal sealed class MainForm : Form
         };
         FormClosed += (_, _) =>
         {
+            closing = true;
+            approvalDialog?.MarkResolved();
             refreshTimer.Stop();
             lifetime.Cancel();
             bridgeClient.Dispose();
@@ -189,18 +196,23 @@ internal sealed class MainForm : Form
         ConfigureButton(disconnectButton, "断开", Color.White, Danger, Border);
         ConfigureButton(newCodexButton, "新建 Codex", Success, Color.White);
         newCodexButton.Size = new Size(112, 38);
+        ConfigureButton(approvalButton, "本机审批", Color.White, Warning, Warning);
+        approvalButton.Size = new Size(110, 38);
+        approvalButton.Enabled = false;
         ConfigureButton(refreshButton, "刷新", Color.White, Color.FromArgb(51, 65, 85), Border);
         ConfigureButton(folderButton, "打开目录", Color.White, Color.FromArgb(51, 65, 85), Border);
 
         connectButton.Click += async (_, _) => await ConnectAsync();
         disconnectButton.Click += async (_, _) => await DisconnectAsync();
         newCodexButton.Click += async (_, _) => await NewCodexAsync();
+        approvalButton.Click += (_, _) => OpenPendingApproval();
         refreshButton.Click += async (_, _) => await RefreshStatusAsync(force: true);
         folderButton.Click += (_, _) => bridgeClient.OpenBridgeFolder();
 
         buttons.Controls.Add(connectButton);
         buttons.Controls.Add(disconnectButton);
         buttons.Controls.Add(newCodexButton);
+        buttons.Controls.Add(approvalButton);
         buttons.Controls.Add(refreshButton);
         buttons.Controls.Add(folderButton);
         toolbar.Controls.Add(operationLabel, 0, 0);
@@ -603,6 +615,7 @@ internal sealed class MainForm : Form
 
     private void ApplyStatus(BridgeStatus status)
     {
+        lastStatus = status;
         var feishuState = status.Feishu.State.ToLowerInvariant();
         var feishuConnected = feishuState == "connected";
         serviceValue.Text = "运行中";
@@ -625,7 +638,8 @@ internal sealed class MainForm : Form
 
         if (status.PendingApprovals > 0)
         {
-            operationLabel.Text = $"有 {status.PendingApprovals} 个操作等待飞书审批";
+            operationLabel.Text =
+                $"有 {status.PendingApprovals} 个操作等待审批，可在本机或飞书处理";
         }
         else if (status.PendingInputs > 0)
         {
@@ -650,6 +664,7 @@ internal sealed class MainForm : Form
         connectButton.Enabled = !operating && !feishuConnected;
         disconnectButton.Enabled = !operating;
         newCodexButton.Enabled = !operating;
+        approvalButton.Enabled = !operating && status.PendingApprovals > 0;
         refreshButton.Enabled = !operating;
 
         sessionGrid.Rows.Clear();
@@ -711,10 +726,12 @@ internal sealed class MainForm : Form
             }
         }
         UpdateAliasButtonState();
+        SyncApprovalDialog(status);
     }
 
     private void ApplyOfflineStatus()
     {
+        lastStatus = null;
         serviceValue.Text = "未运行";
         feishuValue.Text = "已断开";
         bindingsValue.Text = "—";
@@ -723,9 +740,18 @@ internal sealed class MainForm : Form
         connectButton.Enabled = !operating;
         disconnectButton.Enabled = false;
         newCodexButton.Enabled = !operating;
+        approvalButton.Text = "本机审批";
+        approvalButton.Enabled = false;
         refreshButton.Enabled = !operating;
         sessionGrid.Rows.Clear();
         UpdateAliasButtonState();
+        dismissedApprovalIds.Clear();
+        if (approvalDialog is not null)
+        {
+            var dialog = approvalDialog;
+            approvalDialog = null;
+            dialog.MarkResolved();
+        }
         if (!operating)
         {
             operationLabel.Text = "点击“连接”启动飞书桥接服务";
@@ -745,6 +771,8 @@ internal sealed class MainForm : Form
         connectButton.Enabled = !value;
         disconnectButton.Enabled = !value;
         newCodexButton.Enabled = !value;
+        approvalButton.Enabled =
+            !value && (lastStatus?.Approvals.Count(item => item.Status == "pending") ?? 0) > 0;
         aliasButton.Enabled = !value && sessionGrid.CurrentRow?.Tag is CodexSession;
         refreshButton.Enabled = !value;
         folderButton.Enabled = !value;
@@ -758,6 +786,142 @@ internal sealed class MainForm : Form
     {
         aliasButton.Enabled = !operating && sessionGrid.CurrentRow?.Tag is CodexSession;
     }
+
+    private void SyncApprovalDialog(BridgeStatus status)
+    {
+        var pending = status.Approvals
+            .Where(item => item.Status == "pending")
+            .OrderBy(item => ParseTime(item.CreatedAt))
+            .ToList();
+        approvalButton.Text = pending.Count > 0
+            ? $"本机审批 ({pending.Count})"
+            : "本机审批";
+        approvalButton.Enabled = !operating && pending.Count > 0;
+
+        dismissedApprovalIds.RemoveWhere(
+            requestId => pending.All(item => item.RequestId != requestId));
+
+        if (approvalDialog is not null)
+        {
+            var current = status.Approvals.FirstOrDefault(
+                item => item.RequestId == approvalDialog.RequestId);
+            if (current is null || current.Status != "pending")
+            {
+                operationLabel.Text = ApprovalResolutionMessage(current?.Resolution);
+                var dialog = approvalDialog;
+                approvalDialog = null;
+                dialog.MarkResolved();
+            }
+        }
+
+        if (approvalDialog is null)
+        {
+            var next = pending.FirstOrDefault(
+                item => !dismissedApprovalIds.Contains(item.RequestId));
+            if (next is not null)
+            {
+                ShowApprovalDialog(next);
+            }
+        }
+    }
+
+    private void OpenPendingApproval()
+    {
+        if (approvalDialog is not null)
+        {
+            approvalDialog.Show();
+            approvalDialog.BringToFront();
+            approvalDialog.Activate();
+            return;
+        }
+        if (lastStatus is null)
+        {
+            return;
+        }
+        dismissedApprovalIds.Clear();
+        SyncApprovalDialog(lastStatus);
+    }
+
+    private void ShowApprovalDialog(BridgeApproval approval)
+    {
+        if (closing || approvalDialog is not null)
+        {
+            return;
+        }
+
+        var dialog = new ApprovalDialog(
+            approval,
+            resolution => ResolveApprovalAsync(approval, resolution));
+        dialog.Dismissed += (_, _) => dismissedApprovalIds.Add(approval.RequestId);
+        dialog.FormClosed += (_, _) =>
+        {
+            if (ReferenceEquals(approvalDialog, dialog))
+            {
+                approvalDialog = null;
+            }
+            if (!closing && !IsDisposed)
+            {
+                BeginInvoke(() =>
+                {
+                    if (lastStatus is not null)
+                    {
+                        SyncApprovalDialog(lastStatus);
+                    }
+                });
+            }
+            dialog.Dispose();
+        };
+        approvalDialog = dialog;
+        if (WindowState == FormWindowState.Minimized)
+        {
+            WindowState = FormWindowState.Normal;
+        }
+        Show();
+        BringToFront();
+        dialog.Show(this);
+        dialog.BringToFront();
+        dialog.Activate();
+    }
+
+    private async Task<ApprovalResolveResult> ResolveApprovalAsync(
+        BridgeApproval approval,
+        string resolution)
+    {
+        var result = await bridgeClient.ResolveApprovalAsync(
+            approval.RequestId,
+            resolution,
+            lifetime.Token);
+        if (lastStatus is not null)
+        {
+            var current = lastStatus.Approvals.FirstOrDefault(
+                item => item.RequestId == approval.RequestId);
+            if (current is not null)
+            {
+                current.Status = "resolved";
+                current.Resolution = result.Resolution;
+                current.ResolvedAt = DateTime.UtcNow.ToString("O");
+                lastStatus.PendingApprovals = Math.Max(0, lastStatus.PendingApprovals - 1);
+            }
+        }
+        operationLabel.Text = result.AlreadyResolved
+            ? ApprovalResolutionMessage(result.Resolution)
+            : resolution switch
+            {
+                "allow" => $"已在本机批准 {approval.SessionLabel} 的操作",
+                "deny" => $"已在本机拒绝 {approval.SessionLabel} 的操作",
+                _ => "审批已处理",
+            };
+        return result;
+    }
+
+    private static string ApprovalResolutionMessage(string? resolution) => resolution switch
+    {
+        "allow" => "审批已在飞书批准，Codex 正在继续执行",
+        "deny" => "审批已在飞书拒绝，Codex 已停止这次操作",
+        "local" => "桥接服务曾中断，这条审批已交还 Codex 原窗口",
+        "timeout" => "审批等待超时，已交还 Codex 原窗口",
+        _ => "这条审批已在另一端处理",
+    };
 
     private static void ConfigureButton(
         Button button,

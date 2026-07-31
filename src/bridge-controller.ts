@@ -169,6 +169,7 @@ export class BridgeController {
 
   health(): Record<string, unknown> {
     const sessions = this.listActiveSessions();
+    const approvals = this.listApprovalViews();
     const pairingCode = this.store.getPairingCode();
     return {
       ok: true,
@@ -179,8 +180,8 @@ export class BridgeController {
         ? `${this.config.bindCommand} ${pairingCode}`
         : "",
       activeSessions: sessions.length,
-      pendingApprovals: sessions.filter((session) => session.status === "pending_approval")
-        .length,
+      pendingApprovals: approvals.filter((approval) => approval.status === "pending").length,
+      approvals,
       pendingInputs: this.inputWaiters.size,
       queuedPrompts:
         [...this.externalQueues.values()].reduce(
@@ -298,6 +299,54 @@ export class BridgeController {
           },
         }
       : { ok: false, error: result.error };
+  }
+
+  async handleLocalApproval(
+    value: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const requestId =
+      typeof value.requestId === "string" ? value.requestId.trim() : "";
+    const resolution = value.resolution;
+    if (
+      !requestId ||
+      requestId.length > 128 ||
+      (resolution !== "allow" &&
+        resolution !== "deny")
+    ) {
+      return { ok: false, error: "审批请求或处理方式不正确。" };
+    }
+
+    const existing = this.store.getApproval(requestId);
+    if (!existing) {
+      return { ok: false, error: "审批请求不存在或已过期。" };
+    }
+    if (existing.status !== "pending") {
+      return {
+        ok: true,
+        alreadyResolved: true,
+        resolution: existing.resolution ?? "local",
+        message: "这条审批已由另一端处理。",
+      };
+    }
+
+    const completed = await this.completeApproval(requestId, resolution);
+    if (!completed) {
+      const current = this.store.getApproval(requestId);
+      return current && current.status !== "pending"
+        ? {
+            ok: true,
+            alreadyResolved: true,
+            resolution: current.resolution ?? "local",
+            message: "这条审批已由另一端处理。",
+          }
+        : { ok: false, error: "审批状态没有改变，请刷新后重试。" };
+    }
+    return {
+      ok: true,
+      alreadyResolved: false,
+      resolution,
+      message: approvalText(resolution),
+    };
   }
 
   async handleSessionStartHook(
@@ -431,18 +480,6 @@ export class BridgeController {
     await this.store.createApproval(approval);
 
     const bindings = this.uniqueChatBindings();
-    if (bindings.length === 0) {
-      await this.store.resolveApproval(approval.requestId, "local");
-      await this.store.upsertSession({
-        sessionId: payload.session_id,
-        cwd: payload.cwd,
-        model: payload.model,
-        turnId: payload.turn_id,
-        status: "local_approval",
-      });
-      return {};
-    }
-
     const resultPromise = new Promise<ApprovalResolution>((resolve) => {
       const timer = setTimeout(() => {
         void this.completeApproval(approval.requestId, "timeout");
@@ -471,11 +508,13 @@ export class BridgeController {
       }
     }
 
-    if (sentCount === 0) {
-      await this.completeApproval(approval.requestId, "local");
-    } else {
+    if (sentCount > 0) {
       console.log(
-        `[approval] Waiting for Feishu decision for session #${session.shortId}.`,
+        `[approval] Waiting for desktop or Feishu decision for session #${session.shortId}.`,
+      );
+    } else {
+      console.warn(
+        `[approval] Feishu unavailable; waiting for desktop decision for session #${session.shortId}.`,
       );
     }
 
@@ -863,7 +902,7 @@ export class BridgeController {
         await this.respond(
           messageId,
           chatId,
-          "这个会话正在等待审批。请点击审批卡片按钮；也可以引用卡片回复“批准”“拒绝”或“本机确认”。",
+          "这个会话正在等待审批。请点击审批卡片按钮，或引用卡片回复“批准”或“拒绝”。",
         );
       }
       return;
@@ -1581,6 +1620,38 @@ export class BridgeController {
     return true;
   }
 
+  private listApprovalViews(): Array<Record<string, unknown>> {
+    const now = Date.now();
+    const recentCutoff = now - 10 * 60 * 1000;
+    return this.store
+      .listApprovals()
+      .filter(
+        (approval) =>
+          approval.status === "pending" ||
+          (approval.resolvedAt !== undefined &&
+            Date.parse(approval.resolvedAt) >= recentCutoff),
+      )
+      .map((approval) => {
+        const session = this.store.getSession(approval.sessionId);
+        return {
+          requestId: approval.requestId,
+          sessionId: approval.sessionId,
+          sessionLabel: session
+            ? sessionLabel(session)
+            : "#" + shortSessionId(approval.sessionId),
+          projectName: session?.projectName ?? projectNameFromCwd(approval.cwd),
+          cwd: approval.cwd,
+          toolName: approval.toolName,
+          toolPreview: approval.toolPreview,
+          createdAt: approval.createdAt,
+          expiresAt: approval.expiresAt,
+          status: approval.status,
+          resolution: approval.resolution ?? "",
+          resolvedAt: approval.resolvedAt ?? "",
+        };
+      });
+  }
+
   private listActiveSessions(): SessionRecord[] {
     const now = Date.now();
     const registrations = this.managedTerminals.listOnline(now);
@@ -2039,8 +2110,6 @@ function actionToResolution(action: unknown): ApprovalResolution | undefined {
       return "allow";
     case "approval_deny":
       return "deny";
-    case "approval_local":
-      return "local";
     default:
       return undefined;
   }
@@ -2053,9 +2122,6 @@ function approvalResolutionFromText(text: string): ApprovalResolution | undefine
   }
   if (["拒绝", "不允许", "deny", "reject"].includes(normalized)) {
     return "deny";
-  }
-  if (["本机确认", "转回本机", "电脑确认", "local"].includes(normalized)) {
-    return "local";
   }
   return undefined;
 }

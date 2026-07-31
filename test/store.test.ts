@@ -86,6 +86,24 @@ test("claims each inbound message id once and persists the claim", async () => {
   }
 });
 
+test("creates one persistent local control token", async () => {
+  const directory = await temporaryDirectory();
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const first = await store.getOrCreateControlToken();
+    const second = await store.getOrCreateControlToken();
+    assert.match(first, /^[a-f0-9]{64}$/);
+    assert.equal(second, first);
+
+    const restarted = new BridgeStore(directory);
+    await restarted.init();
+    assert.equal(await restarted.getOrCreateControlToken(), first);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("explicit null clears stale managed terminal metadata", async () => {
   const directory = await temporaryDirectory();
   try {

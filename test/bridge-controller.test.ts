@@ -299,6 +299,180 @@ test("a managed session steers by default and queues explicitly", async () => {
   }
 });
 
+test("local and Feishu approval resolutions share one atomic result", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-approval-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      {
+        openId: "owner",
+        chatId: "chat-owner",
+        chatType: "p2p",
+        boundAt: new Date().toISOString(),
+      },
+      code,
+    );
+    const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "running",
+      source: "startup",
+      clientProcessId: process.pid,
+    });
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      controllerConfig(directory),
+    );
+
+    const hookResultPromise = controller.handlePermissionHook({
+      hook_event_name: "PermissionRequest",
+      session_id: sessionId,
+      turn_id: "turn-approval-1",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: {
+        command: "npm test",
+        description: "运行测试",
+      },
+      transcript_path: null,
+    });
+    while (feishu.cards.length === 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    const health = controller.health() as {
+      pendingApprovals: number;
+      approvals: Array<{ requestId: string; status: string }>;
+    };
+    assert.equal(health.pendingApprovals, 1);
+    assert.equal(health.approvals[0]?.status, "pending");
+    const requestId = health.approvals[0]!.requestId;
+
+    const [localResult, competingResult] = await Promise.all([
+      controller.handleLocalApproval({ requestId, resolution: "allow" }),
+      controller.handleLocalApproval({ requestId, resolution: "deny" }),
+    ]);
+    const results = [localResult, competingResult] as Array<{
+      ok?: boolean;
+      alreadyResolved?: boolean;
+      resolution?: string;
+    }>;
+    assert.ok(results.every((result) => result.ok === true));
+    assert.equal(results.filter((result) => result.alreadyResolved !== true).length, 1);
+
+    const hookResult = await hookResultPromise;
+    assert.match(JSON.stringify(hookResult), /"behavior":"allow"/);
+    const resolvedHealth = controller.health() as {
+      pendingApprovals: number;
+      approvals: Array<{ requestId: string; status: string; resolution: string }>;
+    };
+    assert.equal(resolvedHealth.pendingApprovals, 0);
+    const resolvedApproval = resolvedHealth.approvals.find(
+      (item) => item.requestId === requestId,
+    );
+    assert.equal(resolvedApproval?.status, "resolved");
+    assert.equal(resolvedApproval?.resolution, "allow");
+    for (let attempt = 0; attempt < 30 && feishu.patchedCards.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(feishu.patchedCards.some((item) => item.messageId === feishu.cards[0]!.messageId));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an approval completed in Feishu is visible as resolved to the desktop", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-approval-sync-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      {
+        openId: "owner",
+        chatId: "chat-owner",
+        chatType: "p2p",
+        boundAt: new Date().toISOString(),
+      },
+      code,
+    );
+    const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "running",
+      source: "startup",
+      clientProcessId: process.pid,
+    });
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      controllerConfig(directory),
+    );
+
+    const hookResultPromise = controller.handlePermissionHook({
+      hook_event_name: "PermissionRequest",
+      session_id: sessionId,
+      turn_id: "turn-approval-2",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { command: "*** Begin Patch" },
+      transcript_path: null,
+    });
+    while (feishu.cards.length === 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const health = controller.health() as {
+      approvals: Array<{ requestId: string }>;
+    };
+    const requestId = health.approvals[0]!.requestId;
+
+    const actionResult = await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: {
+        value: {
+          action: "approval_deny",
+          requestId,
+          sessionId,
+        },
+      },
+    });
+    assert.equal(actionResult.toast.type, "success");
+    const hookResult = await hookResultPromise;
+    assert.match(JSON.stringify(hookResult), /"behavior":"deny"/);
+
+    const desktopResult = await controller.handleLocalApproval({
+      requestId,
+      resolution: "allow",
+    }) as {
+      ok?: boolean;
+      alreadyResolved?: boolean;
+      resolution?: string;
+    };
+    assert.equal(desktopResult.ok, true);
+    assert.equal(desktopResult.alreadyResolved, true);
+    assert.equal(desktopResult.resolution, "deny");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("request_user_input can be answered by replying to the Feishu card", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-input-"));
   try {

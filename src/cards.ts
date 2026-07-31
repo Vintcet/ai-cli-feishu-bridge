@@ -65,7 +65,7 @@ export function buildApprovalCard(
         elements: [
           {
             tag: "plain_text",
-            content: "只批准这一次。若信息不足，可转回电脑端查看完整上下文。",
+            content: "只批准这一次。也可以在 Codex 飞书助手的本机审批窗口处理，先处理的一端生效。",
           },
         ],
       },
@@ -88,15 +88,6 @@ export function buildApprovalCard(
             text: { tag: "plain_text", content: "拒绝" },
             value: {
               action: "approval_deny",
-              requestId: approval.requestId,
-              sessionId: approval.sessionId,
-            },
-          },
-          {
-            tag: "button",
-            text: { tag: "plain_text", content: "转回本机确认" },
-            value: {
-              action: "approval_local",
               requestId: approval.requestId,
               sessionId: approval.sessionId,
             },

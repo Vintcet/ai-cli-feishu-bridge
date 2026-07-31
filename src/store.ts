@@ -26,6 +26,7 @@ export class BridgeStore {
   private readonly sessionFile: string;
   private readonly routeFile: string;
   private readonly approvalFile: string;
+  private readonly controlTokenFile: string;
 
   private bindings: BindingStore = emptyBindings();
   private sessions: SessionStore = emptySessions();
@@ -38,6 +39,7 @@ export class BridgeStore {
     this.sessionFile = path.join(dataDirectory, "sessions.json");
     this.routeFile = path.join(dataDirectory, "message-routes.json");
     this.approvalFile = path.join(dataDirectory, "approvals.json");
+    this.controlTokenFile = path.join(dataDirectory, "control-token.json");
   }
 
   async init(): Promise<void> {
@@ -132,6 +134,23 @@ export class BridgeStore {
 
   getPairingCode(): string | undefined {
     return this.bindings.ownerOpenId ? undefined : this.bindings.pairingCode;
+  }
+
+  async getOrCreateControlToken(): Promise<string> {
+    const existing = await this.readJson<{ token?: unknown }>(
+      this.controlTokenFile,
+      {},
+    );
+    if (
+      typeof existing.token === "string" &&
+      /^[a-f0-9]{64}$/i.test(existing.token)
+    ) {
+      return existing.token;
+    }
+
+    const token = randomBytes(32).toString("hex");
+    await this.writeJson(this.controlTokenFile, { token });
+    return token;
   }
 
   async bindOwner(
@@ -355,6 +374,18 @@ export class BridgeStore {
 
   getApproval(requestId: string): ApprovalRecord | undefined {
     return this.approvals.requests[requestId];
+  }
+
+  listApprovals(): ApprovalRecord[] {
+    return Object.values(this.approvals.requests)
+      .map((approval) => ({
+        ...approval,
+        messageIds: [...approval.messageIds],
+      }))
+      .sort(
+        (left, right) =>
+          Date.parse(left.createdAt) - Date.parse(right.createdAt),
+      );
   }
 
   hasPendingApprovalForSession(sessionId: string): boolean {

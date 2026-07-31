@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.ComponentModel;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace CodexFeishuControl;
 
@@ -82,6 +83,46 @@ internal sealed class BridgeClient : IDisposable
             throw new InvalidOperationException(
                 string.IsNullOrWhiteSpace(result?.Error) ? "设置会话别名失败。" : result.Error);
         }
+    }
+
+    public async Task<ApprovalResolveResult> ResolveApprovalAsync(
+        string requestId,
+        string resolution,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(requestId) ||
+            resolution is not ("allow" or "deny"))
+        {
+            throw new InvalidOperationException("审批请求参数不正确。");
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "approvals/resolve")
+        {
+            Content = JsonContent.Create(new { requestId, resolution }),
+        };
+        request.Headers.Add(
+            "X-Codex-Feishu-Control-Token",
+            ReadControlToken(BridgeRoot));
+        using var response = await httpClient.SendAsync(request, cancellationToken);
+        ApprovalResolveResult? result = null;
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            result = await JsonSerializer.DeserializeAsync<ApprovalResolveResult>(
+                stream,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
+                cancellationToken);
+        }
+        catch (JsonException)
+        {
+        }
+
+        if (!response.IsSuccessStatusCode || result?.Ok != true)
+        {
+            throw new InvalidOperationException(
+                string.IsNullOrWhiteSpace(result?.Error) ? "处理本机审批失败。" : result.Error);
+        }
+        return result;
     }
 
     public void OpenBridgeFolder()
@@ -379,7 +420,32 @@ internal sealed class BridgeClient : IDisposable
         return 8765;
     }
 
+    private static string ReadControlToken(string bridgeRoot)
+    {
+        var tokenPath = Path.Combine(bridgeRoot, "data", "control-token.json");
+        try
+        {
+            var file = JsonSerializer.Deserialize<ControlTokenFile>(File.ReadAllText(tokenPath));
+            if (!string.IsNullOrWhiteSpace(file?.Token) && file.Token.Length == 64)
+            {
+                return file.Token;
+            }
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or JsonException)
+        {
+        }
+        throw new InvalidOperationException(
+            "找不到本机审批控制令牌。请先点击“连接”，再重新打开 Codex 飞书助手。");
+    }
+
     public void Dispose() => httpClient.Dispose();
 
     private sealed record ProcessResult(int ExitCode, string Output, string Error);
+
+    private sealed class ControlTokenFile
+    {
+        [JsonPropertyName("token")]
+        public string Token { get; set; } = "";
+    }
 }

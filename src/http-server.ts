@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 
 import {
@@ -22,6 +23,7 @@ export interface HookHttpHandlers {
     payload: Record<string, unknown>,
   ) => Promise<Record<string, unknown>>;
   sessionAlias: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  localApproval: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
   permission: (payload: PermissionHookPayload) => Promise<Record<string, unknown>>;
   requestUserInput: (
     payload: RequestUserInputHookPayload,
@@ -36,10 +38,11 @@ export function startHookHttpServer(
   host: string,
   port: number,
   handlers: HookHttpHandlers,
+  controlToken: string,
 ): http.Server {
   const server = http.createServer(async (request, response) => {
     try {
-      await routeRequest(request, response, handlers);
+      await routeRequest(request, response, handlers, controlToken);
     } catch (error) {
       console.error("[http] Hook request failed:", error);
       if (!response.headersSent) {
@@ -63,6 +66,7 @@ async function routeRequest(
   request: IncomingMessage,
   response: ServerResponse,
   handlers: HookHttpHandlers,
+  controlToken: string,
 ): Promise<void> {
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -77,8 +81,8 @@ async function routeRequest(
     return;
   }
 
-  const body = await readJsonBody(request);
   if (url.pathname === "/managed-terminals/register") {
+    const body = await readJsonBody(request);
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       sendJson(response, 400, {});
       return;
@@ -92,6 +96,7 @@ async function routeRequest(
   }
 
   if (url.pathname === "/managed-terminals/unregister") {
+    const body = await readJsonBody(request);
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       sendJson(response, 400, {});
       return;
@@ -105,6 +110,7 @@ async function routeRequest(
   }
 
   if (url.pathname === "/sessions/alias") {
+    const body = await readJsonBody(request);
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       sendJson(response, 400, { ok: false, error: "请求格式不正确。" });
       return;
@@ -114,7 +120,23 @@ async function routeRequest(
     return;
   }
 
+  if (url.pathname === "/approvals/resolve") {
+    if (!hasValidControlToken(request, controlToken)) {
+      sendJson(response, 401, { ok: false, error: "本机控制身份验证失败。" });
+      return;
+    }
+    const body = await readJsonBody(request);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      sendJson(response, 400, { ok: false, error: "请求格式不正确。" });
+      return;
+    }
+    const result = await handlers.localApproval(body as Record<string, unknown>);
+    sendJson(response, result.ok === true ? 200 : 400, result);
+    return;
+  }
+
   if (url.pathname === "/hooks/session-start") {
+    const body = await readJsonBody(request);
     if (!isSessionStartHookPayload(body)) {
       sendJson(response, 400, {});
       return;
@@ -124,6 +146,7 @@ async function routeRequest(
   }
 
   if (url.pathname === "/hooks/session-end") {
+    const body = await readJsonBody(request);
     if (!isSessionEndHookPayload(body)) {
       sendJson(response, 400, {});
       return;
@@ -133,6 +156,7 @@ async function routeRequest(
   }
 
   if (url.pathname === "/hooks/permission") {
+    const body = await readJsonBody(request);
     if (!isPermissionHookPayload(body)) {
       sendJson(response, 400, {});
       return;
@@ -142,6 +166,7 @@ async function routeRequest(
   }
 
   if (url.pathname === "/hooks/request-user-input") {
+    const body = await readJsonBody(request);
     if (!isRequestUserInputHookPayload(body)) {
       sendJson(response, 400, {});
       return;
@@ -151,6 +176,7 @@ async function routeRequest(
   }
 
   if (url.pathname === "/hooks/activity") {
+    const body = await readJsonBody(request);
     if (!isActivityHookPayload(body)) {
       sendJson(response, 400, {});
       return;
@@ -160,6 +186,7 @@ async function routeRequest(
   }
 
   if (url.pathname === "/hooks/stop") {
+    const body = await readJsonBody(request);
     if (!isStopHookPayload(body)) {
       sendJson(response, 400, {});
       return;
@@ -169,6 +196,20 @@ async function routeRequest(
   }
 
   sendJson(response, 404, { error: "not_found" });
+}
+
+function hasValidControlToken(
+  request: IncomingMessage,
+  expectedToken: string,
+): boolean {
+  const header = request.headers["x-codex-feishu-control-token"];
+  const token = Array.isArray(header) ? header[0] : header;
+  if (typeof token !== "string") {
+    return false;
+  }
+  const actual = Buffer.from(token, "utf8");
+  const expected = Buffer.from(expectedToken, "utf8");
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {

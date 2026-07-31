@@ -45,6 +45,9 @@ internal sealed class BridgeStatus
 
     [JsonPropertyName("sessions")]
     public List<CodexSession> Sessions { get; set; } = [];
+
+    [JsonPropertyName("approvals")]
+    public List<BridgeApproval> Approvals { get; set; } = [];
 }
 
 internal sealed class FeishuStatus
@@ -120,6 +123,63 @@ internal sealed class AliasUpdateResult
 {
     [JsonPropertyName("ok")]
     public bool Ok { get; set; }
+
+    [JsonPropertyName("error")]
+    public string Error { get; set; } = "";
+}
+
+internal sealed class BridgeApproval
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = "";
+
+    [JsonPropertyName("sessionId")]
+    public string SessionId { get; set; } = "";
+
+    [JsonPropertyName("sessionLabel")]
+    public string SessionLabel { get; set; } = "";
+
+    [JsonPropertyName("projectName")]
+    public string ProjectName { get; set; } = "";
+
+    [JsonPropertyName("cwd")]
+    public string Cwd { get; set; } = "";
+
+    [JsonPropertyName("toolName")]
+    public string ToolName { get; set; } = "";
+
+    [JsonPropertyName("toolPreview")]
+    public string ToolPreview { get; set; } = "";
+
+    [JsonPropertyName("createdAt")]
+    public string CreatedAt { get; set; } = "";
+
+    [JsonPropertyName("expiresAt")]
+    public string ExpiresAt { get; set; } = "";
+
+    [JsonPropertyName("status")]
+    public string Status { get; set; } = "";
+
+    [JsonPropertyName("resolution")]
+    public string Resolution { get; set; } = "";
+
+    [JsonPropertyName("resolvedAt")]
+    public string ResolvedAt { get; set; } = "";
+}
+
+internal sealed class ApprovalResolveResult
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; set; }
+
+    [JsonPropertyName("alreadyResolved")]
+    public bool AlreadyResolved { get; set; }
+
+    [JsonPropertyName("resolution")]
+    public string Resolution { get; set; } = "";
+
+    [JsonPropertyName("message")]
+    public string Message { get; set; } = "";
 
     [JsonPropertyName("error")]
     public string Error { get; set; } = "";

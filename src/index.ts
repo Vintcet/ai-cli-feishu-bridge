@@ -19,6 +19,7 @@ if (!bridgeConfig.appId || !bridgeConfig.appSecret) {
 
 const store = new BridgeStore(bridgeConfig.dataDirectory);
 await store.init();
+const controlToken = await store.getOrCreateControlToken();
 
 const feishu = new FeishuGateway(bridgeConfig.appId, bridgeConfig.appSecret);
 const codex = new CodexRunner(bridgeConfig.codexCommand);
@@ -73,7 +74,7 @@ const hookServer = startHookHttpServer(
   {
     health: () => ({
       ...controller.health(),
-      version: "0.9.0",
+      version: "0.10.0",
       processId: process.pid,
       startedAt: serviceStartedAt,
       feishu: wsClient.getConnectionStatus(),
@@ -83,6 +84,7 @@ const hookServer = startHookHttpServer(
     managedTerminalUnregister: (payload) =>
       controller.handleManagedTerminalUnregistration(payload),
     sessionAlias: (payload) => controller.handleSessionAliasUpdate(payload),
+    localApproval: (payload) => controller.handleLocalApproval(payload),
     sessionStart: (payload) => controller.handleSessionStartHook(payload),
     sessionEnd: (payload) => controller.handleSessionEndHook(payload),
     permission: (payload) => controller.handlePermissionHook(payload),
@@ -90,6 +92,7 @@ const hookServer = startHookHttpServer(
     activity: (payload) => controller.handleActivityHook(payload),
     stop: (payload) => controller.handleStopHook(payload),
   },
+  controlToken,
 );
 
 process.on("unhandledRejection", (error) => {
