@@ -297,7 +297,7 @@ test("retry settings accept bounded integers and reject invalid values", async (
   }
 });
 
-test("an external session queues additional Feishu replies", async () => {
+test("an external session rejects ordinary Feishu replies without a background resume", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-lock-"));
   try {
     const store = new BridgeStore(directory);
@@ -333,15 +333,18 @@ test("an external session queues additional Feishu replies", async () => {
       controller.handleFeishuMessage(messageEvent("prompt-1", "owner", "第一条")),
       controller.handleFeishuMessage(messageEvent("prompt-2", "owner", "第二条")),
     ]);
-    assert.equal(codex.resumeCount, 1);
-    assert.equal(codex.prompts.length, 1);
-    assert.ok(feishu.replies.some((item) => /桥接队列第 1 位/.test(item.text)));
-    assert.equal(controller.health().queuedPrompts, 1);
-
-    await codex.finish();
-    assert.equal(codex.resumeCount, 2);
-    assert.equal(codex.prompts.length, 2);
+    assert.equal(codex.resumeCount, 0);
+    assert.equal(codex.prompts.length, 0);
+    assert.equal(
+      feishu.replies.filter((item) => /外部终端打开/.test(item.text)).length,
+      2,
+    );
+    assert.ok(feishu.replies.every((item) => !/已发送给|桥接队列/.test(item.text)));
     assert.equal(controller.health().queuedPrompts, 0);
+    assert.equal(
+      store.getSession("019faef0-d0bb-7703-af82-17ee9b45397b")?.status,
+      "waiting",
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -831,27 +834,28 @@ test("an explicit file request returns only project files and hides the protocol
       code,
     );
     const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const terminalId = "terminal-file-return";
     await store.upsertSession({
       sessionId,
       cwd: directory,
       status: "waiting",
       source: "startup",
-      clientProcessId: process.pid,
+      managedTerminalId: terminalId,
     });
     const feishu = new FakeFeishu();
-    const codex = new FakeCodex();
+    const terminals = new FakeManagedTerminals(terminalId, directory, sessionId);
     const controller = new BridgeController(
       store,
       feishu as unknown as FeishuGateway,
-      codex as unknown as CodexRunner,
-      new ManagedTerminalRouter(),
+      new FakeCodex() as unknown as CodexRunner,
+      terminals as unknown as ManagedTerminalRouter,
       controllerConfig(directory),
     );
 
     await controller.handleFeishuMessage(
       messageEvent("file-request", "owner", "发文件 生成一份报告"),
     );
-    assert.match(codex.prompts[0] ?? "", /BRIDGE_SEND_FILE/);
+    assert.match(terminals.sends[0]?.prompt ?? "", /BRIDGE_SEND_FILE/);
     const report = path.join(directory, "report.txt");
     await writeFile(report, "done", "utf8");
     await controller.handleStopHook({
@@ -892,20 +896,21 @@ test("a Feishu image is staged and attached to the next routed prompt", async ()
       code,
     );
     const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const terminalId = "terminal-image-upload";
     await store.upsertSession({
       sessionId,
       cwd: directory,
       status: "waiting",
       source: "startup",
-      clientProcessId: process.pid,
+      managedTerminalId: terminalId,
     });
     const feishu = new FakeFeishu();
-    const codex = new FakeCodex();
+    const terminals = new FakeManagedTerminals(terminalId, directory, sessionId);
     const controller = new BridgeController(
       store,
       feishu as unknown as FeishuGateway,
-      codex as unknown as CodexRunner,
-      new ManagedTerminalRouter(),
+      new FakeCodex() as unknown as CodexRunner,
+      terminals as unknown as ManagedTerminalRouter,
       controllerConfig(directory),
     );
 
@@ -923,8 +928,8 @@ test("a Feishu image is staged and attached to the next routed prompt", async ()
     await controller.handleFeishuMessage(
       messageEvent("image-instruction", "owner", "分析这张图片"),
     );
-    assert.match(codex.prompts[0] ?? "", /uploads[\\/]/);
-    assert.match(codex.prompts[0] ?? "", /用户要求：分析这张图片/);
+    assert.match(terminals.sends[0]?.prompt ?? "", /uploads[\\/]/);
+    assert.match(terminals.sends[0]?.prompt ?? "", /用户要求：分析这张图片/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

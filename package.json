@@ -1,6 +1,6 @@
 {
   "name": "codex-feishu-bridge",
-  "version": "0.11.6",
+  "version": "0.11.7",
   "private": true,
   "description": "A local multi-session bridge between Codex hooks and a Feishu custom app.",
   "type": "module",

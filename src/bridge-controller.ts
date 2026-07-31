@@ -989,7 +989,7 @@ export class BridgeController {
       await this.respond(
         messageId,
         chatId,
-        "用法：\n1. 引用某条 Codex 通知并回复；\n2. 发送 @别名 内容，运行中会直接插话；\n3. 发送“排队 @别名 内容”，排到下一轮；\n4. 发送“发文件 @别名 要求”，让 Codex 完成后把文件发回；\n5. 可直接发送图片或文件，下一条再发送处理要求；\n6. 发送“会话”或“别名”查看路由；\n7. 审批和补充信息卡片都可在飞书处理。",
+        "用法：\n1. 引用助手同步窗口的 Codex 通知并回复；\n2. 发送 @别名 内容，运行中会直接插话；\n3. 发送“排队 @别名 内容”，排到下一轮；\n4. 发送“发文件 @别名 要求”，让 Codex 完成后把文件发回；\n5. 可直接发送图片或文件，下一条再发送处理要求；\n6. 发送“会话”或“别名”查看路由；\n7. 外部会话仅支持通知、审批和补充信息，普通消息不会写入；\n8. 审批和补充信息卡片都可在飞书处理。",
       );
       return;
     }
@@ -1113,6 +1113,14 @@ export class BridgeController {
     fileReturnRequested ||= nestedDirectives.fileReturn;
     if (!prompt) {
       await this.respond(messageId, chatId, "要发送给 Codex 的内容不能为空。");
+      return;
+    }
+    if (!this.managedTerminals.isManaged(target)) {
+      await this.respond(
+        messageId,
+        chatId,
+        externalSessionInputBlockedMessage(target),
+      );
       return;
     }
     const attachments = this.takeAttachments(attachmentKey);
@@ -2057,7 +2065,7 @@ export class BridgeController {
           ? session.managedTerminalElevated
             ? " · 管理员同步"
             : " · 窗口同步"
-          : " · 外部会话";
+          : " · 外部会话（仅通知）";
         const address = session.alias
           ? `@${session.alias}  (#${session.shortId})`
           : sessionAddress(session);
@@ -2220,6 +2228,10 @@ function activityEventFromPayload(payload: ActivityHookPayload): ActivityCardEve
     case "UserPromptSubmit":
       return { at, label: "已提交新任务，Codex 开始处理" };
   }
+}
+
+function externalSessionInputBlockedMessage(session: SessionRecord): string {
+  return `会话 ${sessionLabel(session)} 是从外部终端打开的。为避免电脑端和飞书同时运行同一对话，助手不会把普通消息、排队任务或文件请求写入这个会话。请回到原 Codex 窗口继续，或使用桌面助手“新建 Codex”创建同步窗口。审批和补充信息仍可在飞书处理。`;
 }
 
 function isRetryableCodexError(value: string): boolean {

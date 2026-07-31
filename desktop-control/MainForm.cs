@@ -1383,10 +1383,10 @@ internal sealed class MainForm : Form
 
     private static string SourceLabel(string source) => source switch
     {
-        "startup" => "外部会话",
-        "resume" => "外部会话",
-        "clear" => "外部会话",
-        "compact" => "外部会话",
+        "startup" => "外部·仅通知",
+        "resume" => "外部·仅通知",
+        "clear" => "外部·仅通知",
+        "compact" => "外部·仅通知",
         _ => source,
     };
 
