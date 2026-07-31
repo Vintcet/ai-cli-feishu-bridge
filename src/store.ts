@@ -45,6 +45,16 @@ function integerInRange(
     : fallback;
 }
 
+export interface BridgeStoreOptions {
+  /** 高频会话写入合并落盘的时间窗口（毫秒）。 */
+  persistDebounceMs?: number;
+  /** 已结束会话的保留时长（毫秒），超过后从 sessions.json 中清理。 */
+  endedSessionRetentionMs?: number;
+}
+
+const defaultPersistDebounceMs = 500;
+const defaultEndedSessionRetentionMs = 90 * 24 * 60 * 60 * 1000;
+
 export class BridgeStore {
   private readonly bindingFile: string;
   private readonly sessionFile: string;
@@ -60,13 +70,26 @@ export class BridgeStore {
   private settings: BridgeSettings = defaultSettings();
   private mutationQueue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly dataDirectory: string) {
+  private readonly persistDebounceMs: number;
+  private readonly endedSessionRetentionMs: number;
+  private readonly dirtyFiles = new Set<string>();
+  private flushTimer: ReturnType<typeof setTimeout> | undefined;
+  private safetyTimer: ReturnType<typeof setInterval> | undefined;
+  private flushChain: Promise<void> | undefined;
+
+  constructor(
+    private readonly dataDirectory: string,
+    options: BridgeStoreOptions = {},
+  ) {
     this.bindingFile = path.join(dataDirectory, "bindings.json");
     this.sessionFile = path.join(dataDirectory, "sessions.json");
     this.routeFile = path.join(dataDirectory, "message-routes.json");
     this.approvalFile = path.join(dataDirectory, "approvals.json");
     this.controlTokenFile = path.join(dataDirectory, "control-token.json");
     this.settingsFile = path.join(dataDirectory, "settings.json");
+    this.persistDebounceMs = options.persistDebounceMs ?? defaultPersistDebounceMs;
+    this.endedSessionRetentionMs =
+      options.endedSessionRetentionMs ?? defaultEndedSessionRetentionMs;
   }
 
   async init(): Promise<void> {
@@ -167,6 +190,7 @@ export class BridgeStore {
     const pruneChanges = this.pruneInMemory(now);
     routesChanged ||= pruneChanges.routesChanged;
     approvalsChanged ||= pruneChanges.approvalsChanged;
+    sessionsChanged ||= this.pruneEndedSessions(now);
     await Promise.all([
       bindingsChanged ? this.writeJson(this.bindingFile, this.bindings) : Promise.resolve(),
       routesChanged ? this.writeJson(this.routeFile, this.routes) : Promise.resolve(),
@@ -175,6 +199,7 @@ export class BridgeStore {
         ? this.writeJson(this.sessionFile, this.sessions)
         : Promise.resolve(),
     ]);
+    this.startSafetyFlush();
   }
 
   getSettings(): BridgeSettings {
@@ -437,7 +462,7 @@ export class BridgeStore {
           : current?.feishuChatErrorAt,
       };
       this.sessions.sessions[input.sessionId] = next;
-      await this.writeJson(this.sessionFile, this.sessions);
+      this.schedulePersist(this.sessionFile);
       return next;
     });
   }
@@ -705,7 +730,7 @@ export class BridgeStore {
   private async writeJson(filePath: string, value: unknown): Promise<void> {
     await mkdir(this.dataDirectory, { recursive: true });
     const temporaryPath = `${filePath}.${process.pid}.tmp`;
-    await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, "utf8");
     await rename(temporaryPath, filePath);
   }
 
@@ -716,6 +741,88 @@ export class BridgeStore {
       () => undefined,
     );
     return result;
+  }
+
+  private schedulePersist(filePath: string): void {
+    this.dirtyFiles.add(filePath);
+    if (this.flushTimer) {
+      return;
+    }
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = undefined;
+      void this.flushPending();
+    }, this.persistDebounceMs);
+    this.flushTimer.unref?.();
+  }
+
+  /** 立即把待写文件全部落盘。适用于进程退出前的收尾和测试。 */
+  async flushPending(): Promise<void> {
+    if (this.flushChain) {
+      return this.flushChain;
+    }
+    const run = async (): Promise<void> => {
+      while (this.dirtyFiles.size > 0) {
+        const files = [...this.dirtyFiles];
+        this.dirtyFiles.clear();
+        await this.mutate(async () => {
+          await Promise.all(
+            files.map((filePath) =>
+              this.writeJson(filePath, this.inMemoryState(filePath)),
+            ),
+          );
+        });
+      }
+    };
+    this.flushChain = run().finally(() => {
+      this.flushChain = undefined;
+    });
+    return this.flushChain;
+  }
+
+  private inMemoryState(filePath: string): unknown {
+    if (filePath === this.sessionFile) {
+      return this.sessions;
+    }
+    if (filePath === this.routeFile) {
+      return this.routes;
+    }
+    if (filePath === this.approvalFile) {
+      return this.approvals;
+    }
+    if (filePath === this.bindingFile) {
+      return this.bindings;
+    }
+    if (filePath === this.settingsFile) {
+      return this.settings;
+    }
+    return undefined;
+  }
+
+  /** 已结束且超过保留期的会话，从内存中移除；返回是否发生清理。 */
+  private pruneEndedSessions(now: number): boolean {
+    const cutoff = now - this.endedSessionRetentionMs;
+    let changed = false;
+    for (const [sessionId, session] of Object.entries(this.sessions.sessions)) {
+      const reference = session.endedAt ?? session.lastSeenAt;
+      if (session.status === "ended" && reference && Date.parse(reference) < cutoff) {
+        delete this.sessions.sessions[sessionId];
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  private startSafetyFlush(): void {
+    if (this.safetyTimer) {
+      return;
+    }
+    this.safetyTimer = setInterval(() => {
+      if (this.pruneEndedSessions(Date.now())) {
+        this.schedulePersist(this.sessionFile);
+      }
+      void this.flushPending();
+    }, 5_000);
+    this.safetyTimer.unref?.();
   }
 }
 

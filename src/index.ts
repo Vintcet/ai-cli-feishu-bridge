@@ -178,12 +178,16 @@ process.on("unhandledRejection", (error) => {
 
 process.on("SIGINT", () => {
   wsClient.close({ force: true });
-  hookServer.close(() => process.exit(0));
+  hookServer.close(() => {
+    void store.flushPending().finally(() => process.exit(0));
+  });
 });
 
 process.on("SIGTERM", () => {
   wsClient.close({ force: true });
-  hookServer.close(() => process.exit(0));
+  hookServer.close(() => {
+    void store.flushPending().finally(() => process.exit(0));
+  });
 });
 
 console.log(`Starting Feishu long connection for app ${bridgeConfig.appId.slice(0, 8)}...`);

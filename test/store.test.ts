@@ -207,7 +207,9 @@ test("migrates legacy managed sessions into assistant history", async () => {
       "utf8",
     );
 
-    const store = new BridgeStore(directory);
+    const store = new BridgeStore(directory, {
+      endedSessionRetentionMs: 10 * 365 * 24 * 60 * 60 * 1000,
+    });
     await store.init();
     assert.equal(store.getSession(managedSessionId)?.managedByAssistant, true);
     assert.deepEqual(
@@ -215,7 +217,9 @@ test("migrates legacy managed sessions into assistant history", async () => {
       [managedSessionId],
     );
 
-    const reopened = new BridgeStore(directory);
+    const reopened = new BridgeStore(directory, {
+      endedSessionRetentionMs: 10 * 365 * 24 * 60 * 60 * 1000,
+    });
     await reopened.init();
     assert.equal(reopened.getSession(managedSessionId)?.managedByAssistant, true);
   } finally {
@@ -327,6 +331,85 @@ test("moves a managed placeholder's Feishu group to the real session", async () 
       store.getSession("019faef0-d0bb-7703-af82-17ee9b45397b")?.feishuChatId,
       "oc_session_group",
     );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("coalesces session writes within the debounce window", async () => {
+  const directory = await temporaryDirectory();
+  try {
+    const store = new BridgeStore(directory, { persistDebounceMs: 1_000 });
+    await store.init();
+    for (let index = 0; index < 5; index += 1) {
+      await store.upsertSession({
+        sessionId: `coalesced-${index}`,
+        cwd: directory,
+        status: "waiting",
+      });
+    }
+    const before = await readFile(path.join(directory, "sessions.json"), "utf8").catch(
+      () => "",
+    );
+    assert.ok(!before.includes("coalesced-0"));
+
+    await store.flushPending();
+    const persisted = JSON.parse(
+      await readFile(path.join(directory, "sessions.json"), "utf8"),
+    ) as { sessions: Record<string, unknown> };
+    assert.equal(Object.keys(persisted.sessions).length, 5);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("prunes ended sessions older than the retention window", async () => {
+  const directory = await temporaryDirectory();
+  try {
+    const oldEndedAt = "2025-01-01T00:00:00.000Z";
+    const oldId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const freshId = "019fb4e7-d831-7dd3-9745-42f85a8209bb";
+    const freshEndedAt = "2026-07-30T00:00:00.000Z";
+    await writeFile(
+      path.join(directory, "sessions.json"),
+      JSON.stringify({
+        sessions: {
+          [oldId]: {
+            sessionId: oldId,
+            shortId: "9b45397b",
+            cwd: directory,
+            projectName: "old",
+            status: "ended",
+            openedAt: oldEndedAt,
+            lastSeenAt: oldEndedAt,
+            endedAt: oldEndedAt,
+            managedByAssistant: true,
+          },
+          [freshId]: {
+            sessionId: freshId,
+            shortId: "5a8209bb",
+            cwd: directory,
+            projectName: "fresh",
+            status: "ended",
+            openedAt: freshEndedAt,
+            lastSeenAt: freshEndedAt,
+            endedAt: freshEndedAt,
+            managedByAssistant: true,
+          },
+        },
+      }),
+      "utf8",
+    );
+    const store = new BridgeStore(directory, {
+      endedSessionRetentionMs: 30 * 24 * 60 * 60 * 1000,
+    });
+    await store.init();
+    assert.equal(store.getSession(oldId), undefined);
+    assert.ok(store.getSession(freshId));
+    const persisted = JSON.parse(
+      await readFile(path.join(directory, "sessions.json"), "utf8"),
+    ) as { sessions: Record<string, unknown> };
+    assert.equal(Object.keys(persisted.sessions).length, 1);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
