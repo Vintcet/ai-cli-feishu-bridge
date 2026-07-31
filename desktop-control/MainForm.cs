@@ -443,6 +443,7 @@ internal sealed class MainForm : Form
         ConfigureButton(deleteHistoryButton, "删除记录", Color.White, Danger, Border);
         deleteHistoryButton.Size = new Size(100, 34);
         deleteHistoryButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        deleteHistoryButton.Location = resumeSessionButton.Location;
         deleteHistoryButton.Enabled = false;
         deleteHistoryButton.Visible = false;
         deleteHistoryButton.Click += async (_, _) => await DeleteSelectedHistoryAsync();
@@ -933,6 +934,17 @@ internal sealed class MainForm : Form
 
     private void ApplyStatus(BridgeStatus status)
     {
+        var selectedSessionId =
+            (sessionGrid.CurrentRow?.Tag as CodexSession)?.SessionId;
+        var selectedHistorySessionId =
+            (historyGrid.CurrentRow?.Tag as CodexSession)?.SessionId;
+        var sessionScrollIndex = sessionGrid.Rows.Count > 0
+            ? sessionGrid.FirstDisplayedScrollingRowIndex
+            : -1;
+        var historyScrollIndex = historyGrid.Rows.Count > 0
+            ? historyGrid.FirstDisplayedScrollingRowIndex
+            : -1;
+
         lastStatus = status;
         var feishuState = status.Feishu.State.ToLowerInvariant();
         var feishuConnected = feishuState == "connected";
@@ -1048,6 +1060,7 @@ internal sealed class MainForm : Form
                 row.Cells["Status"].Style.ForeColor = Success;
             }
         }
+        RestoreGridState(sessionGrid, selectedSessionId, sessionScrollIndex);
         historyGrid.Rows.Clear();
         foreach (var session in status.HistorySessions.OrderByDescending(
                      item => ParseTime(string.IsNullOrWhiteSpace(item.EndedAt)
@@ -1073,6 +1086,7 @@ internal sealed class MainForm : Form
                 row.Cells["Alias"].Style.Font = gridBoldFont;
             }
         }
+        RestoreGridState(historyGrid, selectedHistorySessionId, historyScrollIndex);
         UpdateSessionActionState();
         SyncApprovalDialog(status);
     }
@@ -1300,6 +1314,43 @@ internal sealed class MainForm : Form
         string.IsNullOrWhiteSpace(session.Alias)
             ? $"{session.ProjectName} #{session.ShortId}"
             : $"@{session.Alias}";
+
+    private static void RestoreGridState(
+        DataGridView grid,
+        string? selectedSessionId,
+        int firstDisplayedRowIndex)
+    {
+        DataGridViewRow? selectedRow = null;
+        if (!string.IsNullOrWhiteSpace(selectedSessionId))
+        {
+            foreach (DataGridViewRow row in grid.Rows)
+            {
+                if (row.Tag is CodexSession session &&
+                    session.SessionId == selectedSessionId)
+                {
+                    selectedRow = row;
+                    break;
+                }
+            }
+            if (selectedRow is null)
+            {
+                return;
+            }
+        }
+
+        if (firstDisplayedRowIndex >= 0 && firstDisplayedRowIndex < grid.Rows.Count)
+        {
+            grid.FirstDisplayedScrollingRowIndex = firstDisplayedRowIndex;
+        }
+        if (selectedRow is null)
+        {
+            return;
+        }
+
+        grid.ClearSelection();
+        grid.CurrentCell = selectedRow.Cells[0];
+        selectedRow.Selected = true;
+    }
 
     private static void ConfigureButton(
         Button button,
