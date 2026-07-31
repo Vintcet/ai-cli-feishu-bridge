@@ -314,19 +314,12 @@ internal sealed class BridgeClient : IDisposable
     public async Task<int> LaunchOpenCodeAsync(
         string cwd,
         bool elevated,
-        string? sessionId = null,
         CancellationToken cancellationToken = default)
     {
         var fullPath = Path.GetFullPath(cwd);
         if (!Directory.Exists(fullPath))
         {
             throw new DirectoryNotFoundException("选择的项目目录不存在。");
-        }
-        if (!string.IsNullOrWhiteSpace(sessionId) &&
-            (sessionId.Length > 128 ||
-             sessionId.IndexOfAny([' ', '\r', '\n', '\t']) >= 0))
-        {
-            throw new InvalidOperationException("opencode 会话参数无效。");
         }
 
         var port = await ReserveOpenCodePortAsync(fullPath, cancellationToken);
@@ -343,8 +336,7 @@ internal sealed class BridgeClient : IDisposable
             openCodeCommand,
             port,
             fullPath,
-            elevated,
-            sessionId);
+            elevated);
         try
         {
             Process.Start(startInfo);
@@ -393,8 +385,7 @@ internal sealed class BridgeClient : IDisposable
         string openCodeCommand,
         int port,
         string cwd,
-        bool elevated,
-        string? sessionId)
+        bool elevated)
     {
         var isScript = openCodeCommand.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) ||
             openCodeCommand.EndsWith(".bat", StringComparison.OrdinalIgnoreCase);
@@ -428,11 +419,6 @@ internal sealed class BridgeClient : IDisposable
         startInfo.ArgumentList.Add(openCodeCommand);
         startInfo.ArgumentList.Add("--port");
         startInfo.ArgumentList.Add(port.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        if (!string.IsNullOrWhiteSpace(sessionId))
-        {
-            startInfo.ArgumentList.Add("-s");
-            startInfo.ArgumentList.Add(sessionId);
-        }
         return startInfo;
     }
 
