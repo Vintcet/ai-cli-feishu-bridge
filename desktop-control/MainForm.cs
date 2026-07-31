@@ -184,12 +184,15 @@ internal sealed class MainForm : Form
         {
             return;
         }
-        ShowInTaskbar = true;
-        Show();
+
+        // Clear the minimized state before showing the form. Otherwise the
+        // Resize handler immediately hides it back to the tray.
         if (WindowState == FormWindowState.Minimized)
         {
             WindowState = FormWindowState.Normal;
         }
+        ShowInTaskbar = true;
+        Show();
         BringToFront();
         Activate();
     }
