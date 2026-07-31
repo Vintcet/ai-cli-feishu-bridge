@@ -137,6 +137,12 @@ function controllerConfig(directory: string) {
     uploadTtlMs: 60_000,
     outboundFileMaxBytes: 1024 * 1024,
     retryBaseDelayMs: 10,
+    liveClientProcessIds: (clients: Array<{ processId: number }>) =>
+      new Set(
+        clients
+          .filter((client) => client.processId === process.pid)
+          .map((client) => client.processId),
+      ),
   };
 }
 

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   findCodexAncestor,
   isProcessAlive,
+  matchTrackedCodexProcessIds,
   type ProcessSnapshot,
 } from "../src/process-tracking.js";
 
@@ -36,4 +37,29 @@ test("handles missing or cyclic ancestor data safely", () => {
 test("checks process liveness without terminating it", () => {
   assert.equal(isProcessAlive(process.pid), true);
   assert.equal(isProcessAlive(-1), false);
+});
+
+test("rejects exited, reused, and non-Codex tracked processes", () => {
+  const startedAt = "2026-07-31T06:26:47.8060795Z";
+  const matches = matchTrackedCodexProcessIds(
+    [
+      { processId: 10, startedAt },
+      { processId: 20, startedAt },
+      { processId: 30, startedAt },
+      { processId: 40 },
+    ],
+    [
+      { processId: 10, parentProcessId: 0, name: "codex", startedAt },
+      {
+        processId: 20,
+        parentProcessId: 0,
+        name: "codex",
+        startedAt: "2026-07-31T07:26:47.8060795Z",
+      },
+      { processId: 30, parentProcessId: 0, name: "pwsh", startedAt },
+      { processId: 40, parentProcessId: 0, name: "codex.exe" },
+    ],
+  );
+
+  assert.deepEqual([...matches], [10, 40]);
 });

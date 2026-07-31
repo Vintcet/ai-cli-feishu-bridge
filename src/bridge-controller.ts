@@ -22,7 +22,10 @@ import {
   managedTerminalSessionId,
   ManagedTerminalRouter,
 } from "./managed-terminal.js";
-import { isProcessAlive } from "./process-tracking.js";
+import {
+  captureLiveTrackedCodexProcessIds,
+  type ClientProcessMetadata,
+} from "./process-tracking.js";
 import type {
   ActivityHookPayload,
   ApprovalRecord,
@@ -123,6 +126,7 @@ interface ControllerConfig {
   uploadTtlMs: number;
   outboundFileMaxBytes: number;
   retryBaseDelayMs?: number;
+  liveClientProcessIds?: (clients: ClientProcessMetadata[]) => ReadonlySet<number>;
 }
 
 interface ActionResult {
@@ -1826,12 +1830,23 @@ export class BridgeController {
     const registrationById = new Map(
       registrations.map((registration) => [registration.terminalId, registration]),
     );
-    const sessions = this.store
-      .listOpenSessions()
+    const openSessions = this.store.listOpenSessions();
+    const trackedClients = openSessions.flatMap((session): ClientProcessMetadata[] =>
+      session.clientProcessId
+        ? [{
+            processId: session.clientProcessId,
+            startedAt: session.clientProcessStartedAt,
+          }]
+        : []
+    );
+    const liveClientProcessIds = (
+      this.config.liveClientProcessIds ?? captureLiveTrackedCodexProcessIds
+    )(trackedClients);
+    const sessions = openSessions
       .flatMap((session): SessionRecord[] => {
         if (!this.managedTerminals.isManaged(session)) {
           if (session.clientProcessId) {
-            return isProcessAlive(session.clientProcessId) ? [session] : [];
+            return liveClientProcessIds.has(session.clientProcessId) ? [session] : [];
           }
           const fallbackMs = Math.min(
             this.config.sessionActiveMs,

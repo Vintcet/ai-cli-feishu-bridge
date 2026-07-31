@@ -13,6 +13,14 @@ export interface ClientProcessMetadata {
   startedAt?: string;
 }
 
+interface ProcessMatchCache {
+  key: string;
+  expiresAt: number;
+  processIds: Set<number>;
+}
+
+let processMatchCache: ProcessMatchCache | undefined;
+
 export function findCodexAncestor(
   startProcessId: number,
   snapshots: ProcessSnapshot[],
@@ -108,6 +116,136 @@ export function isProcessAlive(processId: number): boolean {
     process.kill(processId, 0);
     return true;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    return process.platform !== "win32" &&
+      (error as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+export function matchTrackedCodexProcessIds(
+  clients: ClientProcessMetadata[],
+  snapshots: ProcessSnapshot[],
+): Set<number> {
+  const snapshotById = new Map(
+    snapshots.map((snapshot) => [snapshot.processId, snapshot]),
+  );
+  const matches = new Set<number>();
+  for (const client of clients) {
+    const snapshot = snapshotById.get(client.processId);
+    if (!snapshot || !/^codex(?:\.exe)?$/i.test(snapshot.name)) {
+      continue;
+    }
+    if (client.startedAt) {
+      const expected = Date.parse(client.startedAt);
+      const actual = snapshot.startedAt ? Date.parse(snapshot.startedAt) : Number.NaN;
+      if (
+        !Number.isFinite(expected) ||
+        !Number.isFinite(actual) ||
+        Math.abs(actual - expected) > 1_000
+      ) {
+        continue;
+      }
+    }
+    matches.add(client.processId);
+  }
+  return matches;
+}
+
+export function captureLiveTrackedCodexProcessIds(
+  clients: ClientProcessMetadata[],
+): Set<number> {
+  const uniqueClients = [
+    ...new Map(
+      clients
+        .filter(
+          (client) => Number.isSafeInteger(client.processId) && client.processId > 0,
+        )
+        .map((client) => [client.processId, client]),
+    ).values(),
+  ].sort((left, right) => left.processId - right.processId);
+  if (uniqueClients.length === 0) {
+    return new Set();
+  }
+  if (process.platform !== "win32") {
+    return new Set(
+      uniqueClients
+        .filter((client) => isProcessAlive(client.processId))
+        .map((client) => client.processId),
+    );
+  }
+
+  const cacheKey = uniqueClients
+    .map((client) => `${client.processId}:${client.startedAt ?? ""}`)
+    .join("|");
+  const now = Date.now();
+  if (processMatchCache?.key === cacheKey && processMatchCache.expiresAt > now) {
+    return new Set(processMatchCache.processIds);
+  }
+
+  const powerShell7 = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+  const executable = existsSync(powerShell7) ? powerShell7 : "powershell.exe";
+  const processIds = uniqueClients.map((client) => client.processId).join(",");
+  const script = [
+    `$ids = @(${processIds})`,
+    "$items = foreach ($processId in $ids) {",
+    "  try {",
+    "    $item = Get-Process -Id $processId -ErrorAction Stop",
+    "    $startedAt = $null",
+    "    try { $startedAt = $item.StartTime.ToUniversalTime().ToString('o') } catch {}",
+    "    [pscustomobject]@{ processId = [int]$item.Id; parentProcessId = 0; name = [string]$item.ProcessName; startedAt = $startedAt }",
+    "  } catch {}",
+    "}",
+    "@($items) | ConvertTo-Json -Compress",
+  ].join("\n");
+
+  let matches: Set<number>;
+  try {
+    const result = spawnSync(
+      executable,
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      {
+        encoding: "utf8",
+        timeout: 2_000,
+        windowsHide: true,
+        maxBuffer: 128 * 1024,
+      },
+    );
+    if (result.status !== 0 || !result.stdout.trim()) {
+      throw new Error("Could not inspect tracked processes.");
+    }
+    const parsed: unknown = JSON.parse(result.stdout);
+    const values = Array.isArray(parsed) ? parsed : [parsed];
+    const snapshots = values.flatMap((value): ProcessSnapshot[] => {
+      if (!value || typeof value !== "object") {
+        return [];
+      }
+      const item = value as Record<string, unknown>;
+      if (
+        typeof item.processId !== "number" ||
+        !Number.isSafeInteger(item.processId) ||
+        typeof item.name !== "string"
+      ) {
+        return [];
+      }
+      return [{
+        processId: item.processId,
+        parentProcessId: 0,
+        name: item.name,
+        startedAt: typeof item.startedAt === "string" ? item.startedAt : undefined,
+      }];
+    });
+    matches = matchTrackedCodexProcessIds(uniqueClients, snapshots);
+  } catch {
+    matches = new Set(
+      uniqueClients
+        .filter((client) => isProcessAlive(client.processId))
+        .map((client) => client.processId),
+    );
+  }
+
+  processMatchCache = {
+    key: cacheKey,
+    expiresAt: now + 1_500,
+    processIds: new Set(matches),
+  };
+  return matches;
 }
