@@ -95,10 +95,13 @@ internal sealed class FeishuStatus
     public string State { get; set; } = "idle";
 
     [JsonPropertyName("lastConnectTime")]
-    public long? LastConnectTime { get; set; }
+    // WebSocket reconnect timestamps may contain fractional milliseconds.
+    // Keep these as doubles so one fractional value cannot invalidate the
+    // entire /health response in the desktop client.
+    public double? LastConnectTime { get; set; }
 
     [JsonPropertyName("nextConnectTime")]
-    public long? NextConnectTime { get; set; }
+    public double? NextConnectTime { get; set; }
 
     [JsonPropertyName("reconnectAttempts")]
     public int ReconnectAttempts { get; set; }

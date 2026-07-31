@@ -12,5 +12,6 @@
     <Compile Include="Program.cs" />
     <Compile Include="..\CodexArgumentParser.cs" Link="CodexArgumentParser.cs" />
     <Compile Include="..\TerminalInputParser.cs" Link="TerminalInputParser.cs" />
+    <Compile Include="..\Models.cs" Link="Models.cs" />
   </ItemGroup>
 </Project>

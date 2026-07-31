@@ -74,7 +74,7 @@ const hookServer = startHookHttpServer(
   {
     health: () => ({
       ...controller.health(),
-      version: "0.12.3",
+      version: "0.12.4",
       processId: process.pid,
       startedAt: serviceStartedAt,
       feishu: wsClient.getConnectionStatus(),

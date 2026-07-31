@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace CodexFeishuControl;
 
 internal static class Program
@@ -14,6 +16,7 @@ internal static class Program
             ("terminal input defaults to steer", TestTerminalInputDefaultsToSteer),
             ("terminal input supports queue", TestTerminalInputSupportsQueue),
             ("terminal input rejects invalid mode", TestTerminalInputRejectsInvalidMode),
+            ("health accepts fractional Feishu timestamps", TestFractionalFeishuTimestamps),
         };
 
         var failures = 0;
@@ -39,6 +42,35 @@ internal static class Program
     {
         AssertSequence([], CodexArgumentParser.Parse(null));
         AssertSequence([], CodexArgumentParser.Parse("   "));
+    }
+
+    private static void TestFractionalFeishuTimestamps()
+    {
+        const string json = """
+            {
+              "ok": true,
+              "activeSessions": 2,
+              "feishu": {
+                "state": "connected",
+                "lastConnectTime": 1785510447081,
+                "nextConnectTime": 1785510446683.327,
+                "reconnectAttempts": 0
+              },
+              "sessions": [],
+              "historySessions": [],
+              "approvals": [],
+              "settings": {}
+            }
+            """;
+        var status = JsonSerializer.Deserialize<BridgeStatus>(json);
+        if (status is null || status.ActiveSessions != 2)
+        {
+            throw new InvalidOperationException("health response was not parsed");
+        }
+        if (status.Feishu.NextConnectTime != 1785510446683.327)
+        {
+            throw new InvalidOperationException("fractional reconnect timestamp was lost");
+        }
     }
 
     private static void TestResumeArguments()
