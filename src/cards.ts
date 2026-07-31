@@ -7,7 +7,6 @@ import type {
 import {
   looksLikeQuestion,
   redactSensitiveText,
-  sessionAddress,
   sessionLabel,
   truncate,
 } from "./domain.js";
@@ -307,9 +306,9 @@ export function buildStopCard(
     maxElements: 20,
   });
   const waitingForReply = looksLikeQuestion(safeMessage);
-  const replyHint = session.alias
-    ? `引用回复本消息即可继续；也可发送 @${session.alias} 回复内容，或 #${session.shortId} 回复内容。`
-    : `引用回复本消息即可继续；也可发送 ${sessionAddress(session)} 回复内容。`;
+  const continuationHint = session.managedByAssistant === true
+    ? "下一轮请直接发送消息。"
+    : "外部会话不支持飞书输入。";
   return {
     config: { wide_screen_mode: true },
     header: {
@@ -346,7 +345,7 @@ export function buildStopCard(
         elements: [
           {
             tag: "plain_text",
-            content: replyHint,
+            content: continuationHint,
           },
         ],
       },

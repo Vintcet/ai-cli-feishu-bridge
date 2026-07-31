@@ -11,6 +11,7 @@ const session: SessionRecord = {
   cwd: "K:\\projects\\demo",
   projectName: "demo",
   status: "waiting",
+  managedByAssistant: true,
   openedAt: "2026-07-31T08:00:00.000Z",
   lastSeenAt: "2026-07-31T08:05:00.000Z",
 };
@@ -50,6 +51,19 @@ test("completion cards convert Markdown blocks into Feishu card elements", () =>
   assert.match(rendered, /请在发布前检查/);
   assert.match(rendered, /本机报告（K:\/projects\/demo\/report.md:12）/);
   assert.doesNotMatch(rendered, /\[本机报告].*K:\/projects/);
+  assert.doesNotMatch(rendered, /引用回复/);
+  assert.match(rendered, /下一轮请直接发送消息/);
+});
+
+test("external completion cards do not suggest Feishu replies", () => {
+  const card = buildStopCard(
+    { ...session, managedByAssistant: false },
+    "处理完成。",
+  );
+  const rendered = JSON.stringify(card);
+
+  assert.doesNotMatch(rendered, /引用回复/);
+  assert.match(rendered, /外部会话不支持飞书输入/);
 });
 
 test("activity detail uses the same Markdown conversion", () => {
