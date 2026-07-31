@@ -120,6 +120,7 @@ interface ControllerConfig {
   inboundAttachmentMaxCount: number;
   uploadTtlMs: number;
   outboundFileMaxBytes: number;
+  notifyActivity: boolean;
 }
 
 interface ActionResult {
@@ -195,6 +196,9 @@ export class BridgeController {
       runningResumes: sessions.filter((session) => this.codex.isRunning(session.sessionId))
         .length,
       activeSessionDefinition: this.activeSessionDefinition(),
+      settings: {
+        notifyActivity: this.config.notifyActivity,
+      },
       sessions: sessions.map((session) => ({
         sessionId: session.sessionId,
         shortId: session.shortId,
@@ -628,6 +632,9 @@ export class BridgeController {
   async handleActivityHook(
     payload: ActivityHookPayload,
   ): Promise<Record<string, unknown>> {
+    if (!this.config.notifyActivity) {
+      return {};
+    }
     void this.recordActivity(payload).catch((error) => {
       console.error("[activity] Could not record Codex activity:", error);
     });

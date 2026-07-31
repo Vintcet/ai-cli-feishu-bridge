@@ -34,6 +34,7 @@ const controller = new BridgeController(store, feishu, codex, managedTerminals, 
   inboundAttachmentMaxCount: bridgeConfig.inboundAttachmentMaxCount,
   uploadTtlMs: bridgeConfig.uploadTtlMs,
   outboundFileMaxBytes: bridgeConfig.outboundFileMaxBytes,
+  notifyActivity: bridgeConfig.notifyActivity,
 });
 
 const eventDispatcher = new Lark.EventDispatcher({}).register({
