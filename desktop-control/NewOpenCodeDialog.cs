@@ -3,10 +3,13 @@ namespace CodexFeishuControl;
 internal sealed class NewOpenCodeDialog : Form
 {
     private readonly TextBox directoryBox = new();
+    private readonly ComboBox historyCombo = new();
     private readonly CheckBox administratorBox = new();
     private readonly Button startButton = new();
 
-    public NewOpenCodeDialog(string initialDirectory)
+    private sealed record SessionItem(CodexSession? Session, string Text);
+
+    public NewOpenCodeDialog(string initialDirectory, IReadOnlyList<CodexSession> historySessions)
     {
         Text = "新建同步 opencode";
         StartPosition = FormStartPosition.CenterParent;
@@ -14,7 +17,7 @@ internal sealed class NewOpenCodeDialog : Form
         MaximizeBox = false;
         MinimizeBox = false;
         ShowInTaskbar = false;
-        ClientSize = new Size(610, 280);
+        ClientSize = new Size(610, 295);
         BackColor = Color.White;
         Font = new Font("Microsoft YaHei UI", 9F);
 
@@ -31,9 +34,9 @@ internal sealed class NewOpenCodeDialog : Form
             Text = "项目目录",
             AutoSize = true,
             ForeColor = Color.FromArgb(71, 85, 105),
-            Location = new Point(24, 65),
+            Location = new Point(24, 62),
         };
-        directoryBox.Location = new Point(24, 88);
+        directoryBox.Location = new Point(24, 84);
         directoryBox.Size = new Size(470, 28);
         directoryBox.Text = Directory.Exists(initialDirectory) ? initialDirectory : "";
         directoryBox.TextChanged += (_, _) => UpdateStartButton();
@@ -41,35 +44,48 @@ internal sealed class NewOpenCodeDialog : Form
         var browseButton = new Button
         {
             Text = "选择…",
-            Location = new Point(504, 86),
+            Location = new Point(504, 82),
             Size = new Size(82, 31),
             FlatStyle = FlatStyle.System,
         };
         browseButton.Click += (_, _) => BrowseDirectory();
 
+        var historyLabel = new Label
+        {
+            Text = "打开已往会话（可选）",
+            AutoSize = true,
+            ForeColor = Color.FromArgb(71, 85, 105),
+            Location = new Point(24, 120),
+        };
+        historyCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+        historyCombo.DisplayMember = nameof(SessionItem.Text);
+        historyCombo.Location = new Point(24, 142);
+        historyCombo.Size = new Size(562, 30);
+        PopulateHistory(historySessions);
+
         administratorBox.Text = "以 Windows 管理员身份启动（会弹出 UAC 确认）";
         administratorBox.AutoSize = true;
-        administratorBox.Location = new Point(24, 135);
+        administratorBox.Location = new Point(24, 184);
         administratorBox.ForeColor = Color.FromArgb(185, 28, 28);
 
         var hint = new Label
         {
-            Text = "opencode 需已安装并可用；桥接服务会为该窗口保留一个本机端口并自动登记会话。",
+            Text = "选择历史会话后将恢复该会话并把工作目录设为对应项目；不选择则新建会话。",
             AutoSize = true,
             ForeColor = Color.FromArgb(100, 116, 139),
-            Location = new Point(43, 160),
+            Location = new Point(43, 209),
         };
 
         var cancelButton = new Button
         {
             Text = "取消",
             DialogResult = DialogResult.Cancel,
-            Location = new Point(405, 230),
+            Location = new Point(405, 248),
             Size = new Size(86, 32),
         };
         startButton.Text = "启动 opencode";
         startButton.DialogResult = DialogResult.OK;
-        startButton.Location = new Point(500, 230);
+        startButton.Location = new Point(500, 248);
         startButton.Size = new Size(86, 32);
         startButton.Enabled = false;
         startButton.Click += (_, _) =>
@@ -87,6 +103,8 @@ internal sealed class NewOpenCodeDialog : Form
             directoryLabel,
             directoryBox,
             browseButton,
+            historyLabel,
+            historyCombo,
             administratorBox,
             hint,
             cancelButton,
@@ -98,6 +116,49 @@ internal sealed class NewOpenCodeDialog : Form
     public string SelectedDirectory => Path.GetFullPath(directoryBox.Text.Trim());
 
     public bool RunAsAdministrator => administratorBox.Checked;
+
+    public string? SelectedSessionId =>
+        historyCombo.SelectedItem is SessionItem { Session: not null } item
+            ? item.Session.SessionId
+            : null;
+
+    private void PopulateHistory(IReadOnlyList<CodexSession> historySessions)
+    {
+        historyCombo.Items.Add(new SessionItem(null, "（不打开历史会话，新建会话）"));
+        foreach (var session in historySessions
+                     .Where(item => string.Equals(item.Source, "opencode", StringComparison.Ordinal))
+                     .OrderByDescending(HistorySortKey))
+        {
+            historyCombo.Items.Add(new SessionItem(session, FormatHistorySession(session)));
+        }
+        historyCombo.SelectedIndex = 0;
+        historyCombo.SelectedIndexChanged += (_, _) =>
+        {
+            if (historyCombo.SelectedItem is SessionItem { Session: not null } item &&
+                Directory.Exists(item.Session.Cwd))
+            {
+                directoryBox.Text = item.Session.Cwd;
+            }
+        };
+    }
+
+    private static string HistorySortKey(CodexSession session) =>
+        string.IsNullOrWhiteSpace(session.EndedAt) ? session.LastSeenAt : session.EndedAt;
+
+    private static string FormatHistorySession(CodexSession session)
+    {
+        var time = string.IsNullOrWhiteSpace(session.EndedAt) ? session.LastSeenAt : session.EndedAt;
+        return $"{session.ProjectName} · #{session.ShortId} · {FormatTime(time)}";
+    }
+
+    private static string FormatTime(string value)
+    {
+        if (DateTimeOffset.TryParse(value, out var parsed))
+        {
+            return parsed.ToLocalTime().ToString("MM-dd HH:mm");
+        }
+        return value;
+    }
 
     private void BrowseDirectory()
     {

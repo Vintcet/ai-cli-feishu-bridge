@@ -973,7 +973,7 @@ internal sealed class MainForm : Form
             var initialDirectory = lastProjectDirectory ??
                 Directory.GetParent(bridgeClient.BridgeRoot)?.FullName ??
                 bridgeClient.BridgeRoot;
-            using var dialog = new NewCodexDialog(initialDirectory);
+            using var dialog = new NewCodexDialog(initialDirectory, status.HistorySessions);
             if (dialog.ShowDialog(this) != DialogResult.OK)
             {
                 return;
@@ -1017,7 +1017,7 @@ internal sealed class MainForm : Form
             var initialDirectory = lastProjectDirectory ??
                 Directory.GetParent(bridgeClient.BridgeRoot)?.FullName ??
                 bridgeClient.BridgeRoot;
-            using var dialog = new NewOpenCodeDialog(initialDirectory);
+            using var dialog = new NewOpenCodeDialog(initialDirectory, status.HistorySessions);
             if (dialog.ShowDialog(this) != DialogResult.OK)
             {
                 return;
@@ -1027,6 +1027,7 @@ internal sealed class MainForm : Form
             await bridgeClient.LaunchOpenCodeAsync(
                 dialog.SelectedDirectory,
                 dialog.RunAsAdministrator,
+                dialog.SelectedSessionId,
                 lifetime.Token);
             operationLabel.Text = dialog.RunAsAdministrator
                 ? "已请求管理员启动；完成 UAC 确认后，Windows Terminal 窗口会自动登记 opencode"
