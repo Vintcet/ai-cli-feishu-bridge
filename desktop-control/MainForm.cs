@@ -33,6 +33,7 @@ internal sealed class MainForm : Form
     private readonly Button newCodexButton = new();
     private readonly Button approvalButton = new();
     private readonly Button aliasButton = new();
+    private readonly Button settingsButton = new();
     private readonly Button refreshButton = new();
     private readonly Button folderButton = new();
 
@@ -200,6 +201,7 @@ internal sealed class MainForm : Form
         approvalButton.Size = new Size(110, 38);
         approvalButton.Enabled = false;
         ConfigureButton(refreshButton, "刷新", Color.White, Color.FromArgb(51, 65, 85), Border);
+        ConfigureButton(settingsButton, "设置", Color.White, Color.FromArgb(51, 65, 85), Border);
         ConfigureButton(folderButton, "打开目录", Color.White, Color.FromArgb(51, 65, 85), Border);
 
         connectButton.Click += async (_, _) => await ConnectAsync();
@@ -207,6 +209,7 @@ internal sealed class MainForm : Form
         newCodexButton.Click += async (_, _) => await NewCodexAsync();
         approvalButton.Click += (_, _) => OpenPendingApproval();
         refreshButton.Click += async (_, _) => await RefreshStatusAsync(force: true);
+        settingsButton.Click += async (_, _) => await EditSettingsAsync();
         folderButton.Click += (_, _) => bridgeClient.OpenBridgeFolder();
 
         buttons.Controls.Add(connectButton);
@@ -214,6 +217,7 @@ internal sealed class MainForm : Form
         buttons.Controls.Add(newCodexButton);
         buttons.Controls.Add(approvalButton);
         buttons.Controls.Add(refreshButton);
+        buttons.Controls.Add(settingsButton);
         buttons.Controls.Add(folderButton);
         toolbar.Controls.Add(operationLabel, 0, 0);
         toolbar.Controls.Add(buttons, 1, 0);
@@ -468,6 +472,49 @@ internal sealed class MainForm : Form
         }
     }
 
+    private async Task EditSettingsAsync()
+    {
+        if (operating)
+        {
+            return;
+        }
+        var status = lastStatus ?? await bridgeClient.GetStatusAsync(lifetime.Token);
+        if (status is null)
+        {
+            MessageBox.Show(
+                this,
+                "请先点击“连接”启动桥接服务，再修改设置。",
+                "桥接服务未运行",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
+        using var dialog = new SettingsDialog(status.Settings);
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+        SetOperating(true, "正在保存通知设置…");
+        try
+        {
+            status.Settings = await bridgeClient.UpdateSettingsAsync(
+                dialog.Settings,
+                lifetime.Token);
+            operationLabel.Text = "设置已保存并立即生效";
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception error)
+        {
+            ShowOperationError("保存设置失败", error);
+        }
+        finally
+        {
+            SetOperating(false);
+        }
+    }
+
     private async Task NewCodexAsync()
     {
         if (operating) return;
@@ -666,6 +713,7 @@ internal sealed class MainForm : Form
         newCodexButton.Enabled = !operating;
         approvalButton.Enabled = !operating && status.PendingApprovals > 0;
         refreshButton.Enabled = !operating;
+        settingsButton.Enabled = !operating;
 
         sessionGrid.Rows.Clear();
         foreach (var session in status.Sessions.OrderByDescending(item => ParseTime(item.LastSeenAt)))
@@ -743,6 +791,7 @@ internal sealed class MainForm : Form
         approvalButton.Text = "本机审批";
         approvalButton.Enabled = false;
         refreshButton.Enabled = !operating;
+        settingsButton.Enabled = !operating;
         sessionGrid.Rows.Clear();
         UpdateAliasButtonState();
         dismissedApprovalIds.Clear();
@@ -775,6 +824,7 @@ internal sealed class MainForm : Form
             !value && (lastStatus?.Approvals.Count(item => item.Status == "pending") ?? 0) > 0;
         aliasButton.Enabled = !value && sessionGrid.CurrentRow?.Tag is CodexSession;
         refreshButton.Enabled = !value;
+        settingsButton.Enabled = !value;
         folderButton.Enabled = !value;
         if (!string.IsNullOrWhiteSpace(message))
         {

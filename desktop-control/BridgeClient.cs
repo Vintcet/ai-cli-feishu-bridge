@@ -125,6 +125,43 @@ internal sealed class BridgeClient : IDisposable
         return result;
     }
 
+    public async Task<BridgeSettings> UpdateSettingsAsync(
+        BridgeSettings settings,
+        CancellationToken cancellationToken = default)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "settings")
+        {
+            Content = JsonContent.Create(new
+            {
+                notifyActivity = settings.NotifyActivity,
+                autoRetryErrors = settings.AutoRetryErrors,
+                autoApprove = settings.AutoApprove,
+            }),
+        };
+        request.Headers.Add(
+            "X-Codex-Feishu-Control-Token",
+            ReadControlToken(BridgeRoot));
+        using var response = await httpClient.SendAsync(request, cancellationToken);
+        SettingsUpdateResult? result = null;
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            result = await JsonSerializer.DeserializeAsync<SettingsUpdateResult>(
+                stream,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
+                cancellationToken);
+        }
+        catch (JsonException)
+        {
+        }
+        if (!response.IsSuccessStatusCode || result?.Ok != true)
+        {
+            throw new InvalidOperationException(
+                string.IsNullOrWhiteSpace(result?.Error) ? "保存设置失败。" : result.Error);
+        }
+        return result.Settings;
+    }
+
     public void OpenBridgeFolder()
     {
         Process.Start(new ProcessStartInfo

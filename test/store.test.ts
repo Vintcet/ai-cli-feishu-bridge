@@ -104,6 +104,33 @@ test("creates one persistent local control token", async () => {
   }
 });
 
+test("persists notification and automation settings", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-settings-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    assert.deepEqual(store.getSettings(), {
+      notifyActivity: false,
+      autoRetryErrors: false,
+      autoApprove: false,
+    });
+    await store.updateSettings({
+      notifyActivity: true,
+      autoRetryErrors: true,
+      autoApprove: true,
+    });
+    const reopened = new BridgeStore(directory);
+    await reopened.init();
+    assert.deepEqual(reopened.getSettings(), {
+      notifyActivity: true,
+      autoRetryErrors: true,
+      autoApprove: true,
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("explicit null clears stale managed terminal metadata", async () => {
   const directory = await temporaryDirectory();
   try {

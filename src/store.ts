@@ -6,6 +6,7 @@ import type {
   ApprovalRecord,
   ApprovalResolution,
   ApprovalStore,
+  BridgeSettings,
   Binding,
   BindingStore,
   MessageRoute,
@@ -20,6 +21,11 @@ const emptyBindings = (): BindingStore => ({ users: {} });
 const emptySessions = (): SessionStore => ({ sessions: {} });
 const emptyRoutes = (): RouteStore => ({ messages: {}, processedInbound: {} });
 const emptyApprovals = (): ApprovalStore => ({ requests: {} });
+const defaultSettings = (): BridgeSettings => ({
+  notifyActivity: false,
+  autoRetryErrors: false,
+  autoApprove: false,
+});
 
 export class BridgeStore {
   private readonly bindingFile: string;
@@ -27,11 +33,13 @@ export class BridgeStore {
   private readonly routeFile: string;
   private readonly approvalFile: string;
   private readonly controlTokenFile: string;
+  private readonly settingsFile: string;
 
   private bindings: BindingStore = emptyBindings();
   private sessions: SessionStore = emptySessions();
   private routes: RouteStore = emptyRoutes();
   private approvals: ApprovalStore = emptyApprovals();
+  private settings: BridgeSettings = defaultSettings();
   private mutationQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly dataDirectory: string) {
@@ -40,15 +48,17 @@ export class BridgeStore {
     this.routeFile = path.join(dataDirectory, "message-routes.json");
     this.approvalFile = path.join(dataDirectory, "approvals.json");
     this.controlTokenFile = path.join(dataDirectory, "control-token.json");
+    this.settingsFile = path.join(dataDirectory, "settings.json");
   }
 
   async init(): Promise<void> {
     await mkdir(this.dataDirectory, { recursive: true });
-    const [bindings, sessions, routes, approvals] = await Promise.all([
+    const [bindings, sessions, routes, approvals, settings] = await Promise.all([
       this.readJson(this.bindingFile, emptyBindings()),
       this.readJson(this.sessionFile, emptySessions()),
       this.readJson(this.routeFile, emptyRoutes()),
       this.readJson(this.approvalFile, emptyApprovals()),
+      this.readJson(this.settingsFile, defaultSettings()),
     ]);
     this.bindings = bindings;
     this.sessions = sessions;
@@ -59,6 +69,14 @@ export class BridgeStore {
       processedInbound: rawRoutes.processedInbound ?? {},
     };
     this.approvals = approvals;
+    const loadedSettings = settings && typeof settings === "object"
+      ? settings as Partial<BridgeSettings>
+      : {};
+    this.settings = {
+      notifyActivity: loadedSettings.notifyActivity === true,
+      autoRetryErrors: loadedSettings.autoRetryErrors === true,
+      autoApprove: loadedSettings.autoApprove === true,
+    };
 
     const now = Date.now();
     let bindingsChanged = false;
@@ -116,6 +134,31 @@ export class BridgeStore {
         ? this.writeJson(this.sessionFile, this.sessions)
         : Promise.resolve(),
     ]);
+  }
+
+  getSettings(): BridgeSettings {
+    return { ...this.settings };
+  }
+
+  async updateSettings(value: Partial<BridgeSettings>): Promise<BridgeSettings> {
+    return this.mutate(async () => {
+      this.settings = {
+        notifyActivity:
+          typeof value.notifyActivity === "boolean"
+            ? value.notifyActivity
+            : this.settings.notifyActivity,
+        autoRetryErrors:
+          typeof value.autoRetryErrors === "boolean"
+            ? value.autoRetryErrors
+            : this.settings.autoRetryErrors,
+        autoApprove:
+          typeof value.autoApprove === "boolean"
+            ? value.autoApprove
+            : this.settings.autoApprove,
+      };
+      await this.writeJson(this.settingsFile, this.settings);
+      return { ...this.settings };
+    });
   }
 
   listBindings(): Binding[] {

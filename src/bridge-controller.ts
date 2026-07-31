@@ -83,6 +83,7 @@ interface QueuedRemotePrompt {
   sourceMessageId: string;
   chatId: string;
   requestFileReturn: boolean;
+  retryAttempt?: number;
 }
 
 interface StagedAttachments {
@@ -120,7 +121,7 @@ interface ControllerConfig {
   inboundAttachmentMaxCount: number;
   uploadTtlMs: number;
   outboundFileMaxBytes: number;
-  notifyActivity: boolean;
+  retryBaseDelayMs?: number;
 }
 
 interface ActionResult {
@@ -151,6 +152,7 @@ export class BridgeController {
   private readonly pendingAttachments = new Map<string, StagedAttachments>();
   private readonly fileReturnRequests = new Map<string, FileReturnRequest[]>();
   private readonly activityStates = new Map<string, ActivityState>();
+  private readonly managedRetryCounts = new Map<string, number>();
   private readonly attachmentStore: LocalAttachmentStore;
 
   constructor(
@@ -196,9 +198,7 @@ export class BridgeController {
       runningResumes: sessions.filter((session) => this.codex.isRunning(session.sessionId))
         .length,
       activeSessionDefinition: this.activeSessionDefinition(),
-      settings: {
-        notifyActivity: this.config.notifyActivity,
-      },
+      settings: this.store.getSettings(),
       sessions: sessions.map((session) => ({
         sessionId: session.sessionId,
         shortId: session.shortId,
@@ -351,6 +351,25 @@ export class BridgeController {
       resolution,
       message: approvalText(resolution),
     };
+  }
+
+  async handleSettingsUpdate(
+    value: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const keys = ["notifyActivity", "autoRetryErrors", "autoApprove"] as const;
+    const update: Record<string, boolean> = {};
+    for (const key of keys) {
+      if (value[key] !== undefined) {
+        if (typeof value[key] !== "boolean") {
+          return { ok: false, error: "设置值必须是开关状态。" };
+        }
+        update[key] = value[key];
+      }
+    }
+    if (Object.keys(update).length === 0) {
+      return { ok: false, error: "没有可保存的设置。" };
+    }
+    return { ok: true, settings: await this.store.updateSettings(update) };
   }
 
   async handleSessionStartHook(
@@ -512,14 +531,22 @@ export class BridgeController {
       }
     }
 
-    if (sentCount > 0) {
-      console.log(
-        `[approval] Waiting for desktop or Feishu decision for session #${session.shortId}.`,
-      );
-    } else {
-      console.warn(
-        `[approval] Feishu unavailable; waiting for desktop decision for session #${session.shortId}.`,
-      );
+    const autoApprove = this.store.getSettings().autoApprove;
+    if (autoApprove) {
+      await this.completeApproval(approval.requestId, "allow");
+      console.log(`[approval] Auto-approved for session #${session.shortId}.`);
+    }
+
+    if (!autoApprove) {
+      if (sentCount > 0) {
+        console.log(
+          `[approval] Waiting for desktop or Feishu decision for session #${session.shortId}.`,
+        );
+      } else {
+        console.warn(
+          `[approval] Feishu unavailable; waiting for desktop decision for session #${session.shortId}.`,
+        );
+      }
     }
 
     const resolution = await resultPromise;
@@ -632,7 +659,7 @@ export class BridgeController {
   async handleActivityHook(
     payload: ActivityHookPayload,
   ): Promise<Record<string, unknown>> {
-    if (!this.config.notifyActivity) {
+    if (!this.store.getSettings().notifyActivity) {
       return {};
     }
     void this.recordActivity(payload).catch((error) => {
@@ -662,11 +689,65 @@ export class BridgeController {
         ? { managedTerminalElevated: payload.managed_terminal_elevated }
         : {}),
     });
-    await this.finishActivity(payload.session_id, "本轮处理完成");
+    const codexError = codexErrorFromMessage(payload.last_assistant_message);
+    await this.finishActivity(
+      payload.session_id,
+      codexError ? "本轮发生错误" : "本轮处理完成",
+    );
 
     if (previous?.lastNotificationTurnId === payload.turn_id) {
       return {};
     }
+    if (codexError) {
+      const retryCount = this.managedRetryCounts.get(payload.session_id) ?? 0;
+      const retryDelay = retryDelayMs(retryCount, this.config.retryBaseDelayMs);
+      const canRetry =
+        this.store.getSettings().autoRetryErrors &&
+        retryCount < 3 &&
+        this.managedTerminals.isReady(session);
+      const detail = canRetry
+        ? `${codexError}\n\n助手将在 ${Math.ceil(retryDelay / 1_000)} 秒后自动重试（第 ${retryCount + 1}/3 次）。`
+        : codexError;
+      const failedSession = await this.store.upsertSession({
+        sessionId: session.sessionId,
+        cwd: session.cwd,
+        model: session.model,
+        status: "error",
+        error: codexError,
+      });
+      for (const binding of this.uniqueChatBindings()) {
+        try {
+          const messageId = await this.feishu.sendCard(
+            binding.chatId,
+            buildErrorCard(failedSession, detail),
+          );
+          await this.addRoute(messageId, payload.session_id, binding.chatId, "error");
+        } catch (error) {
+          console.error("[stop] Failed to send a Codex error card:", error);
+        }
+      }
+      await this.store.markStopNotified(payload.session_id, payload.turn_id);
+      if (canRetry) {
+        this.managedRetryCounts.set(payload.session_id, retryCount + 1);
+        setTimeout(() => {
+          const current = this.store.getSession(payload.session_id);
+          if (
+            !this.store.getSettings().autoRetryErrors ||
+            !current ||
+            !this.managedTerminals.isReady(current)
+          ) {
+            return;
+          }
+          void this.managedTerminals.send(
+            current,
+            "刚才的请求因临时服务错误失败。请重试上一项任务，并继续从中断处执行。",
+            "steer",
+          ).catch((error) => console.error("[retry] Managed retry failed:", error));
+        }, retryDelay);
+      }
+      return {};
+    }
+    this.managedRetryCounts.delete(payload.session_id);
     const fileReturnRequest = this.advanceFileReturnRequests(payload.session_id);
     this.decrementManagedQueueDepth(payload.session_id);
 
@@ -1210,19 +1291,23 @@ export class BridgeController {
   ): Promise<void> {
     this.remoteInputLocks.add(session.sessionId);
     await this.codex.resume(session, item.prompt, async (result) => {
-      await this.handleCodexExit(session, result);
-      await this.tryDrainExternalQueue(session.sessionId);
+      const retrying = await this.handleCodexExit(session, result, item);
+      if (!retrying) {
+        await this.tryDrainExternalQueue(session.sessionId);
+      }
     });
-    if (item.requestFileReturn) {
+    if (item.requestFileReturn && item.retryAttempt === undefined) {
       this.registerFileReturnRequest(session.sessionId, item.chatId, 0);
     }
-    const ackId = await this.respond(
-      item.sourceMessageId,
-      item.chatId,
-      `已发送给 ${sessionLabel(session)}。外部会话的后续消息会在桥接侧按顺序排队。`,
-    );
-    if (ackId) {
-      await this.addRoute(ackId, session.sessionId, item.chatId, "resume_ack");
+    if (item.retryAttempt === undefined) {
+      const ackId = await this.respond(
+        item.sourceMessageId,
+        item.chatId,
+        `已发送给 ${sessionLabel(session)}。外部会话的后续消息会在桥接侧按顺序排队。`,
+      );
+      if (ackId) {
+        await this.addRoute(ackId, session.sessionId, item.chatId, "resume_ack");
+      }
     }
   }
 
@@ -1273,10 +1358,11 @@ export class BridgeController {
   private async handleCodexExit(
     session: SessionRecord,
     result: CodexExitResult,
-  ): Promise<void> {
+    item: QueuedRemotePrompt,
+  ): Promise<boolean> {
     this.remoteInputLocks.delete(session.sessionId);
     if (result.code === 0) {
-      return;
+      return false;
     }
     const reason =
       result.stderr ||
@@ -1290,17 +1376,50 @@ export class BridgeController {
       status: "error",
       error: reason,
     });
+    const attempt = item.retryAttempt ?? 0;
+    const retryDelay = retryDelayMs(attempt, this.config.retryBaseDelayMs);
+    const retrying =
+      this.store.getSettings().autoRetryErrors &&
+      isRetryableCodexError(reason) &&
+      attempt < 3;
+    const detail = retrying
+      ? `${reason}\n\n助手将在 ${Math.ceil(retryDelay / 1_000)} 秒后自动重试（第 ${attempt + 1}/3 次）。`
+      : reason;
     for (const binding of this.uniqueChatBindings()) {
       try {
         const messageId = await this.feishu.sendCard(
           binding.chatId,
-          buildErrorCard(failedSession, reason),
+          buildErrorCard(failedSession, detail),
         );
         await this.addRoute(messageId, session.sessionId, binding.chatId, "error");
       } catch (error) {
         console.error("[resume] Failed to send an error notification:", error);
       }
     }
+    if (retrying) {
+      this.remoteInputLocks.add(session.sessionId);
+      setTimeout(() => {
+        const current = this.store.getSession(session.sessionId);
+        if (
+          !this.store.getSettings().autoRetryErrors ||
+          !current ||
+          current.status === "ended"
+        ) {
+          this.remoteInputLocks.delete(session.sessionId);
+          void this.tryDrainExternalQueue(session.sessionId);
+          return;
+        }
+        void this.startExternalPrompt(current, {
+          ...item,
+          retryAttempt: attempt + 1,
+        }).catch((error) => {
+          this.remoteInputLocks.delete(session.sessionId);
+          console.error("[retry] External retry failed:", error);
+          void this.tryDrainExternalQueue(session.sessionId);
+        });
+      }, retryDelay);
+    }
+    return retrying;
   }
 
   private hasPendingInputForSession(sessionId: string): boolean {
@@ -2030,6 +2149,28 @@ function activityEventFromPayload(payload: ActivityHookPayload): ActivityCardEve
     case "UserPromptSubmit":
       return { at, label: "已提交新任务，Codex 开始处理" };
   }
+}
+
+function isRetryableCodexError(value: string): boolean {
+  return /(?:\b(?:400|408|409|429|500|502|503|504)\b|too many requests|rate.?limit|busy|overload|temporar(?:y|ily)|service unavailable|timeout|timed out|连接超时|服务繁忙|请求过多|暂时不可用)/i.test(
+    value,
+  );
+}
+
+function codexErrorFromMessage(value: string | null | undefined): string | undefined {
+  const message = value?.trim();
+  if (
+    !message ||
+    !isRetryableCodexError(message) ||
+    !/(?:error|failed|failure|unable|exception|错误|失败|异常|繁忙|超时|请求过多|不可用)/i.test(message)
+  ) {
+    return undefined;
+  }
+  return truncate(message, 2_000);
+}
+
+function retryDelayMs(attempt: number, baseDelayMs = 3_000): number {
+  return Math.min(30_000, Math.max(1, baseDelayMs) * 2 ** Math.max(0, attempt));
 }
 
 function humanizeToolName(toolName: string | undefined): string {

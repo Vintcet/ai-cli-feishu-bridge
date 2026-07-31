@@ -48,6 +48,33 @@ internal sealed class BridgeStatus
 
     [JsonPropertyName("approvals")]
     public List<BridgeApproval> Approvals { get; set; } = [];
+
+    [JsonPropertyName("settings")]
+    public BridgeSettings Settings { get; set; } = new();
+}
+
+internal sealed class BridgeSettings
+{
+    [JsonPropertyName("notifyActivity")]
+    public bool NotifyActivity { get; set; }
+
+    [JsonPropertyName("autoRetryErrors")]
+    public bool AutoRetryErrors { get; set; }
+
+    [JsonPropertyName("autoApprove")]
+    public bool AutoApprove { get; set; }
+}
+
+internal sealed class SettingsUpdateResult
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; set; }
+
+    [JsonPropertyName("settings")]
+    public BridgeSettings Settings { get; set; } = new();
+
+    [JsonPropertyName("error")]
+    public string Error { get; set; } = "";
 }
 
 internal sealed class FeishuStatus

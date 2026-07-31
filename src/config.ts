@@ -48,5 +48,4 @@ export const bridgeConfig = {
     process.env.FEISHU_OUTBOUND_FILE_MAX_BYTES,
     30 * 1024 * 1024,
   ),
-  notifyActivity: process.env.FEISHU_NOTIFY_ACTIVITY?.trim().toLowerCase() === "true",
 };

@@ -34,7 +34,6 @@ const controller = new BridgeController(store, feishu, codex, managedTerminals, 
   inboundAttachmentMaxCount: bridgeConfig.inboundAttachmentMaxCount,
   uploadTtlMs: bridgeConfig.uploadTtlMs,
   outboundFileMaxBytes: bridgeConfig.outboundFileMaxBytes,
-  notifyActivity: bridgeConfig.notifyActivity,
 });
 
 const eventDispatcher = new Lark.EventDispatcher({}).register({
@@ -75,7 +74,7 @@ const hookServer = startHookHttpServer(
   {
     health: () => ({
       ...controller.health(),
-      version: "0.10.0",
+      version: "0.11.0",
       processId: process.pid,
       startedAt: serviceStartedAt,
       feishu: wsClient.getConnectionStatus(),
@@ -86,6 +85,7 @@ const hookServer = startHookHttpServer(
       controller.handleManagedTerminalUnregistration(payload),
     sessionAlias: (payload) => controller.handleSessionAliasUpdate(payload),
     localApproval: (payload) => controller.handleLocalApproval(payload),
+    settingsUpdate: (payload) => controller.handleSettingsUpdate(payload),
     sessionStart: (payload) => controller.handleSessionStartHook(payload),
     sessionEnd: (payload) => controller.handleSessionEndHook(payload),
     permission: (payload) => controller.handlePermissionHook(payload),

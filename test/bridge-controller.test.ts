@@ -136,6 +136,7 @@ function controllerConfig(directory: string) {
     inboundAttachmentMaxCount: 4,
     uploadTtlMs: 60_000,
     outboundFileMaxBytes: 1024 * 1024,
+    retryBaseDelayMs: 10,
   };
 }
 
@@ -473,6 +474,53 @@ test("an approval completed in Feishu is visible as resolved to the desktop", as
   }
 });
 
+test("automatic approval allows the hook and resolves the Feishu card", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-auto-approval-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    await store.updateSettings({ autoApprove: true });
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      controllerConfig(directory),
+    );
+    const result = await controller.handlePermissionHook({
+      hook_event_name: "PermissionRequest",
+      session_id: "019faef0-d0bb-7703-af82-17ee9b45397b",
+      turn_id: "turn-auto-approval",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      transcript_path: null,
+    });
+    assert.match(JSON.stringify(result), /"behavior":"allow"/);
+    const health = controller.health() as {
+      pendingApprovals: number;
+      approvals: Array<{ resolution?: string }>;
+    };
+    assert.equal(health.pendingApprovals, 0);
+    assert.equal(health.approvals[0]?.resolution, "allow");
+    assert.equal(feishu.cards.length, 1);
+    assert.equal(feishu.patchedCards.length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("request_user_input can be answered by replying to the Feishu card", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-input-"));
   try {
@@ -549,6 +597,7 @@ test("activity hooks reuse one progress card and complete it on Stop", async () 
   try {
     const store = new BridgeStore(directory);
     await store.init();
+    await store.updateSettings({ notifyActivity: true });
     const code = store.getPairingCode();
     assert.ok(code);
     await store.bindOwner(
@@ -610,6 +659,61 @@ test("activity hooks reuse one progress card and complete it on Stop", async () 
     assert.equal(feishu.cards.length, 2);
     assert.ok(feishu.patchedCards.length >= 1);
     assert.match(JSON.stringify(feishu.patchedCards.at(-1)?.card), /本轮处理完成/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a managed temporary error is notified and retried when enabled", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-retry-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    await store.updateSettings({ autoRetryErrors: true });
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const terminalId = "terminal-retry-1";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "running",
+      source: "startup",
+      managedTerminalId: terminalId,
+    });
+    const feishu = new FakeFeishu();
+    const terminals = new FakeManagedTerminals(terminalId, directory, sessionId);
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      terminals as unknown as ManagedTerminalRouter,
+      controllerConfig(directory),
+    );
+    await controller.handleStopHook({
+      hook_event_name: "Stop",
+      session_id: sessionId,
+      turn_id: "turn-retry-1",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      last_assistant_message: "Error 503: service unavailable, request failed.",
+      stop_hook_active: true,
+      transcript_path: null,
+    });
+    assert.equal(feishu.cards.length, 1);
+    assert.match(JSON.stringify(feishu.cards[0]?.card), /Codex 运行错误/);
+    for (let attempt = 0; attempt < 20 && terminals.sends.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(terminals.sends.length, 1);
+    assert.match(terminals.sends[0]!.prompt, /重试上一项任务/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -11,6 +11,12 @@ export type SessionStatus =
   | "error"
   | "ended";
 
+export interface BridgeSettings {
+  notifyActivity: boolean;
+  autoRetryErrors: boolean;
+  autoApprove: boolean;
+}
+
 export interface Binding {
   openId: string;
   chatId: string;
