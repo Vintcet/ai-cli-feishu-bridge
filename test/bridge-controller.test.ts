@@ -919,6 +919,30 @@ test("an explicit managed terminal id wins when two windows share a cwd", async 
       store.getSession("019faef0-d0bb-7703-af82-17ee9b45397b")?.managedTerminalId,
       "terminal777",
     );
+    assert.equal(
+      store.getSession("019faef0-d0bb-7703-af82-17ee9b45397b")?.managedByAssistant,
+      true,
+    );
+    const activeHealth = controller.health() as {
+      historySessions: Array<{ sessionId: string }>;
+    };
+    assert.equal(activeHealth.historySessions.length, 0);
+
+    await controller.handleManagedTerminalUnregistration({ terminalId: "terminal777" });
+    const closedHealth = controller.health() as {
+      historySessions: Array<{
+        sessionId: string;
+        managedByAssistant: boolean;
+        status: string;
+      }>;
+    };
+    assert.equal(closedHealth.historySessions.length, 1);
+    assert.equal(
+      closedHealth.historySessions[0]?.sessionId,
+      "019faef0-d0bb-7703-af82-17ee9b45397b",
+    );
+    assert.equal(closedHealth.historySessions[0]?.managedByAssistant, true);
+    assert.equal(closedHealth.historySessions[0]?.status, "ended");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

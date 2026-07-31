@@ -168,6 +168,58 @@ test("explicit null clears stale managed terminal metadata", async () => {
   }
 });
 
+test("migrates legacy managed sessions into assistant history", async () => {
+  const directory = await temporaryDirectory();
+  try {
+    const managedSessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const externalSessionId = "019fb4e7-d831-7dd3-9745-42f85a8209bb";
+    const openedAt = "2026-01-01T00:00:00.000Z";
+    await writeFile(
+      path.join(directory, "sessions.json"),
+      JSON.stringify({
+        sessions: {
+          [managedSessionId]: {
+            sessionId: managedSessionId,
+            shortId: "9b45397b",
+            cwd: directory,
+            projectName: "managed",
+            status: "ended",
+            openedAt,
+            lastSeenAt: openedAt,
+            endedAt: openedAt,
+            managedTerminalId: "terminal-legacy",
+          },
+          [externalSessionId]: {
+            sessionId: externalSessionId,
+            shortId: "5a8209bb",
+            cwd: directory,
+            projectName: "external",
+            status: "ended",
+            openedAt,
+            lastSeenAt: openedAt,
+            endedAt: openedAt,
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const store = new BridgeStore(directory);
+    await store.init();
+    assert.equal(store.getSession(managedSessionId)?.managedByAssistant, true);
+    assert.deepEqual(
+      store.listAssistantManagedSessions().map((session) => session.sessionId),
+      [managedSessionId],
+    );
+
+    const reopened = new BridgeStore(directory);
+    await reopened.init();
+    assert.equal(reopened.getSession(managedSessionId)?.managedByAssistant, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("reopening an ended session records a new openedAt", async () => {
   const directory = await temporaryDirectory();
   try {

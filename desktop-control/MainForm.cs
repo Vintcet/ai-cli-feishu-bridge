@@ -33,11 +33,14 @@ internal sealed class MainForm : Form
     private readonly Label operationLabel = new();
     private readonly Label lastRefreshLabel = new();
     private readonly DataGridView sessionGrid = new();
+    private readonly DataGridView historyGrid = new();
+    private readonly TabControl sessionTabs = new();
     private readonly Button connectButton = new();
     private readonly Button disconnectButton = new();
     private readonly Button newCodexButton = new();
     private readonly Button approvalButton = new();
     private readonly Button aliasButton = new();
+    private readonly Button resumeSessionButton = new();
     private readonly Button settingsButton = new();
     private readonly Button refreshButton = new();
     private readonly Button folderButton = new();
@@ -348,7 +351,7 @@ internal sealed class MainForm : Form
         metrics.Controls.Add(CreateMetricCard("桥接服务", serviceValue, Primary), 0, 0);
         metrics.Controls.Add(CreateMetricCard("飞书连接", feishuValue, Success), 1, 0);
         metrics.Controls.Add(CreateMetricCard("已绑定账号", bindingsValue, Color.FromArgb(124, 58, 237)), 2, 0);
-        metrics.Controls.Add(CreateMetricCard("Codex 会话", sessionsValue, Warning), 3, 0);
+        metrics.Controls.Add(CreateMetricCard("活跃会话", sessionsValue, Warning), 3, 0);
         return metrics;
     }
 
@@ -405,7 +408,7 @@ internal sealed class MainForm : Form
         var title = new Label
         {
             AutoSize = true,
-            Text = "活跃 Codex 会话",
+            Text = "Codex 会话",
             ForeColor = Color.FromArgb(15, 23, 42),
             Font = new Font("Microsoft YaHei UI", 12F, FontStyle.Bold),
             Location = new Point(2, 3),
@@ -414,7 +417,7 @@ internal sealed class MainForm : Form
         {
             AutoSize = false,
             AutoEllipsis = true,
-            Text = "托管窗口支持实时插话和下一轮排队；外部会话使用桥接队列。双击会话可打开目录",
+            Text = "活跃会话支持同步与排队；历史记录可直接继续之前的助手会话",
             ForeColor = Muted,
             Font = new Font("Microsoft YaHei UI", 8.5F),
             Location = new Point(3, 28),
@@ -428,59 +431,53 @@ internal sealed class MainForm : Form
         aliasButton.Enabled = false;
         aliasButton.Click += async (_, _) => await EditSelectedAliasAsync();
 
+        ConfigureButton(resumeSessionButton, "继续对话", Success, Color.White);
+        resumeSessionButton.Size = new Size(100, 34);
+        resumeSessionButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        resumeSessionButton.Location = aliasButton.Location;
+        resumeSessionButton.Enabled = false;
+        resumeSessionButton.Visible = false;
+        resumeSessionButton.Click += (_, _) => ContinueSelectedHistory();
+
         titlePanel.Controls.Add(title);
         titlePanel.Controls.Add(hint);
         titlePanel.Controls.Add(aliasButton);
+        titlePanel.Controls.Add(resumeSessionButton);
         titlePanel.Resize += (_, _) =>
         {
             aliasButton.Left = titlePanel.ClientSize.Width - aliasButton.Width - 2;
+            resumeSessionButton.Left = titlePanel.ClientSize.Width - resumeSessionButton.Width - 2;
             hint.Width = Math.Max(160, aliasButton.Left - hint.Left - 12);
         };
 
         ConfigureSessionGrid();
-        card.Controls.Add(sessionGrid);
+        ConfigureHistoryGrid();
+        var activePage = new TabPage("活跃会话")
+        {
+            BackColor = Color.White,
+            Padding = Padding.Empty,
+        };
+        var historyPage = new TabPage("历史记录")
+        {
+            BackColor = Color.White,
+            Padding = Padding.Empty,
+        };
+        activePage.Controls.Add(sessionGrid);
+        historyPage.Controls.Add(historyGrid);
+        sessionTabs.Dock = DockStyle.Fill;
+        sessionTabs.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
+        sessionTabs.Padding = new Point(18, 6);
+        sessionTabs.Controls.Add(activePage);
+        sessionTabs.Controls.Add(historyPage);
+        sessionTabs.SelectedIndexChanged += (_, _) => UpdateSessionActionState();
+        card.Controls.Add(sessionTabs);
         card.Controls.Add(titlePanel);
         return card;
     }
 
     private void ConfigureSessionGrid()
     {
-        sessionGrid.Dock = DockStyle.Fill;
-        sessionGrid.BackgroundColor = Color.White;
-        sessionGrid.BorderStyle = BorderStyle.None;
-        sessionGrid.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
-        sessionGrid.GridColor = Color.FromArgb(241, 245, 249);
-        sessionGrid.EnableHeadersVisualStyles = false;
-        sessionGrid.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
-        sessionGrid.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
-        {
-            BackColor = Color.FromArgb(248, 250, 252),
-            ForeColor = Color.FromArgb(71, 85, 105),
-            Font = new Font("Microsoft YaHei UI", 8.8F, FontStyle.Bold),
-            Padding = new Padding(6, 0, 6, 0),
-            SelectionBackColor = Color.FromArgb(248, 250, 252),
-            SelectionForeColor = Color.FromArgb(71, 85, 105),
-        };
-        sessionGrid.ColumnHeadersHeight = 40;
-        sessionGrid.RowHeadersVisible = false;
-        sessionGrid.RowTemplate.Height = 42;
-        sessionGrid.DefaultCellStyle = new DataGridViewCellStyle
-        {
-            BackColor = Color.White,
-            ForeColor = Color.FromArgb(30, 41, 59),
-            Font = new Font("Microsoft YaHei UI", 9F),
-            Padding = new Padding(6, 0, 6, 0),
-            SelectionBackColor = Color.FromArgb(219, 234, 254),
-            SelectionForeColor = Color.FromArgb(30, 64, 175),
-        };
-        sessionGrid.AllowUserToAddRows = false;
-        sessionGrid.AllowUserToDeleteRows = false;
-        sessionGrid.AllowUserToResizeRows = false;
-        sessionGrid.ReadOnly = true;
-        sessionGrid.MultiSelect = false;
-        sessionGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-        sessionGrid.AutoGenerateColumns = false;
-
+        ConfigureGrid(sessionGrid);
         sessionGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Alias", HeaderText = "别名", Width = 120 });
         sessionGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Project", HeaderText = "项目", Width = 135 });
         sessionGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ShortId", HeaderText = "会话 ID", Width = 95 });
@@ -497,7 +494,7 @@ internal sealed class MainForm : Form
         });
         sessionGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "OpenedAt", HeaderText = "打开时间", Width = 135 });
         sessionGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "LastSeen", HeaderText = "最近活动", Width = 140 });
-        sessionGrid.SelectionChanged += (_, _) => UpdateAliasButtonState();
+        sessionGrid.SelectionChanged += (_, _) => UpdateSessionActionState();
         sessionGrid.CellDoubleClick += (_, eventArgs) =>
         {
             if (eventArgs.RowIndex < 0 ||
@@ -508,6 +505,75 @@ internal sealed class MainForm : Form
             }
             Process.Start(new ProcessStartInfo("explorer.exe", session.Cwd) { UseShellExecute = true });
         };
+    }
+
+    private void ConfigureHistoryGrid()
+    {
+        ConfigureGrid(historyGrid);
+        historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Alias", HeaderText = "别名", Width = 120 });
+        historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Project", HeaderText = "项目", Width = 145 });
+        historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ShortId", HeaderText = "会话 ID", Width = 95 });
+        historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Model", HeaderText = "模型", Width = 125 });
+        historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Mode", HeaderText = "启动方式", Width = 90 });
+        historyGrid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "Cwd",
+            HeaderText = "工作目录",
+            AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+            MinimumWidth = 220,
+        });
+        historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "OpenedAt", HeaderText = "打开时间", Width = 135 });
+        historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ClosedAt", HeaderText = "最后活动", Width = 140 });
+        historyGrid.SelectionChanged += (_, _) => UpdateSessionActionState();
+        historyGrid.CellDoubleClick += (_, eventArgs) =>
+        {
+            if (eventArgs.RowIndex < 0 ||
+                historyGrid.Rows[eventArgs.RowIndex].Tag is not CodexSession)
+            {
+                return;
+            }
+            historyGrid.CurrentCell = historyGrid.Rows[eventArgs.RowIndex].Cells[0];
+            ContinueSelectedHistory();
+        };
+    }
+
+    private static void ConfigureGrid(DataGridView grid)
+    {
+        grid.Dock = DockStyle.Fill;
+        grid.BackgroundColor = Color.White;
+        grid.BorderStyle = BorderStyle.None;
+        grid.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
+        grid.GridColor = Color.FromArgb(241, 245, 249);
+        grid.EnableHeadersVisualStyles = false;
+        grid.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
+        grid.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
+        {
+            BackColor = Color.FromArgb(248, 250, 252),
+            ForeColor = Color.FromArgb(71, 85, 105),
+            Font = new Font("Microsoft YaHei UI", 8.8F, FontStyle.Bold),
+            Padding = new Padding(6, 0, 6, 0),
+            SelectionBackColor = Color.FromArgb(248, 250, 252),
+            SelectionForeColor = Color.FromArgb(71, 85, 105),
+        };
+        grid.ColumnHeadersHeight = 40;
+        grid.RowHeadersVisible = false;
+        grid.RowTemplate.Height = 42;
+        grid.DefaultCellStyle = new DataGridViewCellStyle
+        {
+            BackColor = Color.White,
+            ForeColor = Color.FromArgb(30, 41, 59),
+            Font = new Font("Microsoft YaHei UI", 9F),
+            Padding = new Padding(6, 0, 6, 0),
+            SelectionBackColor = Color.FromArgb(219, 234, 254),
+            SelectionForeColor = Color.FromArgb(30, 64, 175),
+        };
+        grid.AllowUserToAddRows = false;
+        grid.AllowUserToDeleteRows = false;
+        grid.AllowUserToResizeRows = false;
+        grid.ReadOnly = true;
+        grid.MultiSelect = false;
+        grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        grid.AutoGenerateColumns = false;
     }
 
     private Control BuildFooter()
@@ -575,7 +641,51 @@ internal sealed class MainForm : Form
         finally
         {
             SetOperating(false);
-            UpdateAliasButtonState();
+            UpdateSessionActionState();
+        }
+    }
+
+    private void ContinueSelectedHistory()
+    {
+        if (operating || historyGrid.CurrentRow?.Tag is not CodexSession session)
+        {
+            return;
+        }
+        if (!Directory.Exists(session.Cwd))
+        {
+            MessageBox.Show(
+                this,
+                $"原工作目录不存在：\r\n{session.Cwd}",
+                "无法继续对话",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        SetOperating(true, $"正在恢复 {SessionDisplayName(session)}…");
+        try
+        {
+            bridgeClient.StartManagedTerminal(
+                session.Cwd,
+                session.ManagedTerminalElevated,
+                $"resume {session.SessionId}");
+            operationLabel.Text = session.ManagedTerminalElevated
+                ? $"已请求以管理员身份继续 {SessionDisplayName(session)}；请完成 UAC 确认"
+                : $"正在新窗口继续 {SessionDisplayName(session)}";
+            sessionTabs.SelectedIndex = 0;
+        }
+        catch (OperationCanceledException error)
+        {
+            operationLabel.Text = error.Message;
+        }
+        catch (Exception error)
+        {
+            ShowOperationError("继续对话失败", error);
+        }
+        finally
+        {
+            SetOperating(false);
+            UpdateSessionActionState();
         }
     }
 
@@ -607,6 +717,7 @@ internal sealed class MainForm : Form
             status.Settings = await bridgeClient.UpdateSettingsAsync(
                 dialog.Settings,
                 lifetime.Token);
+            SyncApprovalDialog(status);
             operationLabel.Text = "设置已保存并立即生效";
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
@@ -790,7 +901,7 @@ internal sealed class MainForm : Form
             SetHeaderStatus("飞书未连接", Danger);
         }
 
-        if (status.PendingApprovals > 0)
+        if (status.PendingApprovals > 0 && !status.Settings.AutoApprove)
         {
             operationLabel.Text =
                 $"有 {status.PendingApprovals} 个操作等待审批，可在本机或飞书处理";
@@ -818,9 +929,13 @@ internal sealed class MainForm : Form
         connectButton.Enabled = !operating && !feishuConnected;
         disconnectButton.Enabled = !operating;
         newCodexButton.Enabled = !operating;
-        approvalButton.Enabled = !operating && status.PendingApprovals > 0;
+        approvalButton.Enabled =
+            !operating && !status.Settings.AutoApprove && status.PendingApprovals > 0;
         refreshButton.Enabled = !operating;
         settingsButton.Enabled = !operating;
+
+        sessionTabs.TabPages[0].Text = $"活跃会话 ({status.Sessions.Count})";
+        sessionTabs.TabPages[1].Text = $"历史记录 ({status.HistorySessions.Count})";
 
         sessionGrid.Rows.Clear();
         foreach (var session in status.Sessions.OrderByDescending(item => ParseTime(item.LastSeenAt)))
@@ -880,7 +995,32 @@ internal sealed class MainForm : Form
                 row.Cells["Status"].Style.ForeColor = Success;
             }
         }
-        UpdateAliasButtonState();
+        historyGrid.Rows.Clear();
+        foreach (var session in status.HistorySessions.OrderByDescending(
+                     item => ParseTime(string.IsNullOrWhiteSpace(item.EndedAt)
+                         ? item.LastSeenAt
+                         : item.EndedAt)))
+        {
+            var rowIndex = historyGrid.Rows.Add(
+                string.IsNullOrWhiteSpace(session.Alias) ? "—" : $"@{session.Alias}",
+                session.ProjectName,
+                $"#{session.ShortId}",
+                string.IsNullOrWhiteSpace(session.Model) ? "—" : session.Model,
+                session.ManagedTerminalElevated ? "管理员" : "普通",
+                session.Cwd,
+                FormatTime(session.OpenedAt),
+                FormatTime(string.IsNullOrWhiteSpace(session.EndedAt)
+                    ? session.LastSeenAt
+                    : session.EndedAt));
+            var row = historyGrid.Rows[rowIndex];
+            row.Tag = session;
+            if (!string.IsNullOrWhiteSpace(session.Alias))
+            {
+                row.Cells["Alias"].Style.ForeColor = Primary;
+                row.Cells["Alias"].Style.Font = gridBoldFont;
+            }
+        }
+        UpdateSessionActionState();
         SyncApprovalDialog(status);
     }
 
@@ -899,8 +1039,11 @@ internal sealed class MainForm : Form
         approvalButton.Enabled = false;
         refreshButton.Enabled = !operating;
         settingsButton.Enabled = !operating;
+        sessionTabs.TabPages[0].Text = "活跃会话";
+        sessionTabs.TabPages[1].Text = "历史记录";
         sessionGrid.Rows.Clear();
-        UpdateAliasButtonState();
+        historyGrid.Rows.Clear();
+        UpdateSessionActionState();
         dismissedApprovalIds.Clear();
         if (approvalDialog is not null)
         {
@@ -928,8 +1071,10 @@ internal sealed class MainForm : Form
         disconnectButton.Enabled = !value;
         newCodexButton.Enabled = !value;
         approvalButton.Enabled =
-            !value && (lastStatus?.Approvals.Count(item => item.Status == "pending") ?? 0) > 0;
-        aliasButton.Enabled = !value && sessionGrid.CurrentRow?.Tag is CodexSession;
+            !value &&
+            lastStatus?.Settings.AutoApprove != true &&
+            (lastStatus?.Approvals.Count(item => item.Status == "pending") ?? 0) > 0;
+        UpdateSessionActionState();
         refreshButton.Enabled = !value;
         settingsButton.Enabled = !value;
         folderButton.Enabled = !value;
@@ -939,13 +1084,34 @@ internal sealed class MainForm : Form
         }
     }
 
-    private void UpdateAliasButtonState()
+    private void UpdateSessionActionState()
     {
-        aliasButton.Enabled = !operating && sessionGrid.CurrentRow?.Tag is CodexSession;
+        var historySelected = sessionTabs.SelectedIndex == 1;
+        aliasButton.Visible = !historySelected;
+        resumeSessionButton.Visible = historySelected;
+        aliasButton.Enabled =
+            !operating && !historySelected && sessionGrid.CurrentRow?.Tag is CodexSession;
+        resumeSessionButton.Enabled =
+            !operating &&
+            historySelected &&
+            historyGrid.CurrentRow?.Tag is CodexSession;
     }
 
     private void SyncApprovalDialog(BridgeStatus status)
     {
+        if (status.Settings.AutoApprove)
+        {
+            approvalButton.Text = "本机审批";
+            approvalButton.Enabled = false;
+            dismissedApprovalIds.Clear();
+            if (approvalDialog is not null)
+            {
+                var dialog = approvalDialog;
+                approvalDialog = null;
+                dialog.MarkResolved();
+            }
+            return;
+        }
         var pending = status.Approvals
             .Where(item => item.Status == "pending")
             .OrderBy(item => ParseTime(item.CreatedAt))
@@ -1074,6 +1240,11 @@ internal sealed class MainForm : Form
         "timeout" => "审批等待超时，已交还 Codex 原窗口",
         _ => "这条审批已在另一端处理",
     };
+
+    private static string SessionDisplayName(CodexSession session) =>
+        string.IsNullOrWhiteSpace(session.Alias)
+            ? $"{session.ProjectName} #{session.ShortId}"
+            : $"@{session.Alias}";
 
     private static void ConfigureButton(
         Button button,

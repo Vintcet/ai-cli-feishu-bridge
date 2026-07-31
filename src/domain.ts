@@ -53,6 +53,7 @@ export interface SessionRecord {
   clientProcessStartedAt?: string;
   managedTerminalId?: string;
   managedTerminalElevated?: boolean;
+  managedByAssistant?: boolean;
 }
 
 export interface SessionStore {

@@ -46,6 +46,9 @@ internal sealed class BridgeStatus
     [JsonPropertyName("sessions")]
     public List<CodexSession> Sessions { get; set; } = [];
 
+    [JsonPropertyName("historySessions")]
+    public List<CodexSession> HistorySessions { get; set; } = [];
+
     [JsonPropertyName("approvals")]
     public List<BridgeApproval> Approvals { get; set; } = [];
 
@@ -133,6 +136,9 @@ internal sealed class CodexSession
     [JsonPropertyName("lastSeenAt")]
     public string LastSeenAt { get; set; } = "";
 
+    [JsonPropertyName("endedAt")]
+    public string EndedAt { get; set; } = "";
+
     [JsonPropertyName("openedAt")]
     public string OpenedAt { get; set; } = "";
 
@@ -150,6 +156,9 @@ internal sealed class CodexSession
 
     [JsonPropertyName("managedTerminalReady")]
     public bool ManagedTerminalReady { get; set; }
+
+    [JsonPropertyName("managedByAssistant")]
+    public bool ManagedByAssistant { get; set; }
 
     [JsonPropertyName("queuedPrompts")]
     public int QueuedPrompts { get; set; }

@@ -143,6 +143,10 @@ export class BridgeStore {
         session.openedAt = session.lastSeenAt || new Date(now).toISOString();
         sessionsChanged = true;
       }
+      if (session.managedTerminalId && session.managedByAssistant !== true) {
+        session.managedByAssistant = true;
+        sessionsChanged = true;
+      }
     }
     let approvalsChanged = false;
     for (const approval of Object.values(this.approvals.requests)) {
@@ -309,6 +313,20 @@ export class BridgeStore {
       .sort((left, right) => Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt));
   }
 
+  listAssistantManagedSessions(): SessionRecord[] {
+    return Object.values(this.sessions.sessions)
+      .filter(
+        (session) =>
+          session.managedByAssistant === true &&
+          !session.sessionId.startsWith("managed-terminal-"),
+      )
+      .sort(
+        (left, right) =>
+          Date.parse(right.endedAt ?? right.lastSeenAt) -
+          Date.parse(left.endedAt ?? left.lastSeenAt),
+      );
+  }
+
   async upsertSession(input: {
     sessionId: string;
     alias?: string;
@@ -323,6 +341,7 @@ export class BridgeStore {
     clientProcessStartedAt?: string | null;
     managedTerminalId?: string | null;
     managedTerminalElevated?: boolean | null;
+    managedByAssistant?: boolean;
     openedAt?: string;
   }): Promise<SessionRecord> {
     return this.mutate(async () => {
@@ -379,6 +398,10 @@ export class BridgeStore {
         managedTerminalElevated: hasManagedTerminalElevated
           ? input.managedTerminalElevated ?? undefined
           : current?.managedTerminalElevated,
+        managedByAssistant:
+          input.managedByAssistant ??
+          current?.managedByAssistant ??
+          Boolean(input.managedTerminalId),
       };
       this.sessions.sessions[input.sessionId] = next;
       await this.writeJson(this.sessionFile, this.sessions);

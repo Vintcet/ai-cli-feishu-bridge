@@ -173,8 +173,40 @@ export class BridgeController {
 
   health(): Record<string, unknown> {
     const sessions = this.listActiveSessions();
+    const activeSessionIds = new Set(sessions.map((session) => session.sessionId));
+    const historySessions = this.store
+      .listAssistantManagedSessions()
+      .filter(
+        (session) =>
+          !activeSessionIds.has(session.sessionId) &&
+          !this.managedTerminals.isOnline(session),
+      );
     const approvals = this.listApprovalViews();
     const pairingCode = this.store.getPairingCode();
+    const sessionView = (session: SessionRecord) => ({
+      sessionId: session.sessionId,
+      shortId: session.shortId,
+      alias: session.alias ?? "",
+      projectName: session.projectName,
+      cwd: session.cwd,
+      model: session.model ?? "",
+      status: session.status,
+      statusLabel: statusLabel(session.status),
+      source: session.source ?? "",
+      openedAt: session.openedAt,
+      lastSeenAt: session.lastSeenAt,
+      endedAt: session.endedAt ?? "",
+      remoteResumeRunning: this.codex.isRunning(session.sessionId),
+      externalProcessTracked: Boolean(session.clientProcessId),
+      managedTerminal: this.managedTerminals.isManaged(session),
+      managedTerminalElevated: session.managedTerminalElevated === true,
+      managedTerminalOnline: this.managedTerminals.isOnline(session),
+      managedTerminalReady: this.managedTerminals.isReady(session),
+      managedByAssistant: session.managedByAssistant === true,
+      queuedPrompts:
+        (this.externalQueues.get(session.sessionId)?.length ?? 0) +
+        (this.managedQueueDepth.get(session.sessionId) ?? 0),
+    });
     return {
       ok: true,
       bindings: this.store.listBindings().length,
@@ -200,28 +232,8 @@ export class BridgeController {
         .length,
       activeSessionDefinition: this.activeSessionDefinition(),
       settings: this.store.getSettings(),
-      sessions: sessions.map((session) => ({
-        sessionId: session.sessionId,
-        shortId: session.shortId,
-        alias: session.alias ?? "",
-        projectName: session.projectName,
-        cwd: session.cwd,
-        model: session.model ?? "",
-        status: session.status,
-        statusLabel: statusLabel(session.status),
-        source: session.source ?? "",
-        openedAt: session.openedAt,
-        lastSeenAt: session.lastSeenAt,
-        remoteResumeRunning: this.codex.isRunning(session.sessionId),
-        externalProcessTracked: Boolean(session.clientProcessId),
-        managedTerminal: this.managedTerminals.isManaged(session),
-        managedTerminalElevated: session.managedTerminalElevated === true,
-        managedTerminalOnline: this.managedTerminals.isOnline(session),
-        managedTerminalReady: this.managedTerminals.isReady(session),
-        queuedPrompts:
-          (this.externalQueues.get(session.sessionId)?.length ?? 0) +
-          (this.managedQueueDepth.get(session.sessionId) ?? 0),
-      })),
+      sessions: sessions.map(sessionView),
+      historySessions: historySessions.map(sessionView),
     };
   }
 
@@ -263,9 +275,9 @@ export class BridgeController {
         cwd: session.cwd,
         model: session.model,
         status: "ended",
-        source: "ended",
         managedTerminalId: session.managedTerminalId,
         managedTerminalElevated: session.managedTerminalElevated,
+        managedByAssistant: true,
       });
     }
     return { ok: true };
@@ -435,6 +447,7 @@ export class BridgeController {
         : payload.client_process_started_at ?? null,
       managedTerminalId,
       managedTerminalElevated,
+      managedByAssistant: managedTerminalId ? true : undefined,
       openedAt,
     });
     if (
@@ -475,7 +488,6 @@ export class BridgeController {
       sessionId: payload.session_id,
       cwd: payload.cwd,
       status: "ended",
-      source: "ended",
       ...(payload.managed_terminal_id !== undefined
         ? { managedTerminalId: payload.managed_terminal_id }
         : {}),
