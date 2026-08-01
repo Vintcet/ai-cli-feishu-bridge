@@ -2,7 +2,16 @@
   "name": "codex-feishu-bridge",
   "version": "0.15.0",
   "private": true,
-  "description": "A local multi-session bridge between Codex hooks and a Feishu custom app.",
+  "description": "A local Windows bridge connecting Codex CLI, Claude Code, and OpenCode sessions to Feishu.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Vintcet/codex-feishu-bridge.git"
+  },
+  "homepage": "https://github.com/Vintcet/codex-feishu-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/Vintcet/codex-feishu-bridge/issues"
+  },
   "type": "module",
   "scripts": {
     "dev": "tsx src/index.ts",

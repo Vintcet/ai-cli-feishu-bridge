@@ -1,8 +1,20 @@
-# Codex 飞书桥接器
+# Codex / Claude Code / OpenCode 飞书桥接器
 
 当前版本：`0.15.0`
 
-这个本地桥接器把 Codex CLI、Claude Code 和可选的 opencode 窗口连接到飞书企业自建应用，支持：
+这是一个运行在 Windows 本机的非官方桥接器，把 Codex CLI、Claude Code 和 OpenCode 会话连接到你自己的飞书企业自建应用。每个助手会话可以绑定一个独立私有群，让你在电脑外接收完成或错误通知、处理权限审批和补充问题，并继续向原会话发送消息。
+
+桥接服务、会话索引和配置都保存在本机；项目不提供云端中转服务，也不捆绑 Codex CLI、Claude Code、OpenCode 或飞书应用。使用者需要自行安装并登录目标 CLI，并自行创建飞书应用。
+
+三种运行时共用同一套会话、路由、飞书卡片、审批和状态管理，只有与目标 CLI 通信的底层方式不同：
+
+| 运行时 | 本机接入方式 | 完整双向同步 |
+| --- | --- | --- |
+| Codex CLI | Hooks + 托管终端 | 由桌面助手启动时支持 |
+| Claude Code | Hooks + 托管终端 | 由桌面助手启动时支持 |
+| OpenCode | 本机 HTTP + SSE | 使用带端口的窗口时支持 |
+
+主要功能：
 
 - Codex 本轮完成或等待补充信息时发送飞书通知；
 - Codex 请求执行权限时发送飞书审批卡片；
@@ -22,6 +34,15 @@
 - 同时运行多个助手窗口，并按会话别名或 `session_id` 严格路由；
 - Claude Code 作为独立运行时接入：支持托管窗口、历史恢复、权限审批、`AskUserQuestion` 补充信息、工具活动和完成通知；
 - 可选接入 opencode：同样一个对话对应一个飞书群，支持完成/错误/审批/工具活动通知与飞书输入双向同步（加法式接入，不影响 Codex 原有路径）。
+
+### 运行环境
+
+- Windows 10/11 x64；
+- Node.js 20 或更高版本；
+- .NET 8 Windows Desktop Runtime；
+- Codex CLI、Claude Code、OpenCode 中至少安装一个；
+- 一个可创建机器人、开通所需权限并发布版本的飞书企业自建应用；
+- Windows Terminal 为推荐项，未安装时会回退到普通控制台。
 
 ## 快速开始：一个助手对话对应一个飞书群
 
@@ -346,6 +367,12 @@ dotnet publish .\desktop-control\CodexFeishuControl.csproj -c Release -o .\deskt
 - `approvals.json`
 
 这些 JSON 文件以及 `.env` 都被 `.gitignore` 排除。Hook HTTP 服务只监听本机回环地址。发送审批内容前会对常见 token、secret、password 和 API key 字段做基础脱敏，并限制消息长度。
+
+## 开源协议与项目声明
+
+本项目源代码采用 [MIT License](LICENSE) 开源。你可以使用、修改和分发，但需要保留原版权和许可声明；软件按“现状”提供，不附带任何明示或默示担保。
+
+本项目是社区维护的非官方工具，与 OpenAI、Anthropic、OpenCode 或飞书不存在隶属、授权或背书关系。相关名称和商标归各自权利人所有；第三方 CLI、SDK、在线服务及其生成内容仍分别受其自身许可证、服务条款和使用政策约束，MIT License 不会授予这些第三方产品的权利。
 
 ## 行为说明
 
