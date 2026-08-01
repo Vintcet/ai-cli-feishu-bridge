@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createServer } from "node:net";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -42,6 +43,7 @@ export class OpenCodeManager {
   private readonly autoDiscover: boolean;
   private readonly scanIntervalMs: number;
   private readonly enumerateLocalPorts: () => Promise<number[]>;
+  private readonly isLocalPortAvailable: (port: number) => Promise<boolean>;
   private discoverTimer: ReturnType<typeof setTimeout> | undefined;
   private discoverRunning = false;
 
@@ -53,6 +55,7 @@ export class OpenCodeManager {
       autoDiscover?: boolean;
       scanIntervalMs?: number;
       enumerateLocalPorts?: () => Promise<number[]>;
+      isLocalPortAvailable?: (port: number) => Promise<boolean>;
     } = {},
   ) {
     this.basePort = options.basePort ?? 5100;
@@ -60,6 +63,7 @@ export class OpenCodeManager {
     this.autoDiscover = options.autoDiscover ?? true;
     this.scanIntervalMs = options.scanIntervalMs ?? 20_000;
     this.enumerateLocalPorts = options.enumerateLocalPorts ?? defaultEnumerateLocalPorts;
+    this.isLocalPortAvailable = options.isLocalPortAvailable ?? defaultIsLocalPortAvailable;
   }
 
   listInstances(): OpenCodeInstance[] {
@@ -116,14 +120,28 @@ export class OpenCodeManager {
   }
 
   private async allocatePort(): Promise<number> {
-    const usedPorts = new Set<number>(this.instances.keys());
+    const listeningPorts = await this.enumerateLocalPorts();
+    const usedPorts = new Set<number>(listeningPorts);
+    for (const port of this.instances.keys()) {
+      usedPorts.add(port);
+    }
     for (const port of this.pendingPorts) {
       usedPorts.add(port);
     }
     for (let port = this.basePort; port <= this.maxPort; port += 1) {
-      if (!usedPorts.has(port)) {
+      if (usedPorts.has(port)) continue;
+      this.pendingPorts.add(port);
+      let available = false;
+      try {
+        available = await this.isLocalPortAvailable(port);
+      } catch {
+        available = false;
+      }
+      if (available) {
         return port;
       }
+      this.pendingPorts.delete(port);
+      usedPorts.add(port);
     }
     throw new Error(`opencode 端口池已用尽（${this.basePort}-${this.maxPort}）`);
   }
@@ -442,6 +460,23 @@ async function defaultEnumerateLocalPorts(): Promise<number[]> {
   } catch {
     return [];
   }
+}
+
+async function defaultIsLocalPortAvailable(port: number): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    const server = createServer();
+    let settled = false;
+    const finish = (available: boolean): void => {
+      if (settled) return;
+      settled = true;
+      resolve(available);
+    };
+    server.unref();
+    server.once("error", () => finish(false));
+    server.listen({ host: "127.0.0.1", port, exclusive: true }, () => {
+      server.close((error) => finish(!error));
+    });
+  });
 }
 
 function isSessionWithinProject(

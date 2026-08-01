@@ -20,7 +20,12 @@ test("launch retries until the opencode server is healthy and seeds sessions", a
         onSessionCreated: (session) => created.push(session.id),
       },
     },
-    { basePort: BASE_PORT, maxPort: BASE_PORT + 10 },
+    {
+      basePort: BASE_PORT,
+      maxPort: BASE_PORT + 10,
+      enumerateLocalPorts: async () => [],
+      isLocalPortAvailable: async () => true,
+    },
   );
   try {
     const launched = await manager.launch("C:/demo");
@@ -131,7 +136,12 @@ test("launch with a resumed session id seeds the session even when it is outside
         onSessionCreated: (session) => created.push(session.id),
       },
     },
-    { basePort: port, maxPort: port },
+    {
+      basePort: port,
+      maxPort: port,
+      enumerateLocalPorts: async () => [],
+      isLocalPortAvailable: async () => true,
+    },
   );
   try {
     await manager.launch("C:/demo", "session-resumed");
@@ -143,23 +153,61 @@ test("launch with a resumed session id seeds the session even when it is outside
   }
 });
 
-test("port allocation respects the configured range and skips pending ports", async () => {
+test("port allocation skips system listeners and pending ports", async () => {
   const manager = new OpenCodeManager(
     {
       onInstanceConnected: () => {},
       onInstanceDisconnected: () => {},
       eventHandlers: { onSessionCreated: () => {} },
     },
-    { basePort: 7200, maxPort: 7202 },
+    {
+      basePort: 7200,
+      maxPort: 7202,
+      autoDiscover: false,
+      enumerateLocalPorts: async () => [7200],
+      isLocalPortAvailable: async () => true,
+    },
   );
   const first = await manager.launch("C:/a");
   const second = await manager.launch("C:/b");
   try {
-    assert.equal(first.port, 7200);
-    assert.equal(second.port, 7201);
+    assert.equal(first.port, 7201);
+    assert.equal(second.port, 7202);
   } finally {
     await manager.unregister(first.port);
     await manager.unregister(second.port);
+  }
+});
+
+test("port allocation probes a listener missed by enumeration", async () => {
+  const fake = new FakeOpenCodeServer();
+  const occupiedPort = await fake.listen();
+  if (occupiedPort >= 65535) {
+    await fake.close();
+    return;
+  }
+  const manager = new OpenCodeManager(
+    {
+      onInstanceConnected: () => {},
+      onInstanceDisconnected: () => {},
+      eventHandlers: {},
+    },
+    {
+      basePort: occupiedPort,
+      maxPort: Math.min(65535, occupiedPort + 20),
+      autoDiscover: false,
+      enumerateLocalPorts: async () => [],
+    },
+  );
+  let allocatedPort: number | undefined;
+  try {
+    allocatedPort = (await manager.launch("C:/probe")).port;
+    assert.notEqual(allocatedPort, occupiedPort);
+  } finally {
+    if (allocatedPort !== undefined) {
+      await manager.unregister(allocatedPort);
+    }
+    await fake.close();
   }
 });
 
