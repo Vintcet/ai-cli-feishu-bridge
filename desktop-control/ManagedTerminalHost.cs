@@ -30,6 +30,9 @@ internal static class ManagedTerminalHost
         var toolCommand = ReadArgument(args, "--tool-command");
         var rawToolArguments = ReadArgument(args, "--tool-args") ??
             ReadArgument(args, "--codex-args");
+        var forwardedToolArguments = RuntimeArgumentParser.ReadRepeatedArguments(
+            args,
+            "--tool-arg");
         if (string.IsNullOrWhiteSpace(terminalId) ||
             !terminalId.All(character => char.IsAsciiLetterOrDigit(character) || character is '_' or '-') ||
             terminalId.Length is < 8 or > 64)
@@ -40,7 +43,7 @@ internal static class ManagedTerminalHost
         {
             return 3;
         }
-        if (!RuntimeCatalog.TryGet(runtimeId, out var runtime) || !runtime.UsesManagedTerminal)
+        if (!RuntimeCatalog.TryGet(runtimeId, out var runtime))
         {
             return 2;
         }
@@ -75,7 +78,20 @@ internal static class ManagedTerminalHost
 
         try
         {
-            var toolArguments = RuntimeArgumentParser.Parse(runtime, rawToolArguments);
+            var toolArguments = forwardedToolArguments.Count > 0
+                ? ValidateForwardedArguments(runtime, forwardedToolArguments)
+                : RuntimeArgumentParser.Parse(runtime, rawToolArguments);
+            if (!runtime.UsesManagedTerminal)
+            {
+                return RunHostedRuntime(
+                    cwd,
+                    terminalId,
+                    bridgeUrl,
+                    elevated,
+                    runtime,
+                    toolCommand,
+                    toolArguments);
+            }
             RegisterTerminalAsync(
                     terminalId,
                     cwd,
@@ -129,18 +145,67 @@ internal static class ManagedTerminalHost
         }
         finally
         {
-            try
+            if (runtime.UsesManagedTerminal)
             {
-                UnregisterTerminalAsync(terminalId, bridgeUrl, CancellationToken.None)
-                    .GetAwaiter()
-                    .GetResult();
-            }
-            catch
-            {
-                // Heartbeat expiry remains the fallback if the bridge is unavailable.
+                try
+                {
+                    UnregisterTerminalAsync(terminalId, bridgeUrl, CancellationToken.None)
+                        .GetAwaiter()
+                        .GetResult();
+                }
+                catch
+                {
+                    // Heartbeat expiry remains the fallback if the bridge is unavailable.
+                }
             }
             FreeConsole();
         }
+    }
+
+    private static int RunHostedRuntime(
+        string cwd,
+        string terminalId,
+        string bridgeUrl,
+        bool elevated,
+        RuntimeProfile runtime,
+        string toolCommand,
+        IReadOnlyList<string> toolArguments)
+    {
+        using var job = CreateKillOnCloseJob();
+        using var powershell = StartPowerShell(
+            cwd,
+            terminalId,
+            bridgeUrl,
+            elevated,
+            runtime,
+            toolCommand,
+            toolArguments);
+        if (job is not null)
+        {
+            AssignProcessToJobObject(job, powershell.Handle);
+        }
+        powershell.WaitForExit();
+        if (powershell.ExitCode != 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"{runtime.DisplayName} 已退出（代码 {powershell.ExitCode}）。");
+            Console.WriteLine("请查看上方错误信息；按任意键关闭窗口。");
+            try { Console.ReadKey(intercept: true); } catch { }
+        }
+        return powershell.ExitCode;
+    }
+
+    private static IReadOnlyList<string> ValidateForwardedArguments(
+        RuntimeProfile runtime,
+        IReadOnlyList<string> arguments)
+    {
+        if (arguments.Count > 256 ||
+            arguments.Sum(argument => argument.Length) > 32_000 ||
+            arguments.Any(argument => argument.IndexOfAny(['\r', '\n']) >= 0))
+        {
+            throw new InvalidOperationException($"{runtime.DisplayName} 启动参数无效或过长。");
+        }
+        return arguments;
     }
 
     private static Process StartPowerShell(
@@ -163,6 +228,7 @@ internal static class ManagedTerminalHost
             CreateNoWindow = false,
         };
         startInfo.ArgumentList.Add("-NoLogo");
+        startInfo.ArgumentList.Add("-NoProfile");
         startInfo.ArgumentList.Add("-Command");
         startInfo.ArgumentList.Add(
             "$toolCommand = $env:CODEX_FEISHU_TOOL_COMMAND; " +
@@ -170,9 +236,23 @@ internal static class ManagedTerminalHost
             "Remove-Item Env:CODEX_FEISHU_TOOL_COMMAND -ErrorAction SilentlyContinue; " +
             "Remove-Item Env:CODEX_FEISHU_TOOL_ARGS_JSON -ErrorAction SilentlyContinue; " +
             "$toolArgs = @($toolArgsJson | ConvertFrom-Json); " +
-            "& $toolCommand @toolArgs; exit $LASTEXITCODE");
-        startInfo.Environment["CODEX_FEISHU_MANAGED_TERMINAL_ID"] = terminalId;
-        startInfo.Environment["CODEX_FEISHU_MANAGED_TERMINAL_ELEVATED"] = elevated ? "1" : "0";
+            "$exitCode = 1; " +
+            "try { " +
+            "  & $toolCommand @toolArgs; " +
+            "  if ($null -ne $LASTEXITCODE) { $exitCode = $LASTEXITCODE } " +
+            "  elseif ($?) { $exitCode = 0 } " +
+            "} catch { Write-Error $_; $exitCode = 1 }; " +
+            "exit $exitCode");
+        if (runtime.UsesManagedTerminal)
+        {
+            startInfo.Environment["CODEX_FEISHU_MANAGED_TERMINAL_ID"] = terminalId;
+            startInfo.Environment["CODEX_FEISHU_MANAGED_TERMINAL_ELEVATED"] = elevated ? "1" : "0";
+        }
+        else
+        {
+            startInfo.Environment.Remove("CODEX_FEISHU_MANAGED_TERMINAL_ID");
+            startInfo.Environment.Remove("CODEX_FEISHU_MANAGED_TERMINAL_ELEVATED");
+        }
         startInfo.Environment["CODEX_FEISHU_BRIDGE_URL"] = bridgeUrl;
         startInfo.Environment["CODEX_FEISHU_RUNTIME"] = runtime.Id;
         startInfo.Environment["CODEX_FEISHU_TOOL_COMMAND"] = toolCommand;

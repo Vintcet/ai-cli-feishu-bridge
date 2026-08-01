@@ -296,10 +296,25 @@ internal sealed class BridgeClient : IDisposable
             fullPath,
             resumeSessionId,
             cancellationToken);
+        var controlExecutable = Application.ExecutablePath;
+        if (!File.Exists(controlExecutable))
+        {
+            await ReleaseOpenCodePortAsync(port, CancellationToken.None);
+            throw new FileNotFoundException("找不到 Codex 飞书助手程序。", controlExecutable);
+        }
+        var terminalHost = FindTerminalHost(controlExecutable);
+        if (!File.Exists(terminalHost))
+        {
+            await ReleaseOpenCodePortAsync(port, CancellationToken.None);
+            throw new FileNotFoundException(
+                "找不到 Windows Terminal 同步宿主，请重新安装或更新 Codex 飞书助手。",
+                terminalHost);
+        }
         var windowsTerminal = FindWindowsTerminal();
         var startInfo = BuildHttpRuntimeTerminalStartInfo(
             runtime,
             windowsTerminal,
+            terminalHost,
             toolCommand!,
             port,
             fullPath,
@@ -307,11 +322,22 @@ internal sealed class BridgeClient : IDisposable
             parsedArguments);
         try
         {
-            Process.Start(startInfo);
+            if (Process.Start(startInfo) is null)
+            {
+                throw new InvalidOperationException($"无法启动 {runtime.DisplayName} 终端宿主。");
+            }
+            AppLog.Info(
+                $"已通过终端宿主启动 {runtime.DisplayName}（cwd={fullPath}，port={port}）。");
         }
         catch (Win32Exception error) when (error.NativeErrorCode == 1223)
         {
+            await ReleaseOpenCodePortAsync(port, CancellationToken.None);
             throw new OperationCanceledException("已取消管理员权限确认。", error);
+        }
+        catch
+        {
+            await ReleaseOpenCodePortAsync(port, CancellationToken.None);
+            throw;
         }
     }
 
@@ -430,20 +456,45 @@ internal sealed class BridgeClient : IDisposable
         return result.Port;
     }
 
+    private async Task ReleaseOpenCodePortAsync(
+        int port,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, "opencode/unregister")
+            {
+                Content = JsonContent.Create(new { port }),
+            };
+            request.Headers.Add(
+                "X-Codex-Feishu-Control-Token",
+                ReadControlToken(BridgeRoot));
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                AppLog.Warn($"释放 opencode 端口 {port} 失败：HTTP {(int)response.StatusCode}。");
+            }
+        }
+        catch (Exception error)
+        {
+            AppLog.Warn($"释放 opencode 端口 {port} 失败：{error.Message}");
+        }
+    }
+
     private ProcessStartInfo BuildHttpRuntimeTerminalStartInfo(
         RuntimeProfile runtime,
         string? windowsTerminal,
+        string terminalHost,
         string toolCommand,
         int port,
         string cwd,
         bool elevated,
         IReadOnlyList<string> toolArguments)
     {
-        var isScript = toolCommand.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) ||
-            toolCommand.EndsWith(".bat", StringComparison.OrdinalIgnoreCase);
+        var terminalId = Guid.NewGuid().ToString("N");
         var startInfo = new ProcessStartInfo
         {
-            FileName = windowsTerminal ?? toolCommand,
+            FileName = windowsTerminal ?? terminalHost,
             WorkingDirectory = cwd,
             UseShellExecute = true,
             WindowStyle = ProcessWindowStyle.Normal,
@@ -461,18 +512,27 @@ internal sealed class BridgeClient : IDisposable
             startInfo.ArgumentList.Add($"{runtime.DisplayName} · {new DirectoryInfo(cwd).Name}{(elevated ? " · 管理员" : "")}");
             startInfo.ArgumentList.Add("--startingDirectory");
             startInfo.ArgumentList.Add(cwd);
-            if (isScript)
-            {
-                startInfo.ArgumentList.Add("cmd.exe");
-                startInfo.ArgumentList.Add("/d");
-                startInfo.ArgumentList.Add("/c");
-            }
+            startInfo.ArgumentList.Add(terminalHost);
         }
+        startInfo.ArgumentList.Add("--managed-terminal");
+        startInfo.ArgumentList.Add("--id");
+        startInfo.ArgumentList.Add(terminalId);
+        startInfo.ArgumentList.Add("--cwd");
+        startInfo.ArgumentList.Add(cwd);
+        startInfo.ArgumentList.Add("--bridge-url");
+        startInfo.ArgumentList.Add($"http://127.0.0.1:{Port}");
+        startInfo.ArgumentList.Add("--runtime");
+        startInfo.ArgumentList.Add(runtime.Id);
+        startInfo.ArgumentList.Add("--tool-command");
         startInfo.ArgumentList.Add(toolCommand);
+        startInfo.ArgumentList.Add("--tool-arg");
         startInfo.ArgumentList.Add("--port");
-        startInfo.ArgumentList.Add(port.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add("--tool-arg");
+        startInfo.ArgumentList.Add(
+            port.ToString(System.Globalization.CultureInfo.InvariantCulture));
         foreach (var argument in toolArguments)
         {
+            startInfo.ArgumentList.Add("--tool-arg");
             startInfo.ArgumentList.Add(argument);
         }
         return startInfo;

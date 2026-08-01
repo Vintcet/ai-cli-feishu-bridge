@@ -5,6 +5,23 @@ namespace CodexFeishuControl;
 
 internal static class RuntimeArgumentParser
 {
+    public static IReadOnlyList<string> ReadRepeatedArguments(
+        IReadOnlyList<string> arguments,
+        string name)
+    {
+        var result = new List<string>();
+        for (var index = 0; index < arguments.Count - 1; index += 1)
+        {
+            if (!string.Equals(arguments[index], name, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            result.Add(arguments[index + 1]);
+            index += 1;
+        }
+        return result;
+    }
+
     public static IReadOnlyList<string> Parse(
         RuntimeProfile runtime,
         string? rawArguments)

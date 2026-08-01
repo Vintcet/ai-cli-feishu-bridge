@@ -14,6 +14,7 @@ internal static class Program
             ("quoted arguments", TestQuotedArguments),
             ("opencode arguments", TestOpenCodeArguments),
             ("claude code arguments", TestClaudeCodeArguments),
+            ("forwarded terminal host arguments", TestForwardedTerminalHostArguments),
             ("runtime catalog", TestRuntimeCatalog),
             ("shell-looking text stays data", TestShellLookingText),
             ("terminal input defaults to steer", TestTerminalInputDefaultsToSteer),
@@ -129,6 +130,29 @@ internal static class Program
             RuntimeArgumentParser.Parse(
                 RuntimeCatalog.ClaudeCode,
                 "claude --resume 019faef0-d0bb-7703-af82-17ee9b45397b"));
+    }
+
+    private static void TestForwardedTerminalHostArguments()
+    {
+        AssertSequence(
+            ["--port", "5103", "-s", "session with spaces", "$(Get-Date)"],
+            RuntimeArgumentParser.ReadRepeatedArguments(
+            [
+                "--managed-terminal",
+                "--runtime",
+                "opencode",
+                "--tool-arg",
+                "--port",
+                "--tool-arg",
+                "5103",
+                "--tool-arg",
+                "-s",
+                "--tool-arg",
+                "session with spaces",
+                "--tool-arg",
+                "$(Get-Date)",
+            ],
+            "--tool-arg"));
     }
 
     private static void TestRuntimeCatalog()
