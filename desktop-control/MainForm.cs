@@ -825,7 +825,7 @@ internal sealed class MainForm : Form
         }
     }
 
-    private void ContinueSelectedHistory()
+    private async void ContinueSelectedHistory()
     {
         if (operating || historyGrid.CurrentRow?.Tag is not CodexSession session)
         {
@@ -845,13 +845,26 @@ internal sealed class MainForm : Form
         SetOperating(true, $"正在恢复 {SessionDisplayName(session)}…");
         try
         {
-            bridgeClient.StartManagedTerminal(
-                session.Cwd,
-                session.ManagedTerminalElevated,
-                $"resume {session.SessionId}");
-            operationLabel.Text = session.ManagedTerminalElevated
-                ? $"已请求以管理员身份继续 {SessionDisplayName(session)}；请完成 UAC 确认"
-                : $"正在新窗口继续 {SessionDisplayName(session)}";
+            if (session.Runtime == "opencode")
+            {
+                await bridgeClient.LaunchOpenCodeAsync(
+                    session.Cwd,
+                    session.ManagedTerminalElevated,
+                    $"-s {session.SessionId}");
+                operationLabel.Text = session.ManagedTerminalElevated
+                    ? $"已请求以管理员身份继续 {SessionDisplayName(session)}；完成 UAC 确认后，opencode 会在新窗口恢复"
+                    : $"opencode 窗口已启动，正在恢复 {SessionDisplayName(session)}";
+            }
+            else
+            {
+                bridgeClient.StartManagedTerminal(
+                    session.Cwd,
+                    session.ManagedTerminalElevated,
+                    $"resume {session.SessionId}");
+                operationLabel.Text = session.ManagedTerminalElevated
+                    ? $"已请求以管理员身份继续 {SessionDisplayName(session)}；请完成 UAC 确认"
+                    : $"正在新窗口继续 {SessionDisplayName(session)}";
+            }
             sessionTabs.SelectedIndex = 0;
         }
         catch (OperationCanceledException error)

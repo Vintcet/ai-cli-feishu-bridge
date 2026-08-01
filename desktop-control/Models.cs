@@ -180,6 +180,9 @@ internal sealed class CodexSession
     [JsonPropertyName("source")]
     public string Source { get; set; } = "";
 
+    [JsonPropertyName("runtime")]
+    public string? Runtime { get; set; }
+
     [JsonPropertyName("lastSeenAt")]
     public string LastSeenAt { get; set; } = "";
 

@@ -111,6 +111,38 @@ test("unregister closes the subscription and forgets its sessions", async () => 
   }
 });
 
+test("launch with a resumed session id seeds the session even when it is outside the current directory", async () => {
+  const fake = new FakeOpenCodeServer();
+  fake.sessions = [
+    {
+      id: "session-resumed",
+      title: "resumed",
+      directory: "C:/other",
+      model: "deepseek-v4-flash-free",
+    },
+  ];
+  const port = await fake.listen();
+  const created: Array<string> = [];
+  const manager = new OpenCodeManager(
+    {
+      onInstanceConnected: () => {},
+      onInstanceDisconnected: () => {},
+      eventHandlers: {
+        onSessionCreated: (session) => created.push(session.id),
+      },
+    },
+    { basePort: port, maxPort: port },
+  );
+  try {
+    await manager.launch("C:/demo", "session-resumed");
+    await waitFor(() => manager.findInstanceBySession("session-resumed") !== undefined);
+    assert.ok(created.includes("session-resumed"));
+  } finally {
+    await manager.unregister(port);
+    await fake.close();
+  }
+});
+
 test("port allocation respects the configured range and skips pending ports", async () => {
   const manager = new OpenCodeManager(
     {

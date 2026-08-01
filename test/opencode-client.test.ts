@@ -20,6 +20,20 @@ test("health and session listing", async () => {
   }
 });
 
+test("getSession returns a session by id and undefined when missing", async () => {
+  const fake = new FakeOpenCodeServer();
+  const port = await fake.listen();
+  try {
+    const client = new OpenCodeClient(`http://127.0.0.1:${port}`);
+    const session = await client.getSession("session-alpha");
+    assert.equal(session?.id, "session-alpha");
+    assert.equal(session?.directory, "C:/demo");
+    assert.equal(await client.getSession("session-ghost"), undefined);
+  } finally {
+    await fake.close();
+  }
+});
+
 test("createSession, sendPrompt, replyPermission, abort, undo", async () => {
   const fake = new FakeOpenCodeServer();
   const port = await fake.listen();

@@ -525,11 +525,18 @@ export class BridgeController {
     if (!cwd || cwd.length > 1024) {
       return { ok: false, error: "目录参数不正确。" };
     }
+    const sessionId = typeof value.sessionId === "string" ? value.sessionId.trim() : "";
+    if (sessionId.length > 512) {
+      return { ok: false, error: "会话参数不正确。" };
+    }
     if (!this.opencode) {
       return { ok: false, error: "opencode 支持未启用。" };
     }
     try {
-      const result = await this.opencode.launch(cwd);
+      const result = await this.opencode.launch(cwd, sessionId || undefined);
+      console.log(
+        `[opencode] launch cwd=${cwd} sessionId=${sessionId || "(none)"} port=${result.port}`,
+      );
       return { ok: true, port: result.port, cwd };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };

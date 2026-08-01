@@ -200,7 +200,7 @@ test("opencode sessions are registered, grouped, and routable from Feishu", asyn
   } finally {
     await ctx.opencode.unregister(ctx.port);
     await ctx.fakeOpenCode.close();
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await ctx.store.flushPending();
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -219,7 +219,7 @@ test("opencode idle marks the session waiting and notifies the group", async () 
   } finally {
     await ctx.opencode.unregister(ctx.port);
     await ctx.fakeOpenCode.close();
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await ctx.store.flushPending();
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -261,7 +261,7 @@ test("an opencode permission is sent to Feishu and allow forwards once", async (
   } finally {
     await ctx.opencode.unregister(ctx.port);
     await ctx.fakeOpenCode.close();
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await ctx.store.flushPending();
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -277,7 +277,7 @@ test("a disconnected opencode instance ends its sessions", async () => {
     );
   } finally {
     await ctx.fakeOpenCode.close();
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await ctx.store.flushPending();
     await rm(directory, { recursive: true, force: true });
   }
 });

@@ -323,8 +323,12 @@ internal sealed class BridgeClient : IDisposable
             throw new DirectoryNotFoundException("选择的项目目录不存在。");
         }
         var parsedArguments = CodexArgumentParser.ParseOpenCode(openCodeArguments);
+        var resumeSessionId = ExtractResumeSessionId(parsedArguments);
 
-        var port = await ReserveOpenCodePortAsync(fullPath, cancellationToken);
+        var port = await ReserveOpenCodePortAsync(
+            fullPath,
+            resumeSessionId,
+            cancellationToken);
         var openCodeCommand = FindOpenCodeCommand();
         if (openCodeCommand is null)
         {
@@ -351,13 +355,32 @@ internal sealed class BridgeClient : IDisposable
         return port;
     }
 
+    private static string? ExtractResumeSessionId(IReadOnlyList<string> arguments)
+    {
+        for (var i = 0; i < arguments.Count - 1; i++)
+        {
+            if (arguments[i] is "-s" or "--session"
+                && !string.IsNullOrWhiteSpace(arguments[i + 1]))
+            {
+                return arguments[i + 1];
+            }
+        }
+        return null;
+    }
+
     private async Task<int> ReserveOpenCodePortAsync(
         string cwd,
+        string? sessionId,
         CancellationToken cancellationToken)
     {
+        var payload = new Dictionary<string, object> { ["cwd"] = cwd };
+        if (!string.IsNullOrWhiteSpace(sessionId))
+        {
+            payload["sessionId"] = sessionId;
+        }
         using var request = new HttpRequestMessage(HttpMethod.Post, "opencode/launch")
         {
-            Content = JsonContent.Create(new { cwd }),
+            Content = JsonContent.Create(payload),
         };
         request.Headers.Add(
             "X-Codex-Feishu-Control-Token",

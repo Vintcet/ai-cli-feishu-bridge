@@ -32,6 +32,7 @@ export interface OpenCodeManagerHandlers {
 export class OpenCodeManager {
   private readonly instances = new Map<number, OpenCodeInstance>();
   private readonly pendingPorts = new Set<number>();
+  private readonly pendingSessionIds = new Map<number, string>();
   private readonly retryTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private readonly sessionPorts = new Map<string, number>();
   private readonly connectingPorts = new Set<number>();
@@ -77,9 +78,12 @@ export class OpenCodeManager {
     return this.instances.get(port);
   }
 
-  async launch(cwd: string): Promise<OpenCodeLaunchResult> {
+  async launch(cwd: string, sessionId?: string): Promise<OpenCodeLaunchResult> {
     const port = await this.allocatePort();
     this.pendingPorts.add(port);
+    if (sessionId) {
+      this.pendingSessionIds.set(port, sessionId);
+    }
     void this.retryConnect(port, cwd, 0);
     return { port };
   }
@@ -190,6 +194,11 @@ export class OpenCodeManager {
     this.instances.set(port, instance);
     this.pendingPorts.delete(port);
     void this.seedSessions(instance);
+    const pendingSessionId = this.pendingSessionIds.get(port);
+    if (pendingSessionId) {
+      this.pendingSessionIds.delete(port);
+      void this.seedPendingSession(instance, pendingSessionId);
+    }
     this.handlers.onInstanceConnected(port, cwd);
   }
 
@@ -205,6 +214,31 @@ export class OpenCodeManager {
       }
     } catch (error) {
       console.warn(`[opencode] 端口 ${instance.port} 同步会话失败：`, error);
+    }
+  }
+
+  private async seedPendingSession(
+    instance: OpenCodeInstance,
+    sessionId: string,
+  ): Promise<void> {
+    try {
+      const session = await instance.client.getSession(sessionId);
+      if (!session) {
+        console.warn(
+          `[opencode] 端口 ${instance.port} 恢复会话 ${sessionId} 未找到，跳过登记。`,
+        );
+        return;
+      }
+      if (this.sessionPorts.get(session.id) === instance.port) {
+        return;
+      }
+      this.rememberSession(instance.port, session.id);
+      this.handlers.eventHandlers.onSessionCreated?.(session);
+      console.log(
+        `[opencode] 端口 ${instance.port} 登记恢复的会话 #${session.id}。`,
+      );
+    } catch (error) {
+      console.warn(`[opencode] 端口 ${instance.port} 登记恢复会话失败：`, error);
     }
   }
 

@@ -260,6 +260,22 @@ export class OpenCodeClient {
       .filter((item): item is OpenCodeSession => Boolean(item));
   }
 
+  async getSession(sessionId: string): Promise<OpenCodeSession | undefined> {
+    try {
+      const response = await fetch(
+        this.url(`/session/${encodeURIComponent(sessionId)}`),
+        { signal: AbortSignal.timeout(10000) },
+      );
+      if (!response.ok) {
+        return undefined;
+      }
+      const body = (await response.json()) as unknown;
+      return asOpenCodeSession(body);
+    } catch {
+      return undefined;
+    }
+  }
+
   async createSession(title?: string): Promise<OpenCodeSession> {
     const response = await fetch(this.url("/session"), {
       method: "POST",

@@ -103,6 +103,16 @@ export class FakeOpenCodeServer {
       this.sendJson(response, 200, this.sessions);
       return;
     }
+    const sessionMatch = url.pathname.match(/^\/session\/([^/]+)$/);
+    if (method === "GET" && sessionMatch) {
+      const session = this.sessions.find((item) => item.id === sessionMatch[1]);
+      if (session) {
+        this.sendJson(response, 200, session);
+      } else {
+        this.sendJson(response, 404, { error: "session_not_found" });
+      }
+      return;
+    }
     if (method === "POST" && url.pathname === "/session") {
       const created = {
         id: `session-created-${this.requests.length}`,
