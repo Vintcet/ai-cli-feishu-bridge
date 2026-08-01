@@ -24,6 +24,7 @@ export class FakeOpenCodeServer {
   permissionReplyResponses: Record<string, string> = {};
   healthOk = true;
   currentDirectory = "C:/demo";
+  resetNextRequests = 0;
 
   async listen(): Promise<number> {
     await new Promise<void>((resolve, reject) => {
@@ -70,6 +71,11 @@ export class FakeOpenCodeServer {
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     const method = request.method ?? "GET";
+    if (this.resetNextRequests > 0) {
+      this.resetNextRequests -= 1;
+      request.socket.destroy();
+      return;
+    }
     const body = await readBody(request);
     this.requests.push({ method, url: url.pathname + url.search, body });
 

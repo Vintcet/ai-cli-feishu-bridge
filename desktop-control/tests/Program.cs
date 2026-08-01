@@ -14,6 +14,7 @@ internal static class Program
             ("quoted arguments", TestQuotedArguments),
             ("opencode arguments", TestOpenCodeArguments),
             ("claude code arguments", TestClaudeCodeArguments),
+            ("runtime catalog", TestRuntimeCatalog),
             ("shell-looking text stays data", TestShellLookingText),
             ("terminal input defaults to steer", TestTerminalInputDefaultsToSteer),
             ("terminal input supports queue", TestTerminalInputSupportsQueue),
@@ -42,8 +43,8 @@ internal static class Program
 
     private static void TestEmptyArguments()
     {
-        AssertSequence([], CodexArgumentParser.Parse(null));
-        AssertSequence([], CodexArgumentParser.Parse("   "));
+        AssertSequence([], RuntimeArgumentParser.Parse(RuntimeCatalog.Codex, null));
+        AssertSequence([], RuntimeArgumentParser.Parse(RuntimeCatalog.Codex, "   "));
     }
 
     private static void TestFractionalFeishuTimestamps()
@@ -79,14 +80,17 @@ internal static class Program
     {
         AssertSequence(
             ["resume", "019faef0-d0bb-7703-af82-17ee9b45397b"],
-            CodexArgumentParser.Parse("resume 019faef0-d0bb-7703-af82-17ee9b45397b"));
+            RuntimeArgumentParser.Parse(
+                RuntimeCatalog.Codex,
+                "resume 019faef0-d0bb-7703-af82-17ee9b45397b"));
     }
 
     private static void TestFullCodexCommand()
     {
         AssertSequence(
             ["resume", "019faef0-d0bb-7703-af82-17ee9b45397b"],
-            CodexArgumentParser.Parse(
+            RuntimeArgumentParser.Parse(
+                RuntimeCatalog.Codex,
                 "codex resume 019faef0-d0bb-7703-af82-17ee9b45397b"));
     }
 
@@ -94,7 +98,8 @@ internal static class Program
     {
         AssertSequence(
             ["resume", "session with spaces", "--model", "gpt 5"],
-            CodexArgumentParser.Parse(
+            RuntimeArgumentParser.Parse(
+                RuntimeCatalog.Codex,
                 "resume \"session with spaces\" --model \"gpt 5\""));
     }
 
@@ -102,11 +107,13 @@ internal static class Program
     {
         AssertSequence(
             ["-s", "019faef0-d0bb-7703-af82-17ee9b45397b"],
-            CodexArgumentParser.ParseOpenCode(
+            RuntimeArgumentParser.Parse(
+                RuntimeCatalog.OpenCode,
                 "-s 019faef0-d0bb-7703-af82-17ee9b45397b"));
         AssertSequence(
             ["--port", "5100", "-s", "019faef0-d0bb-7703-af82-17ee9b45397b"],
-            CodexArgumentParser.ParseOpenCode(
+            RuntimeArgumentParser.Parse(
+                RuntimeCatalog.OpenCode,
                 "opencode --port 5100 -s 019faef0-d0bb-7703-af82-17ee9b45397b"));
     }
 
@@ -114,12 +121,35 @@ internal static class Program
     {
         AssertSequence(
             ["--resume", "019faef0-d0bb-7703-af82-17ee9b45397b"],
-            CodexArgumentParser.ParseClaudeCode(
+            RuntimeArgumentParser.Parse(
+                RuntimeCatalog.ClaudeCode,
                 "--resume 019faef0-d0bb-7703-af82-17ee9b45397b"));
         AssertSequence(
             ["--resume", "019faef0-d0bb-7703-af82-17ee9b45397b"],
-            CodexArgumentParser.ParseClaudeCode(
+            RuntimeArgumentParser.Parse(
+                RuntimeCatalog.ClaudeCode,
                 "claude --resume 019faef0-d0bb-7703-af82-17ee9b45397b"));
+    }
+
+    private static void TestRuntimeCatalog()
+    {
+        if (RuntimeCatalog.FromId(null) != RuntimeCatalog.Codex ||
+            RuntimeCatalog.FromId("claudecode") != RuntimeCatalog.ClaudeCode ||
+            RuntimeCatalog.FromId("opencode") != RuntimeCatalog.OpenCode)
+        {
+            throw new InvalidOperationException("runtime ids were not resolved consistently");
+        }
+        if (!RuntimeCatalog.Codex.UsesManagedTerminal ||
+            !RuntimeCatalog.ClaudeCode.UsesManagedTerminal ||
+            RuntimeCatalog.OpenCode.UsesManagedTerminal)
+        {
+            throw new InvalidOperationException("runtime transports are incorrect");
+        }
+        if (RuntimeCatalog.ClaudeCode.BuildResumeArguments("session-1") != "--resume session-1" ||
+            RuntimeCatalog.OpenCode.BuildResumeArguments("session-1") != "-s session-1")
+        {
+            throw new InvalidOperationException("runtime resume arguments are incorrect");
+        }
     }
 
     private static void TestShellLookingText()
@@ -129,7 +159,8 @@ internal static class Program
             $"codex-feishu-parser-{Guid.NewGuid():N}.txt");
         AssertSequence(
             ["resume", "abc12345", "$(Get-Date)", ";", "New-Item", sentinel],
-            CodexArgumentParser.Parse(
+            RuntimeArgumentParser.Parse(
+                RuntimeCatalog.Codex,
                 $"resume abc12345 $(Get-Date) ; New-Item \"{sentinel}\""));
         if (File.Exists(sentinel))
         {

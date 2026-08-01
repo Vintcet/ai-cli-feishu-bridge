@@ -257,32 +257,68 @@ internal sealed class BridgeClient : IDisposable
         });
     }
 
-    public string StartManagedTerminal(string cwd, bool elevated, string? codexArguments = null) =>
-        StartManagedTerminalCore(cwd, elevated, "codex", codexArguments, null);
-
-    public string StartManagedClaudeCodeTerminal(
+    public async Task LaunchRuntimeAsync(
+        RuntimeProfile runtime,
         string cwd,
         bool elevated,
-        string? claudeCodeArguments = null)
+        string? rawArguments = null,
+        CancellationToken cancellationToken = default)
     {
-        var claudeCodeCommand = FindClaudeCodeCommand();
-        if (claudeCodeCommand is null)
+        var fullPath = Path.GetFullPath(cwd);
+        if (!Directory.Exists(fullPath))
+        {
+            throw new DirectoryNotFoundException("选择的项目目录不存在。");
+        }
+
+        var toolCommand = runtime.RequiresResolvedCommand
+            ? FindRuntimeCommand(runtime)
+            : null;
+        if (runtime.RequiresResolvedCommand && toolCommand is null)
         {
             throw new InvalidOperationException(
-                "找不到 Claude Code CLI。请先安装 claude，并确保其在 PATH 或常见用户安装目录中。");
+                $"找不到 {runtime.DisplayName} CLI。请先安装 {runtime.CommandName}，并确保其在 PATH 或常见用户安装目录中。");
         }
-        return StartManagedTerminalCore(
-            cwd,
+
+        if (runtime.UsesManagedTerminal)
+        {
+            StartManagedTerminalCore(
+                fullPath,
+                elevated,
+                runtime,
+                rawArguments,
+                toolCommand);
+            return;
+        }
+
+        var parsedArguments = RuntimeArgumentParser.Parse(runtime, rawArguments);
+        var resumeSessionId = ExtractResumeSessionId(parsedArguments);
+        var port = await ReserveOpenCodePortAsync(
+            fullPath,
+            resumeSessionId,
+            cancellationToken);
+        var windowsTerminal = FindWindowsTerminal();
+        var startInfo = BuildHttpRuntimeTerminalStartInfo(
+            runtime,
+            windowsTerminal,
+            toolCommand!,
+            port,
+            fullPath,
             elevated,
-            "claudecode",
-            claudeCodeArguments,
-            claudeCodeCommand);
+            parsedArguments);
+        try
+        {
+            Process.Start(startInfo);
+        }
+        catch (Win32Exception error) when (error.NativeErrorCode == 1223)
+        {
+            throw new OperationCanceledException("已取消管理员权限确认。", error);
+        }
     }
 
     private string StartManagedTerminalCore(
         string cwd,
         bool elevated,
-        string runtime,
+        RuntimeProfile runtime,
         string? toolArguments,
         string? toolCommand)
     {
@@ -306,12 +342,11 @@ internal sealed class BridgeClient : IDisposable
         }
 
         var terminalId = Guid.NewGuid().ToString("N");
-        var displayName = runtime == "claudecode" ? "Claude Code" : "Codex";
         var normalizedArguments = toolArguments?.Trim() ?? "";
         if (normalizedArguments.Length > 4_000 ||
             normalizedArguments.IndexOfAny(['\r', '\n']) >= 0)
         {
-            throw new InvalidOperationException($"{displayName} 启动参数无效或过长。");
+            throw new InvalidOperationException($"{runtime.DisplayName} 启动参数无效或过长。");
         }
         var windowsTerminal = FindWindowsTerminal();
         var startInfo = windowsTerminal is not null
@@ -342,50 +377,6 @@ internal sealed class BridgeClient : IDisposable
             throw new OperationCanceledException("已取消管理员权限确认。", error);
         }
         return terminalId;
-    }
-
-    public async Task<int> LaunchOpenCodeAsync(
-        string cwd,
-        bool elevated,
-        string? openCodeArguments = null,
-        CancellationToken cancellationToken = default)
-    {
-        var fullPath = Path.GetFullPath(cwd);
-        if (!Directory.Exists(fullPath))
-        {
-            throw new DirectoryNotFoundException("选择的项目目录不存在。");
-        }
-        var parsedArguments = CodexArgumentParser.ParseOpenCode(openCodeArguments);
-        var resumeSessionId = ExtractResumeSessionId(parsedArguments);
-
-        var port = await ReserveOpenCodePortAsync(
-            fullPath,
-            resumeSessionId,
-            cancellationToken);
-        var openCodeCommand = FindOpenCodeCommand();
-        if (openCodeCommand is null)
-        {
-            throw new InvalidOperationException(
-                "找不到 opencode 命令。请先安装 opencode，并确保其在 PATH 中。");
-        }
-
-        var windowsTerminal = FindWindowsTerminal();
-        var startInfo = BuildOpenCodeTerminalStartInfo(
-            windowsTerminal,
-            openCodeCommand,
-            port,
-            fullPath,
-            elevated,
-            parsedArguments);
-        try
-        {
-            Process.Start(startInfo);
-        }
-        catch (Win32Exception error) when (error.NativeErrorCode == 1223)
-        {
-            throw new OperationCanceledException("已取消管理员权限确认。", error);
-        }
-        return port;
     }
 
     private static string? ExtractResumeSessionId(IReadOnlyList<string> arguments)
@@ -439,19 +430,20 @@ internal sealed class BridgeClient : IDisposable
         return result.Port;
     }
 
-    private ProcessStartInfo BuildOpenCodeTerminalStartInfo(
+    private ProcessStartInfo BuildHttpRuntimeTerminalStartInfo(
+        RuntimeProfile runtime,
         string? windowsTerminal,
-        string openCodeCommand,
+        string toolCommand,
         int port,
         string cwd,
         bool elevated,
-        IReadOnlyList<string> openCodeArguments)
+        IReadOnlyList<string> toolArguments)
     {
-        var isScript = openCodeCommand.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) ||
-            openCodeCommand.EndsWith(".bat", StringComparison.OrdinalIgnoreCase);
+        var isScript = toolCommand.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) ||
+            toolCommand.EndsWith(".bat", StringComparison.OrdinalIgnoreCase);
         var startInfo = new ProcessStartInfo
         {
-            FileName = windowsTerminal ?? openCodeCommand,
+            FileName = windowsTerminal ?? toolCommand,
             WorkingDirectory = cwd,
             UseShellExecute = true,
             WindowStyle = ProcessWindowStyle.Normal,
@@ -466,7 +458,7 @@ internal sealed class BridgeClient : IDisposable
             startInfo.ArgumentList.Add("new");
             startInfo.ArgumentList.Add("new-tab");
             startInfo.ArgumentList.Add("--title");
-            startInfo.ArgumentList.Add($"opencode · {new DirectoryInfo(cwd).Name}{(elevated ? " · 管理员" : "")}");
+            startInfo.ArgumentList.Add($"{runtime.DisplayName} · {new DirectoryInfo(cwd).Name}{(elevated ? " · 管理员" : "")}");
             startInfo.ArgumentList.Add("--startingDirectory");
             startInfo.ArgumentList.Add(cwd);
             if (isScript)
@@ -476,58 +468,39 @@ internal sealed class BridgeClient : IDisposable
                 startInfo.ArgumentList.Add("/c");
             }
         }
-        startInfo.ArgumentList.Add(openCodeCommand);
+        startInfo.ArgumentList.Add(toolCommand);
         startInfo.ArgumentList.Add("--port");
         startInfo.ArgumentList.Add(port.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        foreach (var argument in openCodeArguments)
+        foreach (var argument in toolArguments)
         {
             startInfo.ArgumentList.Add(argument);
         }
         return startInfo;
     }
 
-    private static string? FindOpenCodeCommand()
+    private static string? FindRuntimeCommand(RuntimeProfile runtime)
     {
         var candidates = new List<string>();
         var path = Environment.GetEnvironmentVariable("PATH") ?? "";
         foreach (var entry in path.Split(';', StringSplitOptions.RemoveEmptyEntries))
         {
-            candidates.Add(Path.Combine(entry.Trim('"'), "opencode.exe"));
-            candidates.Add(Path.Combine(entry.Trim('"'), "opencode.cmd"));
+            candidates.Add(Path.Combine(entry.Trim('"'), $"{runtime.CommandName}.exe"));
+            candidates.Add(Path.Combine(entry.Trim('"'), $"{runtime.CommandName}.cmd"));
         }
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        candidates.Add(Path.Combine(userProfile, ".local", "bin", "opencode.exe"));
-        candidates.Add(Path.Combine(userProfile, ".local", "bin", "opencode.cmd"));
+        candidates.Add(Path.Combine(userProfile, ".local", "bin", $"{runtime.CommandName}.exe"));
+        candidates.Add(Path.Combine(userProfile, ".local", "bin", $"{runtime.CommandName}.cmd"));
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        candidates.Add(Path.Combine(appData, "npm", "opencode.cmd"));
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        candidates.Add(Path.Combine(localAppData, "Programs", "opencode", "opencode.exe"));
-        foreach (var candidate in candidates)
+        candidates.Add(Path.Combine(appData, "npm", $"{runtime.CommandName}.cmd"));
+        if (!string.IsNullOrWhiteSpace(runtime.LocalProgramDirectory))
         {
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            candidates.Add(Path.Combine(
+                localAppData,
+                "Programs",
+                runtime.LocalProgramDirectory,
+                $"{runtime.CommandName}.exe"));
         }
-        return null;
-    }
-
-    private static string? FindClaudeCodeCommand()
-    {
-        var candidates = new List<string>();
-        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
-        foreach (var entry in path.Split(';', StringSplitOptions.RemoveEmptyEntries))
-        {
-            candidates.Add(Path.Combine(entry.Trim('"'), "claude.exe"));
-            candidates.Add(Path.Combine(entry.Trim('"'), "claude.cmd"));
-        }
-        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        candidates.Add(Path.Combine(userProfile, ".local", "bin", "claude.exe"));
-        candidates.Add(Path.Combine(userProfile, ".local", "bin", "claude.cmd"));
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        candidates.Add(Path.Combine(appData, "npm", "claude.cmd"));
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        candidates.Add(Path.Combine(localAppData, "Programs", "Claude", "claude.exe"));
         foreach (var candidate in candidates)
         {
             if (File.Exists(candidate))
@@ -544,7 +517,7 @@ internal sealed class BridgeClient : IDisposable
         string terminalId,
         string cwd,
         bool elevated,
-        string runtime,
+        RuntimeProfile runtime,
         string toolArguments,
         string? toolCommand)
     {
@@ -563,8 +536,7 @@ internal sealed class BridgeClient : IDisposable
         startInfo.ArgumentList.Add("new");
         startInfo.ArgumentList.Add("new-tab");
         startInfo.ArgumentList.Add("--title");
-        var displayName = runtime == "claudecode" ? "Claude Code" : "Codex";
-        startInfo.ArgumentList.Add($"{displayName} · {new DirectoryInfo(cwd).Name}{(elevated ? " · 管理员" : "")}");
+        startInfo.ArgumentList.Add($"{runtime.DisplayName} · {new DirectoryInfo(cwd).Name}{(elevated ? " · 管理员" : "")}");
         startInfo.ArgumentList.Add("--startingDirectory");
         startInfo.ArgumentList.Add(cwd);
         AddManagedTerminalArguments(
@@ -583,7 +555,7 @@ internal sealed class BridgeClient : IDisposable
         string terminalId,
         string cwd,
         bool elevated,
-        string runtime,
+        RuntimeProfile runtime,
         string toolArguments,
         string? toolCommand)
     {
@@ -614,7 +586,7 @@ internal sealed class BridgeClient : IDisposable
         string? executable,
         string terminalId,
         string cwd,
-        string runtime,
+        RuntimeProfile runtime,
         string toolArguments,
         string? toolCommand)
     {
@@ -630,7 +602,7 @@ internal sealed class BridgeClient : IDisposable
         startInfo.ArgumentList.Add("--bridge-url");
         startInfo.ArgumentList.Add($"http://127.0.0.1:{Port}");
         startInfo.ArgumentList.Add("--runtime");
-        startInfo.ArgumentList.Add(runtime);
+        startInfo.ArgumentList.Add(runtime.Id);
         if (!string.IsNullOrWhiteSpace(toolCommand))
         {
             startInfo.ArgumentList.Add("--tool-command");

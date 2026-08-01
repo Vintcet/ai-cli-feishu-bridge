@@ -224,6 +224,34 @@ test("opencode idle marks the session waiting and notifies the group", async () 
   }
 });
 
+test("opencode queued prompts use the shared runtime queue and fail visibly on close", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const ctx = await setup(directory);
+  try {
+    await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
+    const chatId = ctx.store.getSession("session-alpha")!.feishuChatId!;
+
+    await ctx.controller.handleFeishuMessage(messageEvent("queue-first", chatId, "先执行第一项"));
+    await ctx.controller.handleFeishuMessage(messageEvent("queue-second", chatId, "再执行第二项"));
+
+    assert.equal(ctx.controller.health().queuedPrompts, 1);
+    await ctx.controller.handleOpenCodeSessionDeleted("session-alpha");
+    assert.equal(ctx.controller.health().queuedPrompts, 0);
+    assert.ok(
+      ctx.feishu.replies.some(
+        (reply) =>
+          reply.messageId === "queue-second" &&
+          reply.text.includes("opencode 未接收：会话已关闭"),
+      ),
+    );
+  } finally {
+    await ctx.opencode.unregister(ctx.port);
+    await ctx.fakeOpenCode.close();
+    await ctx.store.flushPending();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("an opencode permission is sent to Feishu and allow forwards once", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
   const ctx = await setup(directory);

@@ -409,9 +409,9 @@ internal sealed class MainForm : Form
                 await DisconnectAsync();
             }
         };
-        newCodexButton.Click += async (_, _) => await NewCodexAsync();
-        newClaudeCodeButton.Click += async (_, _) => await NewClaudeCodeAsync();
-        newOpenCodeButton.Click += async (_, _) => await NewOpenCodeAsync();
+        newCodexButton.Click += async (_, _) => await NewRuntimeAsync(RuntimeCatalog.Codex);
+        newClaudeCodeButton.Click += async (_, _) => await NewRuntimeAsync(RuntimeCatalog.ClaudeCode);
+        newOpenCodeButton.Click += async (_, _) => await NewRuntimeAsync(RuntimeCatalog.OpenCode);
         approvalButton.Click += (_, _) => OpenPendingApproval();
         refreshButton.Click += async (_, _) => await RefreshStatusAsync(force: true);
         settingsButton.Click += async (_, _) => await EditSettingsAsync();
@@ -853,36 +853,16 @@ internal sealed class MainForm : Form
         SetOperating(true, $"正在恢复 {SessionDisplayName(session)}…");
         try
         {
-            if (session.Runtime == "opencode")
-            {
-                await bridgeClient.LaunchOpenCodeAsync(
-                    session.Cwd,
-                    session.ManagedTerminalElevated,
-                    $"-s {session.SessionId}");
-                operationLabel.Text = session.ManagedTerminalElevated
-                    ? $"已请求以管理员身份继续 {SessionDisplayName(session)}；完成 UAC 确认后，opencode 会在新窗口恢复"
-                    : $"opencode 窗口已启动，正在恢复 {SessionDisplayName(session)}";
-            }
-            else if (session.Runtime == "claudecode")
-            {
-                bridgeClient.StartManagedClaudeCodeTerminal(
-                    session.Cwd,
-                    session.ManagedTerminalElevated,
-                    $"--resume {session.SessionId}");
-                operationLabel.Text = session.ManagedTerminalElevated
-                    ? $"已请求以管理员身份继续 {SessionDisplayName(session)}；完成 UAC 确认后，Claude Code 会在新窗口恢复"
-                    : $"Claude Code 窗口已启动，正在恢复 {SessionDisplayName(session)}";
-            }
-            else
-            {
-                bridgeClient.StartManagedTerminal(
-                    session.Cwd,
-                    session.ManagedTerminalElevated,
-                    $"resume {session.SessionId}");
-                operationLabel.Text = session.ManagedTerminalElevated
-                    ? $"已请求以管理员身份继续 {SessionDisplayName(session)}；请完成 UAC 确认"
-                    : $"正在新窗口继续 {SessionDisplayName(session)}";
-            }
+            var runtime = RuntimeCatalog.FromId(session.Runtime);
+            await bridgeClient.LaunchRuntimeAsync(
+                runtime,
+                session.Cwd,
+                session.ManagedTerminalElevated,
+                runtime.BuildResumeArguments(session.SessionId),
+                lifetime.Token);
+            operationLabel.Text = session.ManagedTerminalElevated
+                ? $"已请求以管理员身份继续 {SessionDisplayName(session)}；完成 UAC 确认后，{runtime.DisplayName} 会在新窗口恢复"
+                : $"{runtime.DisplayName} 窗口已启动，正在恢复 {SessionDisplayName(session)}";
             sessionTabs.SelectedIndex = 0;
         }
         catch (OperationCanceledException error)
@@ -985,7 +965,7 @@ internal sealed class MainForm : Form
         }
     }
 
-    private async Task NewCodexAsync()
+    private async Task NewRuntimeAsync(RuntimeProfile runtime)
     {
         if (operating) return;
         try
@@ -998,71 +978,29 @@ internal sealed class MainForm : Form
             }
             if (status is null)
             {
-                throw new InvalidOperationException("请先连接飞书桥接服务，再新建 Codex 窗口。");
+                throw new InvalidOperationException(
+                    $"请先连接飞书桥接服务，再新建 {runtime.DisplayName} 窗口。");
             }
 
             var initialDirectory = lastProjectDirectory ??
                 Directory.GetParent(bridgeClient.BridgeRoot)?.FullName ??
                 bridgeClient.BridgeRoot;
-            using var dialog = new NewCodexDialog(initialDirectory);
+            using var dialog = new NewRuntimeDialog(runtime, initialDirectory);
             if (dialog.ShowDialog(this) != DialogResult.OK)
             {
                 return;
             }
 
             lastProjectDirectory = dialog.SelectedDirectory;
-            bridgeClient.StartManagedTerminal(
+            await bridgeClient.LaunchRuntimeAsync(
+                runtime,
                 dialog.SelectedDirectory,
                 dialog.RunAsAdministrator,
-                dialog.CodexArguments);
-            operationLabel.Text = dialog.RunAsAdministrator
-                ? "已请求管理员启动；完成 UAC 确认后，Windows Terminal 窗口会自动登记"
-                : "Windows Terminal / Codex 窗口已启动，正在等待会话登记";
-        }
-        catch (OperationCanceledException error) when (!lifetime.IsCancellationRequested)
-        {
-            operationLabel.Text = error.Message;
-        }
-        catch (Exception error)
-        {
-            ShowOperationError("新建 Codex 失败", error);
-        }
-    }
-
-    private async Task NewOpenCodeAsync()
-    {
-        if (operating) return;
-        try
-        {
-            var status = await bridgeClient.GetStatusAsync(lifetime.Token);
-            if (status is null)
-            {
-                await ConnectAsync();
-                status = await bridgeClient.GetStatusAsync(lifetime.Token);
-            }
-            if (status is null)
-            {
-                throw new InvalidOperationException("请先连接飞书桥接服务，再新建 opencode 窗口。");
-            }
-
-            var initialDirectory = lastProjectDirectory ??
-                Directory.GetParent(bridgeClient.BridgeRoot)?.FullName ??
-                bridgeClient.BridgeRoot;
-            using var dialog = new NewOpenCodeDialog(initialDirectory);
-            if (dialog.ShowDialog(this) != DialogResult.OK)
-            {
-                return;
-            }
-
-            lastProjectDirectory = dialog.SelectedDirectory;
-            await bridgeClient.LaunchOpenCodeAsync(
-                dialog.SelectedDirectory,
-                dialog.RunAsAdministrator,
-                dialog.OpenCodeArguments,
+                dialog.Arguments,
                 lifetime.Token);
             operationLabel.Text = dialog.RunAsAdministrator
-                ? "已请求管理员启动；完成 UAC 确认后，Windows Terminal 窗口会自动登记 opencode"
-                : "Windows Terminal / opencode 窗口已启动，正在等待会话登记";
+                ? $"已请求管理员启动；完成 UAC 确认后，Windows Terminal 窗口会自动登记 {runtime.DisplayName}"
+                : $"Windows Terminal / {runtime.DisplayName} 窗口已启动，正在等待会话登记";
         }
         catch (OperationCanceledException error) when (!lifetime.IsCancellationRequested)
         {
@@ -1070,51 +1008,7 @@ internal sealed class MainForm : Form
         }
         catch (Exception error)
         {
-            ShowOperationError("新建 opencode 失败", error);
-        }
-    }
-
-    private async Task NewClaudeCodeAsync()
-    {
-        if (operating) return;
-        try
-        {
-            var status = await bridgeClient.GetStatusAsync(lifetime.Token);
-            if (status is null)
-            {
-                await ConnectAsync();
-                status = await bridgeClient.GetStatusAsync(lifetime.Token);
-            }
-            if (status is null)
-            {
-                throw new InvalidOperationException("请先连接飞书桥接服务，再新建 Claude Code 窗口。");
-            }
-
-            var initialDirectory = lastProjectDirectory ??
-                Directory.GetParent(bridgeClient.BridgeRoot)?.FullName ??
-                bridgeClient.BridgeRoot;
-            using var dialog = new NewClaudeCodeDialog(initialDirectory);
-            if (dialog.ShowDialog(this) != DialogResult.OK)
-            {
-                return;
-            }
-
-            lastProjectDirectory = dialog.SelectedDirectory;
-            bridgeClient.StartManagedClaudeCodeTerminal(
-                dialog.SelectedDirectory,
-                dialog.RunAsAdministrator,
-                dialog.ClaudeCodeArguments);
-            operationLabel.Text = dialog.RunAsAdministrator
-                ? "已请求管理员启动；完成 UAC 确认后，Windows Terminal 窗口会自动登记 Claude Code"
-                : "Windows Terminal / Claude Code 窗口已启动，正在等待会话登记";
-        }
-        catch (OperationCanceledException error) when (!lifetime.IsCancellationRequested)
-        {
-            operationLabel.Text = error.Message;
-        }
-        catch (Exception error)
-        {
-            ShowOperationError("新建 Claude Code 失败", error);
+            ShowOperationError($"新建 {runtime.DisplayName} 失败", error);
         }
     }
 
@@ -1725,8 +1619,9 @@ internal sealed class MainForm : Form
 
     private static string SessionModeLabel(CodexSession session)
     {
-        var runtime = RuntimeShortLabel(session);
-        if (session.Runtime == "opencode") return runtime;
+        var profile = RuntimeCatalog.FromId(session.Runtime);
+        var runtime = profile.ShortName;
+        if (!profile.UsesManagedTerminal) return runtime;
         if (!session.ManagedTerminal) return $"{runtime} 外部";
         return session.ManagedTerminalElevated
             ? $"{runtime} 管理员"
@@ -1736,12 +1631,8 @@ internal sealed class MainForm : Form
     private static string HistoryModeLabel(CodexSession session) =>
         $"{RuntimeShortLabel(session)} {(session.ManagedTerminalElevated ? "管理员" : "普通")}";
 
-    private static string RuntimeShortLabel(CodexSession session) => session.Runtime switch
-    {
-        "claudecode" => "Claude",
-        "opencode" => "opencode",
-        _ => "Codex",
-    };
+    private static string RuntimeShortLabel(CodexSession session) =>
+        RuntimeCatalog.FromId(session.Runtime).ShortName;
 
     private static DateTimeOffset ParseTime(string value) =>
         DateTimeOffset.TryParse(value, out var time) ? time : DateTimeOffset.MinValue;

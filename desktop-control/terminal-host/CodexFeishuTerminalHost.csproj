@@ -21,7 +21,8 @@
   <ItemGroup>
     <Compile Include="Program.cs" />
     <Compile Include="..\ManagedTerminalHost.cs" Link="ManagedTerminalHost.cs" />
-    <Compile Include="..\CodexArgumentParser.cs" Link="CodexArgumentParser.cs" />
+    <Compile Include="..\RuntimeProfile.cs" Link="RuntimeProfile.cs" />
+    <Compile Include="..\RuntimeArgumentParser.cs" Link="RuntimeArgumentParser.cs" />
     <Compile Include="..\TerminalInputParser.cs" Link="TerminalInputParser.cs" />
   </ItemGroup>
 </Project>

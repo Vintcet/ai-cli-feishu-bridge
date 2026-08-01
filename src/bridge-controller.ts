@@ -63,7 +63,10 @@ import {
   statusLabel,
   stringifyModel,
   truncate,
+  runtimeDefinition,
   runtimeDisplayName,
+  runtimeGroupPrefix,
+  runtimeReceivedText,
 } from "./domain.js";
 import { FeishuGateway } from "./feishu.js";
 import {
@@ -169,14 +172,13 @@ export class BridgeController {
   private readonly approvalWaiters = new Map<string, ApprovalWaiter>();
   private readonly inputWaiters = new Map<string, UserInputWaiter>();
   private readonly remoteInputLocks = new Set<string>();
-  private readonly externalQueues = new Map<string, QueuedRemotePrompt[]>();
+  private readonly runtimeQueues = new Map<string, QueuedRemotePrompt[]>();
   private readonly managedQueueDepth = new Map<string, number>();
   private readonly pendingAttachments = new Map<string, StagedAttachments>();
   private readonly fileReturnRequests = new Map<string, FileReturnRequest[]>();
   private readonly activityStates = new Map<string, ActivityState>();
   private readonly pendingRemotePrompts = new Map<string, PendingRemotePrompt[]>();
   private readonly managedRetryCounts = new Map<string, number>();
-  private readonly opencodeQueues = new Map<string, QueuedRemotePrompt[]>();
   private readonly opencodePortSessions = new Map<number, Set<string>>();
   private readonly opencodeToolParts = new Map<string, Map<string, string>>();
   private readonly sessionGroupCreates = new Map<
@@ -262,7 +264,7 @@ export class BridgeController {
           : "not_applicable",
       feishuChatError: session.feishuChatError ?? "",
       queuedPrompts:
-        (this.externalQueues.get(session.sessionId)?.length ?? 0) +
+        (this.runtimeQueues.get(session.sessionId)?.length ?? 0) +
         (this.managedQueueDepth.get(session.sessionId) ?? 0),
     });
     return {
@@ -278,7 +280,7 @@ export class BridgeController {
       approvals,
       pendingInputs: this.inputWaiters.size,
       queuedPrompts:
-        [...this.externalQueues.values()].reduce(
+        [...this.runtimeQueues.values()].reduce(
           (total, queue) => total + queue.length,
           0,
         ) +
@@ -323,7 +325,7 @@ export class BridgeController {
     }
     if (session) {
       this.remoteInputLocks.delete(session.sessionId);
-      this.externalQueues.delete(session.sessionId);
+      this.runtimeQueues.delete(session.sessionId);
       this.managedQueueDepth.delete(session.sessionId);
       this.pendingRemotePrompts.delete(session.sessionId);
       this.fileReturnRequests.delete(session.sessionId);
@@ -617,7 +619,7 @@ export class BridgeController {
   }
 
   async handleOpenCodeSessionDeleted(sessionId: string): Promise<void> {
-    this.forgetOpenCodeSession(sessionId, "会话已关闭");
+    await this.forgetOpenCodeSession(sessionId, "会话已关闭");
   }
 
   async handleOpenCodeSessionStatus(sessionId: string, status: string): Promise<void> {
@@ -984,7 +986,7 @@ export class BridgeController {
         : {}),
     });
     this.remoteInputLocks.delete(payload.session_id);
-    this.externalQueues.delete(payload.session_id);
+    this.runtimeQueues.delete(payload.session_id);
     this.managedQueueDepth.delete(payload.session_id);
     this.pendingRemotePrompts.delete(payload.session_id);
     this.fileReturnRequests.delete(payload.session_id);
@@ -1489,7 +1491,7 @@ export class BridgeController {
     if (isPrivateChat && text === "状态") {
       const sessions = this.listActiveSessions();
       const pending = sessions.filter((session) => session.status === "pending_approval").length;
-      const queued = [...this.externalQueues.values()].reduce(
+      const queued = [...this.runtimeQueues.values()].reduce(
         (total, queue) => total + queue.length,
         0,
       ) + [...this.managedQueueDepth.values()].reduce(
@@ -1672,7 +1674,11 @@ export class BridgeController {
       await this.respond(messageId, chatId, codexNotReceived("内容为空。"));
       return;
     }
-    if (!this.managedTerminals.isManaged(target) && target.runtime !== "opencode") {
+    const targetRuntime = runtimeDefinition(target.runtime);
+    if (
+      !this.managedTerminals.isManaged(target) &&
+      targetRuntime.transport !== "http_event_stream"
+    ) {
       await this.respond(
         messageId,
         chatId,
@@ -1680,7 +1686,10 @@ export class BridgeController {
       );
       return;
     }
-    if (target.runtime === "opencode" && !this.opencode?.findInstanceBySession(target.sessionId)) {
+    if (
+      targetRuntime.transport === "http_event_stream" &&
+      !this.opencode?.findInstanceBySession(target.sessionId)
+    ) {
       await this.respond(
         messageId,
         chatId,
@@ -1805,7 +1814,7 @@ export class BridgeController {
       );
       return;
     }
-    if (session.runtime === "opencode") {
+    if (runtimeDefinition(session.runtime).transport === "http_event_stream") {
       await this.resumeOpenCodeSession(
         session,
         prompt,
@@ -1827,18 +1836,18 @@ export class BridgeController {
     if (!managedTerminal &&
         (this.codex.isRunning(session.sessionId) ||
           this.remoteInputLocks.has(session.sessionId))) {
-      const queue = this.externalQueues.get(session.sessionId) ?? [];
+      const queue = this.runtimeQueues.get(session.sessionId) ?? [];
       queue.push({
         prompt,
         sourceMessageId,
         chatId,
         requestFileReturn,
       });
-      this.externalQueues.set(session.sessionId, queue);
+      this.runtimeQueues.set(session.sessionId, queue);
       await this.respond(
         sourceMessageId,
         chatId,
-        CODEX_RECEIVED,
+        receivedText(session),
       );
       return;
     }
@@ -1890,7 +1899,7 @@ export class BridgeController {
         const ackId = await this.respond(
           sourceMessageId,
           chatId,
-          CODEX_RECEIVED,
+          receivedText(runningSession),
         );
         if (ackId) {
           await this.addRoute(ackId, session.sessionId, chatId, "resume_ack");
@@ -1943,7 +1952,7 @@ export class BridgeController {
       const ackId = await this.respond(
         item.sourceMessageId,
         item.chatId,
-        CODEX_RECEIVED,
+        receivedText(session),
       );
       if (ackId) {
         await this.addRoute(ackId, session.sessionId, item.chatId, "resume_ack");
@@ -1955,14 +1964,14 @@ export class BridgeController {
     if (this.codex.isRunning(sessionId) || this.remoteInputLocks.has(sessionId)) {
       return;
     }
-    const queue = this.externalQueues.get(sessionId);
+    const queue = this.runtimeQueues.get(sessionId);
     const item = queue?.shift();
     if (!item) {
-      this.externalQueues.delete(sessionId);
+      this.runtimeQueues.delete(sessionId);
       return;
     }
     if (queue?.length === 0) {
-      this.externalQueues.delete(sessionId);
+      this.runtimeQueues.delete(sessionId);
     }
     const session = this.store.getSession(sessionId);
     if (!session || session.status === "ended") {
@@ -2014,9 +2023,9 @@ export class BridgeController {
       this.remoteInputLocks.has(session.sessionId) ||
       session.status === "running"
     ) {
-      const queue = this.opencodeQueues.get(session.sessionId) ?? [];
+      const queue = this.runtimeQueues.get(session.sessionId) ?? [];
       queue.push({ prompt, sourceMessageId, chatId, requestFileReturn });
-      this.opencodeQueues.set(session.sessionId, queue);
+      this.runtimeQueues.set(session.sessionId, queue);
       await this.respond(sourceMessageId, chatId, receivedText(session));
       return;
     }
@@ -2071,17 +2080,21 @@ export class BridgeController {
     if (this.remoteInputLocks.has(sessionId)) {
       return;
     }
-    const queue = this.opencodeQueues.get(sessionId);
+    const queue = this.runtimeQueues.get(sessionId);
     const item = queue?.shift();
     if (!item) {
-      this.opencodeQueues.delete(sessionId);
+      this.runtimeQueues.delete(sessionId);
       return;
     }
     if (queue?.length === 0) {
-      this.opencodeQueues.delete(sessionId);
+      this.runtimeQueues.delete(sessionId);
     }
     const session = this.store.getSession(sessionId);
-    if (!session || session.runtime !== "opencode" || session.status === "ended") {
+    if (
+      !session ||
+      runtimeDefinition(session.runtime).transport !== "http_event_stream" ||
+      session.status === "ended"
+    ) {
       await this.respond(
         item.sourceMessageId,
         item.chatId,
@@ -2153,7 +2166,8 @@ export class BridgeController {
       });
     }
     this.remoteInputLocks.delete(sessionId);
-    this.opencodeQueues.delete(sessionId);
+    const queued = this.runtimeQueues.get(sessionId);
+    this.runtimeQueues.delete(sessionId);
     this.pendingRemotePrompts.delete(sessionId);
     this.fileReturnRequests.delete(sessionId);
     this.managedRetryCounts.delete(sessionId);
@@ -2164,9 +2178,7 @@ export class BridgeController {
       });
     }
     this.opencode?.forgetSession(sessionId);
-    const queued = this.opencodeQueues.get(sessionId);
     if (queued) {
-      this.opencodeQueues.delete(sessionId);
       for (const item of queued) {
         await this.respond(
           item.sourceMessageId,
@@ -2724,7 +2736,7 @@ export class BridgeController {
     )(trackedClients);
     const sessions = openSessions
       .flatMap((session): SessionRecord[] => {
-        if (session.runtime === "opencode") {
+        if (runtimeDefinition(session.runtime).transport === "http_event_stream") {
           const instance = this.opencode?.findInstanceBySession(session.sessionId);
           return instance ? [session] : [];
         }
@@ -2935,8 +2947,9 @@ export class BridgeController {
     const lines = sessions.slice(0, 20).map(
       (session, index) => {
         const kind = runtimeDisplayName(session.runtime);
-        const mode = session.runtime === "opencode"
-          ? " · opencode 窗口"
+        const runtime = runtimeDefinition(session.runtime);
+        const mode = runtime.transport === "http_event_stream"
+          ? ` · ${kind} 窗口`
           : session.managedTerminalId
             ? session.managedTerminalElevated
               ? ` · ${kind} 管理员同步`
@@ -2945,7 +2958,7 @@ export class BridgeController {
         const address = session.alias
           ? `@${session.alias}  (#${session.shortId})`
           : sessionAddress(session);
-        const queued = (this.externalQueues.get(session.sessionId)?.length ?? 0) +
+        const queued = (this.runtimeQueues.get(session.sessionId)?.length ?? 0) +
           (this.managedQueueDepth.get(session.sessionId) ?? 0);
         return `${index + 1}. ${address}  ${session.projectName}  · ${statusLabel(session.status)}${mode}${queued > 0 ? ` · 排队 ${queued}` : ""}`;
       },
@@ -3074,11 +3087,7 @@ export class BridgeController {
   }
 
   private sessionGroupName(session: SessionRecord): string {
-    const prefix = session.runtime === "opencode"
-      ? "OpenCode｜"
-      : session.runtime === "claudecode"
-        ? "Claude｜"
-        : "Codex｜";
+    const prefix = runtimeGroupPrefix(session.runtime);
     return `${prefix}${session.alias || session.projectName || session.shortId}`.slice(0, 60);
   }
 
@@ -3223,35 +3232,21 @@ function externalSessionInputBlockedMessage(session: SessionRecord): string {
   return notReceivedText(session, "外部会话不支持飞书输入。请回到原窗口继续。");
 }
 
-const CODEX_RECEIVED = "Codex 已接收。";
-
 function codexNotReceived(reason: string): string {
-  return `Codex 未接收：${reason}`;
+  return notReceivedText(undefined, reason);
 }
 
 function receivedText(
   session: { runtime?: RuntimeName } | undefined,
 ): string {
-  if (session?.runtime === "opencode") {
-    return "opencode 已接收。";
-  }
-  if (session?.runtime === "claudecode") {
-    return "Claude Code 已接收。";
-  }
-  return CODEX_RECEIVED;
+  return runtimeReceivedText(session?.runtime);
 }
 
 function notReceivedText(
   session: { runtime?: RuntimeName } | undefined,
   reason: string,
 ): string {
-  if (session?.runtime === "opencode") {
-    return `opencode 未接收：${reason}`;
-  }
-  if (session?.runtime === "claudecode") {
-    return `Claude Code 未接收：${reason}`;
-  }
-  return codexNotReceived(reason);
+  return `${runtimeDisplayName(session?.runtime)} 未接收：${reason}`;
 }
 
 function isRetryableCodexError(value: string): boolean {

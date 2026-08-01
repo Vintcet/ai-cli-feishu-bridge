@@ -180,15 +180,36 @@ export class OpenCodeClient {
     return `${this.baseUrl}${path}`;
   }
 
+  private async getJson(
+    path: string,
+    timeoutMs: number,
+  ): Promise<{ response: Response; body: unknown }> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const response = await fetch(this.url(path), {
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (!response.ok) {
+          return { response, body: undefined };
+        }
+        return { response, body: await response.json() as unknown };
+      } catch (error) {
+        lastError = error;
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
   async health(): Promise<boolean> {
     try {
-      const response = await fetch(this.url("/global/health"), {
-        signal: AbortSignal.timeout(3000),
-      });
+      const { response, body } = await this.getJson("/global/health", 3000);
       if (!response.ok) {
         return false;
       }
-      const body = await response.json().catch(() => ({}));
       if (!isObject(body)) {
         return true;
       }
@@ -200,13 +221,10 @@ export class OpenCodeClient {
 
   async probeHealth(): Promise<{ healthy: boolean; version?: string }> {
     try {
-      const response = await fetch(this.url("/global/health"), {
-        signal: AbortSignal.timeout(2000),
-      });
+      const { response, body } = await this.getJson("/global/health", 2000);
       if (!response.ok) {
         return { healthy: false };
       }
-      const body = await response.json().catch(() => ({}));
       if (!isObject(body) || body.healthy !== true) {
         return { healthy: false };
       }
@@ -222,13 +240,10 @@ export class OpenCodeClient {
 
   async currentDirectory(): Promise<string | undefined> {
     try {
-      const response = await fetch(this.url("/path"), {
-        signal: AbortSignal.timeout(3000),
-      });
+      const { response, body } = await this.getJson("/path", 3000);
       if (!response.ok) {
         return undefined;
       }
-      const body = await response.json().catch(() => ({}));
       if (!isObject(body)) {
         return undefined;
       }
@@ -245,13 +260,10 @@ export class OpenCodeClient {
   }
 
   async listSessions(): Promise<OpenCodeSession[]> {
-    const response = await fetch(this.url("/session"), {
-      signal: AbortSignal.timeout(10000),
-    });
+    const { response, body } = await this.getJson("/session", 10000);
     if (!response.ok) {
       throw new Error(responseErrorMessage(response, "列出会话"));
     }
-    const body = (await response.json()) as unknown;
     if (!Array.isArray(body)) {
       return [];
     }
@@ -262,14 +274,13 @@ export class OpenCodeClient {
 
   async getSession(sessionId: string): Promise<OpenCodeSession | undefined> {
     try {
-      const response = await fetch(
-        this.url(`/session/${encodeURIComponent(sessionId)}`),
-        { signal: AbortSignal.timeout(10000) },
+      const { response, body } = await this.getJson(
+        `/session/${encodeURIComponent(sessionId)}`,
+        10000,
       );
       if (!response.ok) {
         return undefined;
       }
-      const body = (await response.json()) as unknown;
       return asOpenCodeSession(body);
     } catch {
       return undefined;
@@ -370,18 +381,13 @@ export class OpenCodeClient {
   }
 
   async listMessages(sessionId: string, limit = 50): Promise<OpenCodeMessage[]> {
-    const response = await fetch(
-      this.url(
-        `/session/${encodeURIComponent(sessionId)}/message?limit=${Math.max(1, limit)}`,
-      ),
-      {
-        signal: AbortSignal.timeout(10000),
-      },
+    const { response, body } = await this.getJson(
+      `/session/${encodeURIComponent(sessionId)}/message?limit=${Math.max(1, limit)}`,
+      10000,
     );
     if (!response.ok) {
       throw new Error(responseErrorMessage(response, "读取消息"));
     }
-    const body = (await response.json()) as unknown;
     if (!Array.isArray(body)) {
       return [];
     }

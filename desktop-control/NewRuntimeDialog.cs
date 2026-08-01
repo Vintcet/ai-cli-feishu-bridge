@@ -1,15 +1,17 @@
 namespace CodexFeishuControl;
 
-internal sealed class NewOpenCodeDialog : Form
+internal sealed class NewRuntimeDialog : Form
 {
+    private readonly RuntimeProfile runtime;
     private readonly TextBox directoryBox = new();
     private readonly TextBox argumentsBox = new();
     private readonly CheckBox administratorBox = new();
     private readonly Button startButton = new();
 
-    public NewOpenCodeDialog(string initialDirectory)
+    public NewRuntimeDialog(RuntimeProfile runtime, string initialDirectory)
     {
-        Text = "新建同步 opencode";
+        this.runtime = runtime;
+        Text = $"新建同步 {runtime.DisplayName}";
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -21,7 +23,7 @@ internal sealed class NewOpenCodeDialog : Form
 
         var title = new Label
         {
-            Text = "启动 Windows Terminal / opencode 同步窗口",
+            Text = $"启动 Windows Terminal / {runtime.DisplayName} 同步窗口",
             AutoSize = true,
             Font = new Font("Microsoft YaHei UI", 12F, FontStyle.Bold),
             ForeColor = Color.FromArgb(15, 23, 42),
@@ -50,7 +52,7 @@ internal sealed class NewOpenCodeDialog : Form
 
         var argumentsLabel = new Label
         {
-            Text = "opencode 启动参数（可选）",
+            Text = $"{runtime.DisplayName} 启动参数（可选）",
             AutoSize = true,
             ForeColor = Color.FromArgb(71, 85, 105),
             Location = new Point(24, 127),
@@ -58,7 +60,7 @@ internal sealed class NewOpenCodeDialog : Form
         argumentsBox.Location = new Point(24, 150);
         argumentsBox.Size = new Size(562, 28);
         argumentsBox.MaxLength = 4_000;
-        argumentsBox.PlaceholderText = "例如：-s 019faef0-d0bb-7703-af82-17ee9b45397b";
+        argumentsBox.PlaceholderText = runtime.ArgumentsPlaceholder;
 
         administratorBox.Text = "以 Windows 管理员身份启动（会弹出 UAC 确认）";
         administratorBox.AutoSize = true;
@@ -67,7 +69,7 @@ internal sealed class NewOpenCodeDialog : Form
 
         var hint = new Label
         {
-            Text = "opencode 需已安装并可用；桥接服务会为该窗口保留一个本机端口并自动登记会话。",
+            Text = runtime.LaunchHint,
             AutoSize = true,
             ForeColor = Color.FromArgb(100, 116, 139),
             Location = new Point(43, 215),
@@ -77,20 +79,24 @@ internal sealed class NewOpenCodeDialog : Form
         {
             Text = "取消",
             DialogResult = DialogResult.Cancel,
-            Location = new Point(405, 260),
+            Location = new Point(356, 260),
             Size = new Size(86, 32),
         };
-        startButton.Text = "启动 opencode";
+        startButton.Text = $"启动 {runtime.DisplayName}";
         startButton.DialogResult = DialogResult.OK;
-        startButton.Location = new Point(500, 260);
-        startButton.Size = new Size(86, 32);
+        startButton.Location = new Point(452, 260);
+        startButton.Size = new Size(134, 32);
         startButton.Enabled = false;
         startButton.Click += (_, _) =>
         {
             if (Directory.Exists(directoryBox.Text.Trim())) return;
             DialogResult = DialogResult.None;
-            MessageBox.Show(this, "请选择一个存在的项目目录。", "目录无效",
-                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(
+                this,
+                "请选择一个存在的项目目录。",
+                "目录无效",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
         };
 
         AcceptButton = startButton;
@@ -114,13 +120,13 @@ internal sealed class NewOpenCodeDialog : Form
 
     public bool RunAsAdministrator => administratorBox.Checked;
 
-    public string OpenCodeArguments => argumentsBox.Text.Trim();
+    public string Arguments => argumentsBox.Text.Trim();
 
     private void BrowseDirectory()
     {
         using var dialog = new FolderBrowserDialog
         {
-            Description = "选择 opencode 要处理的项目目录",
+            Description = $"选择 {runtime.DisplayName} 要处理的项目目录",
             UseDescriptionForTitle = true,
             ShowNewFolderButton = true,
             InitialDirectory = Directory.Exists(directoryBox.Text.Trim())

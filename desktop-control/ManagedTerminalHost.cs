@@ -26,7 +26,7 @@ internal static class ManagedTerminalHost
         var terminalId = ReadArgument(args, "--id");
         var cwd = ReadArgument(args, "--cwd");
         var bridgeUrl = ReadArgument(args, "--bridge-url") ?? "http://127.0.0.1:8765";
-        var runtime = ReadArgument(args, "--runtime") ?? "codex";
+        var runtimeId = ReadArgument(args, "--runtime") ?? RuntimeCatalog.Codex.Id;
         var toolCommand = ReadArgument(args, "--tool-command");
         var rawToolArguments = ReadArgument(args, "--tool-args") ??
             ReadArgument(args, "--codex-args");
@@ -40,12 +40,12 @@ internal static class ManagedTerminalHost
         {
             return 3;
         }
-        if (runtime is not ("codex" or "claudecode"))
+        if (!RuntimeCatalog.TryGet(runtimeId, out var runtime) || !runtime.UsesManagedTerminal)
         {
             return 2;
         }
         toolCommand = string.IsNullOrWhiteSpace(toolCommand)
-            ? runtime == "claudecode" ? "claude" : "codex"
+            ? runtime.CommandName
             : toolCommand.Trim();
         if (toolCommand.Length > 32_000 || toolCommand.IndexOfAny(['\r', '\n']) >= 0)
         {
@@ -64,8 +64,7 @@ internal static class ManagedTerminalHost
 
         var elevated = IsElevated();
         var projectName = new DirectoryInfo(cwd).Name;
-        var displayName = runtime == "claudecode" ? "Claude Code" : "Codex";
-        SetConsoleTitle($"{displayName} · {projectName}{(elevated ? " · 管理员" : "")}");
+        SetConsoleTitle($"{runtime.DisplayName} · {projectName}{(elevated ? " · 管理员" : "")}");
 
         using var cancellation = new CancellationTokenSource();
         Console.CancelKeyPress += (_, eventArgs) =>
@@ -76,15 +75,13 @@ internal static class ManagedTerminalHost
 
         try
         {
-            var toolArguments = runtime == "claudecode"
-                ? CodexArgumentParser.ParseClaudeCode(rawToolArguments)
-                : CodexArgumentParser.Parse(rawToolArguments);
+            var toolArguments = RuntimeArgumentParser.Parse(runtime, rawToolArguments);
             RegisterTerminalAsync(
                     terminalId,
                     cwd,
                     bridgeUrl,
                     elevated,
-                    runtime,
+                    runtime.Id,
                     ready: false,
                     cancellationToken: CancellationToken.None)
                 .GetAwaiter()
@@ -125,7 +122,7 @@ internal static class ManagedTerminalHost
         catch (Exception error)
         {
             Console.WriteLine();
-            Console.WriteLine($"{displayName} 启动失败：{error.Message}");
+            Console.WriteLine($"{runtime.DisplayName} 启动失败：{error.Message}");
             Console.WriteLine("按任意键关闭窗口。");
             try { Console.ReadKey(intercept: true); } catch { }
             return 5;
@@ -151,7 +148,7 @@ internal static class ManagedTerminalHost
         string terminalId,
         string bridgeUrl,
         bool elevated,
-        string runtime,
+        RuntimeProfile runtime,
         string toolCommand,
         IReadOnlyList<string> toolArguments)
     {
@@ -177,12 +174,12 @@ internal static class ManagedTerminalHost
         startInfo.Environment["CODEX_FEISHU_MANAGED_TERMINAL_ID"] = terminalId;
         startInfo.Environment["CODEX_FEISHU_MANAGED_TERMINAL_ELEVATED"] = elevated ? "1" : "0";
         startInfo.Environment["CODEX_FEISHU_BRIDGE_URL"] = bridgeUrl;
-        startInfo.Environment["CODEX_FEISHU_RUNTIME"] = runtime;
+        startInfo.Environment["CODEX_FEISHU_RUNTIME"] = runtime.Id;
         startInfo.Environment["CODEX_FEISHU_TOOL_COMMAND"] = toolCommand;
         startInfo.Environment["CODEX_FEISHU_TOOL_ARGS_JSON"] = JsonSerializer.Serialize(
-            runtime == "claudecode"
-                ? toolArguments
-                : BuildCodexArguments(terminalId, bridgeUrl, elevated, toolArguments));
+            runtime.InjectBridgeArguments
+                ? BuildCodexArguments(terminalId, bridgeUrl, elevated, toolArguments)
+                : toolArguments);
 
         var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         if (!process.Start())
@@ -227,7 +224,7 @@ internal static class ManagedTerminalHost
         string cwd,
         string bridgeUrl,
         bool elevated,
-        string runtime,
+        RuntimeProfile runtime,
         Process powershell,
         CancellationToken cancellationToken)
     {
@@ -241,7 +238,7 @@ internal static class ManagedTerminalHost
                     cwd,
                     bridgeUrl,
                     elevated,
-                    runtime,
+                    runtime.Id,
                     ready: !powershell.HasExited,
                     cancellationToken: cancellationToken);
             }
@@ -284,7 +281,7 @@ internal static class ManagedTerminalHost
     private static async Task RunPipeServerAsync(
         string terminalId,
         bool elevated,
-        string runtime,
+        RuntimeProfile runtime,
         Process powershell,
         CancellationToken cancellationToken)
     {
@@ -407,7 +404,7 @@ internal static class ManagedTerminalHost
         }
     }
 
-    private static void InjectPrompt(TerminalInputRequest input, string runtime)
+    private static void InjectPrompt(TerminalInputRequest input, RuntimeProfile runtime)
     {
         var inputHandle = GetStdHandle(StdInputHandle);
         if (inputHandle == IntPtr.Zero || inputHandle == new IntPtr(-1))
@@ -427,7 +424,7 @@ internal static class ManagedTerminalHost
         // submitting. Codex uses Tab for an explicit next-turn queue; Claude Code queues
         // typed input with Enter while a turn is running.
         Thread.Sleep(600);
-        var useTab = runtime == "codex" && input.SubmitMode == TerminalSubmitMode.Queue;
+        var useTab = runtime.QueueWithTab && input.SubmitMode == TerminalSubmitMode.Queue;
         var submitCharacter = useTab ? '\t' : '\r';
         var submitVirtualKey = useTab
             ? VirtualKeyTab

@@ -1,7 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isRequestUserInputHookPayload } from "../src/domain.js";
+import {
+  isManagedRuntimeName,
+  isRequestUserInputHookPayload,
+  runtimeDefinition,
+  runtimeGroupPrefix,
+  runtimeReceivedText,
+} from "../src/domain.js";
+
+test("runtime catalog centralizes transport and labels", () => {
+  assert.equal(runtimeDefinition().displayName, "Codex");
+  assert.equal(runtimeDefinition("claudecode").transport, "managed_terminal");
+  assert.equal(runtimeDefinition("opencode").transport, "http_event_stream");
+  assert.equal(runtimeGroupPrefix("opencode"), "OpenCode｜");
+  assert.equal(runtimeReceivedText("claudecode"), "Claude Code 已接收。");
+  assert.equal(isManagedRuntimeName("codex"), true);
+  assert.equal(isManagedRuntimeName("claudecode"), true);
+  assert.equal(isManagedRuntimeName("opencode"), false);
+});
 
 test("request_user_input accepts free-text questions without options", () => {
   const payload = {

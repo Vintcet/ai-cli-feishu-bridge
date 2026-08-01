@@ -12,6 +12,54 @@ export type SessionStatus =
   | "ended";
 
 export type RuntimeName = "codex" | "opencode" | "claudecode";
+export type ManagedRuntimeName = Exclude<RuntimeName, "opencode">;
+export type RuntimeTransport = "managed_terminal" | "http_event_stream";
+
+export interface RuntimeDefinition {
+  name: RuntimeName;
+  displayName: string;
+  shortName: string;
+  groupPrefix: string;
+  transport: RuntimeTransport;
+}
+
+const runtimeDefinitions: Record<RuntimeName, RuntimeDefinition> = {
+  codex: {
+    name: "codex",
+    displayName: "Codex",
+    shortName: "Codex",
+    groupPrefix: "Codex｜",
+    transport: "managed_terminal",
+  },
+  claudecode: {
+    name: "claudecode",
+    displayName: "Claude Code",
+    shortName: "Claude",
+    groupPrefix: "Claude｜",
+    transport: "managed_terminal",
+  },
+  opencode: {
+    name: "opencode",
+    displayName: "opencode",
+    shortName: "opencode",
+    groupPrefix: "OpenCode｜",
+    transport: "http_event_stream",
+  },
+};
+
+export function isRuntimeName(value: unknown): value is RuntimeName {
+  return typeof value === "string" &&
+    Object.prototype.hasOwnProperty.call(runtimeDefinitions, value);
+}
+
+export function isManagedRuntimeName(value: unknown): value is ManagedRuntimeName {
+  return isRuntimeName(value) &&
+    runtimeDefinitions[value].transport === "managed_terminal";
+}
+
+export function runtimeDefinition(runtime?: RuntimeName): RuntimeDefinition {
+  return runtimeDefinitions[runtime ?? "codex"];
+}
 
 export interface BridgeSettings {
   notifyActivity: boolean;
@@ -300,9 +348,15 @@ export function sessionLabel(
 }
 
 export function runtimeDisplayName(runtime?: RuntimeName): string {
-  if (runtime === "opencode") return "opencode";
-  if (runtime === "claudecode") return "Claude Code";
-  return "Codex";
+  return runtimeDefinition(runtime).displayName;
+}
+
+export function runtimeGroupPrefix(runtime?: RuntimeName): string {
+  return runtimeDefinition(runtime).groupPrefix;
+}
+
+export function runtimeReceivedText(runtime?: RuntimeName): string {
+  return `${runtimeDisplayName(runtime)} 已接收。`;
 }
 
 export function isPermissionHookPayload(value: unknown): value is PermissionHookPayload {

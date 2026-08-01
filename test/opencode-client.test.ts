@@ -80,6 +80,19 @@ test("listMessages and extractLastAssistantText", async () => {
   }
 });
 
+test("read-only requests retry one transient local reset", async () => {
+  const fake = new FakeOpenCodeServer();
+  const port = await fake.listen();
+  try {
+    const client = new OpenCodeClient(`http://127.0.0.1:${port}`);
+    fake.resetNextRequests = 1;
+    const sessions = await client.listSessions();
+    assert.equal(sessions[0]?.id, "session-alpha");
+  } finally {
+    await fake.close();
+  }
+});
+
 test("subscribe decodes real-format SSE events and routes them to handlers", async () => {
   const fake = new FakeOpenCodeServer();
   const port = await fake.listen();

@@ -1,7 +1,11 @@
 import net from "node:net";
 import path from "node:path";
 
-import type { RuntimeName, SessionRecord } from "./domain.js";
+import {
+  isManagedRuntimeName,
+  type ManagedRuntimeName,
+  type SessionRecord,
+} from "./domain.js";
 
 interface TerminalReply {
   ok?: boolean;
@@ -16,7 +20,7 @@ export interface ManagedTerminalRegistration {
   normalizedCwd: string;
   elevated: boolean;
   ready: boolean;
-  runtime: Exclude<RuntimeName, "opencode">;
+  runtime: ManagedRuntimeName;
   createdAt: number;
   lastSeenAt: number;
   sessionId?: string;
@@ -26,7 +30,7 @@ export interface ManagedTerminalClaim {
   terminalId: string;
   elevated: boolean;
   createdAt: number;
-  runtime: Exclude<RuntimeName, "opencode">;
+  runtime: ManagedRuntimeName;
 }
 
 export function managedTerminalSessionId(terminalId: string): string {
@@ -86,7 +90,7 @@ export class ManagedTerminalRouter {
     const current = this.registrations.get(terminalId);
     const runtime = value.runtime === undefined
       ? current?.runtime ?? "codex"
-      : value.runtime === "codex" || value.runtime === "claudecode"
+      : isManagedRuntimeName(value.runtime)
         ? value.runtime
         : undefined;
     if (!runtime) {
