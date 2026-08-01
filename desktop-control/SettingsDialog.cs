@@ -10,18 +10,19 @@ internal sealed class SettingsDialog : Form
     private readonly NumericUpDown retryMaxAttemptsInput = new();
     private readonly NumericUpDown retryIntervalInput = new();
     private readonly NumericUpDown retryJitterInput = new();
+    private readonly TextBox workspaceRootBox = new();
     private readonly bool initiallyAutoApprove;
 
     public SettingsDialog(BridgeSettings settings)
     {
         initiallyAutoApprove = settings.AutoApprove;
-        Text = "通知与自动处理设置";
+        Text = "助手设置";
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
         ShowInTaskbar = false;
-        ClientSize = new Size(580, 542);
+        ClientSize = new Size(620, 640);
         Font = new Font("Microsoft YaHei UI", 9F);
 
         var title = new Label
@@ -39,30 +40,55 @@ internal sealed class SettingsDialog : Form
             Location = new Point(25, 52),
         };
 
+        var workspaceLabel = new Label
+        {
+            Text = "默认工作区",
+            AutoSize = true,
+            Location = new Point(26, 84),
+        };
+        workspaceRootBox.Text = settings.WorkspaceRoot;
+        workspaceRootBox.Location = new Point(26, 106);
+        workspaceRootBox.Size = new Size(468, 28);
+        workspaceRootBox.MaxLength = 1_024;
+        var workspaceBrowseButton = new Button
+        {
+            Text = "浏览…",
+            Location = new Point(504, 104),
+            Size = new Size(90, 32),
+        };
+        workspaceBrowseButton.Click += (_, _) => BrowseWorkspaceRoot();
+        var workspaceHint = new Label
+        {
+            Text = "飞书发送“新建 codex 项目名”时，会在这里查找或创建对应项目文件夹。",
+            ForeColor = Color.FromArgb(100, 116, 139),
+            AutoSize = true,
+            Location = new Point(27, 139),
+        };
+
         ConfigureCheckBox(
             notifyActivityBox,
             "同步普通过程信息",
             "在飞书持续更新工具执行和处理进度。关闭时只推送关键节点。",
-            86,
+            165,
             settings.NotifyActivity);
         ConfigureCheckBox(
             notifyUserPromptsBox,
             "同步电脑端输入到飞书",
             "把你在 PC 助手窗口提交的消息同步到对应飞书会话；飞书发来的消息不会重复回显。",
-            148,
+            227,
             settings.NotifyUserPrompts);
         ConfigureCheckBox(
             autoRetryBox,
             "临时错误自动重试",
             "遇到 429、503、服务繁忙或超时等错误时，按下方参数重试。",
-            210,
+            289,
             settings.AutoRetryErrors);
         ConfigureRetryOptions(settings);
         ConfigureCheckBox(
             autoApproveBox,
             "审批请求自动允许",
             "高风险：助手请求权限时不再等待人工确认，并在飞书留下记录。",
-            404,
+            483,
             settings.AutoApprove);
         autoRetryBox.CheckedChanged += (_, _) =>
             retryOptionsGroup.Enabled = autoRetryBox.Checked;
@@ -73,14 +99,14 @@ internal sealed class SettingsDialog : Form
             Text = "取消",
             DialogResult = DialogResult.Cancel,
             Size = new Size(90, 36),
-            Location = new Point(366, 487),
+            Location = new Point(406, 584),
         };
         var saveButton = new Button
         {
             Text = "保存",
             DialogResult = DialogResult.OK,
             Size = new Size(90, 36),
-            Location = new Point(466, 487),
+            Location = new Point(506, 584),
             BackColor = Color.FromArgb(37, 99, 235),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
@@ -88,7 +114,8 @@ internal sealed class SettingsDialog : Form
         saveButton.FlatAppearance.BorderSize = 0;
 
         Controls.AddRange([
-            title, hint, notifyActivityBox, notifyUserPromptsBox, autoRetryBox,
+            title, hint, workspaceLabel, workspaceRootBox, workspaceBrowseButton,
+            workspaceHint, notifyActivityBox, notifyUserPromptsBox, autoRetryBox,
             retryOptionsGroup, autoApproveBox,
             cancelButton, saveButton,
         ]);
@@ -98,6 +125,19 @@ internal sealed class SettingsDialog : Form
 
     protected override void OnFormClosing(FormClosingEventArgs eventArgs)
     {
+        if (DialogResult == DialogResult.OK &&
+            !Directory.Exists(workspaceRootBox.Text.Trim()))
+        {
+            MessageBox.Show(
+                this,
+                "请选择一个存在的默认工作区目录。",
+                "默认工作区不可用",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            eventArgs.Cancel = true;
+            DialogResult = DialogResult.None;
+            return;
+        }
         if (DialogResult == DialogResult.OK &&
             autoApproveBox.Checked &&
             !initiallyAutoApprove)
@@ -121,6 +161,7 @@ internal sealed class SettingsDialog : Form
 
     public BridgeSettings Settings => new()
     {
+        WorkspaceRoot = Path.GetFullPath(workspaceRootBox.Text.Trim()),
         NotifyActivity = notifyActivityBox.Checked,
         NotifyUserPrompts = notifyUserPromptsBox.Checked,
         AutoRetryErrors = autoRetryBox.Checked,
@@ -133,8 +174,8 @@ internal sealed class SettingsDialog : Form
     private void ConfigureRetryOptions(BridgeSettings settings)
     {
         retryOptionsGroup.Text = "重试参数";
-        retryOptionsGroup.Location = new Point(26, 266);
-        retryOptionsGroup.Size = new Size(528, 126);
+        retryOptionsGroup.Location = new Point(26, 345);
+        retryOptionsGroup.Size = new Size(568, 126);
 
         ConfigureNumericInput(
             retryMaxAttemptsInput,
@@ -167,6 +208,23 @@ internal sealed class SettingsDialog : Form
             Size = new Size(238, 65),
         };
         retryOptionsGroup.Controls.Add(explanation);
+    }
+
+    private void BrowseWorkspaceRoot()
+    {
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = "选择飞书新建助手项目时使用的默认工作区",
+            UseDescriptionForTitle = true,
+            ShowNewFolderButton = true,
+            InitialDirectory = Directory.Exists(workspaceRootBox.Text.Trim())
+                ? workspaceRootBox.Text.Trim()
+                : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        };
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+        {
+            workspaceRootBox.Text = dialog.SelectedPath;
+        }
     }
 
     private void ConfigureNumericInput(

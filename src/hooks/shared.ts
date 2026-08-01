@@ -30,7 +30,13 @@ export function normalizeClaudeCodePayload(input: unknown): unknown {
 
   const eventName = String(item.hook_event_name ?? "");
   if (
-    ["PermissionRequest", "PreToolUse", "PostToolUse", "Stop"].includes(eventName) &&
+    [
+      "PermissionRequest",
+      "PreToolUse",
+      "PostToolUse",
+      "PostToolUseFailure",
+      "Stop",
+    ].includes(eventName) &&
     typeof item.turn_id !== "string"
   ) {
     const eventId = typeof item.tool_use_id === "string" && item.tool_use_id
@@ -48,9 +54,7 @@ export function normalizeClaudeCodePayload(input: unknown): unknown {
       break;
     }
     case "SessionEnd": {
-      // Codex 的校验只接受 "other"；保留原始值供排查。
-      if (item.reason !== "other") {
-        item.claude_code_end_reason = item.reason;
+      if (typeof item.reason !== "string" || !item.reason) {
         item.reason = "other";
       }
       break;
@@ -106,6 +110,7 @@ function normalizeClaudeCodeQuestions(item: Record<string, unknown>): void {
             ? [{
                 label: value.label,
                 description: typeof value.description === "string" ? value.description : "",
+                ...(typeof value.preview === "string" ? { preview: value.preview } : {}),
               }]
             : [];
         })
@@ -117,6 +122,8 @@ function normalizeClaudeCodeQuestions(item: Record<string, unknown>): void {
       id,
       question: typed.question,
       options,
+      multiple: typed.multiSelect === true,
+      custom: true,
     }];
   });
   if (questions.length === 0) return;
@@ -209,7 +216,11 @@ export function compactActivityPayload(value: unknown): unknown {
     tool_name: item.tool_name,
     tool_preview: compactPreview(item.tool_input),
     tool_response_preview: compactPreview(
-      item.tool_response ?? item.tool_result ?? item.tool_output,
+      item.tool_response ??
+        item.tool_result ??
+        item.tool_output ??
+        item.error ??
+        item.summary,
     ),
     runtime: item.runtime,
     managed_terminal_id: item.managed_terminal_id,

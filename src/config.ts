@@ -41,6 +41,9 @@ export const bridgeConfig = {
     process.env.RUNTIME_AUTO_LAUNCH_TIMEOUT_MS,
     2 * 60 * 1000,
   ),
+  defaultWorkspaceRoot: path.resolve(
+    process.env.DEFAULT_WORKSPACE_ROOT?.trim() || path.dirname(projectRoot),
+  ),
   codexCommand: process.env.CODEX_COMMAND?.trim() || "codex",
   dataDirectory: path.join(projectRoot, "data"),
   uploadsDirectory: path.join(projectRoot, "data", "uploads"),

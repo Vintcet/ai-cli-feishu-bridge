@@ -98,6 +98,9 @@ internal sealed class BridgeStatus
 
 internal sealed class BridgeSettings
 {
+    [JsonPropertyName("workspaceRoot")]
+    public string WorkspaceRoot { get; set; } = "";
+
     [JsonPropertyName("notifyActivity")]
     public bool NotifyActivity { get; set; }
 
@@ -273,6 +276,9 @@ internal sealed class RuntimeLaunchRequest
     [JsonPropertyName("requestId")]
     public string RequestId { get; set; } = "";
 
+    [JsonPropertyName("kind")]
+    public string Kind { get; set; } = "resume";
+
     [JsonPropertyName("sessionId")]
     public string SessionId { get; set; } = "";
 
@@ -281,6 +287,9 @@ internal sealed class RuntimeLaunchRequest
 
     [JsonPropertyName("cwd")]
     public string Cwd { get; set; } = "";
+
+    [JsonPropertyName("projectName")]
+    public string ProjectName { get; set; } = "";
 
     [JsonPropertyName("elevated")]
     public bool Elevated { get; set; }

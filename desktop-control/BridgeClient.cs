@@ -278,6 +278,7 @@ internal sealed class BridgeClient : IDisposable
         {
             Content = JsonContent.Create(new
             {
+                workspaceRoot = settings.WorkspaceRoot,
                 notifyActivity = settings.NotifyActivity,
                 notifyUserPrompts = settings.NotifyUserPrompts,
                 autoRetryErrors = settings.AutoRetryErrors,

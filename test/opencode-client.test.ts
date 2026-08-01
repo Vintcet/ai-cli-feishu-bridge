@@ -15,6 +15,7 @@ test("health and session listing", async () => {
     const sessions = await client.listSessions();
     assert.equal(sessions.length, 1);
     assert.equal(sessions[0]?.id, "session-alpha");
+    assert.deepEqual(await client.listActiveSessionIds(), ["session-alpha"]);
   } finally {
     await fake.close();
   }
@@ -38,29 +39,98 @@ test("createSession, sendPrompt, replyPermission, abort, undo", async () => {
   const fake = new FakeOpenCodeServer();
   const port = await fake.listen();
   try {
-    const client = new OpenCodeClient(`http://127.0.0.1:${port}`);
+    const client = new OpenCodeClient(`http://127.0.0.1:${port}`, "C:/demo");
     const created = await client.createSession("hello");
     assert.equal(created.title, "hello");
     assert.match(created.id, /^session-created-/);
 
-    await client.sendPrompt("session-alpha", "继续", { model: "x", noReply: true });
+    await client.sendPrompt("session-alpha", "继续", {
+      model: "openai/x",
+      noReply: true,
+    });
     await client.replyPermission("session-alpha", "permission-1", "once");
     await client.abort("session-alpha");
     await client.undo("session-alpha");
 
     assert.equal(fake.permissionReplyResponses["permission-1"], "once");
     const promptCall = fake.requests.find((request) =>
-      request.url.endsWith("/prompt_async"));
+      request.url.includes("/prompt_async"));
     assert.ok(promptCall);
     const body = promptCall?.body as {
       parts?: Array<{ type?: string; text?: string }>;
-      model?: string;
+      model?: { providerID?: string; modelID?: string };
       noReply?: boolean;
     };
     assert.equal(body.parts?.[0]?.type, "text");
     assert.equal(body.parts?.[0]?.text, "继续");
-    assert.equal(body.model, "x");
+    assert.deepEqual(body.model, { providerID: "openai", modelID: "x" });
     assert.equal(body.noReply, true);
+    assert.match(promptCall?.url ?? "", /directory=C%3A%2Fdemo/);
+  } finally {
+    await fake.close();
+  }
+});
+
+test("question and permission APIs use OpenCode 1.18 with legacy fallback", async () => {
+  const fake = new FakeOpenCodeServer();
+  fake.permissions = [{
+    id: "per_pending",
+    sessionID: "session-alpha",
+    permission: "bash",
+    patterns: ["git status"],
+    metadata: {},
+    always: [],
+  }];
+  fake.questions = [{
+    id: "que_pending",
+    sessionID: "session-alpha",
+    questions: [{
+      header: "范围",
+      question: "选择范围",
+      options: [
+        { label: "代码", description: "仅代码" },
+        { label: "文档", description: "仅文档" },
+      ],
+      multiple: true,
+      custom: false,
+    }],
+  }];
+  const port = await fake.listen();
+  try {
+    const client = new OpenCodeClient(`http://127.0.0.1:${port}`, "C:/demo");
+    assert.equal((await client.listPermissions())[0]?.permission, "bash");
+    const question = (await client.listQuestions())[0];
+    assert.equal(question?.questions[0]?.multiple, true);
+    assert.equal(question?.questions[0]?.custom, false);
+
+    await client.replyQuestion("que_pending", [["代码", "文档"]]);
+    assert.deepEqual(fake.questionReplyAnswers.que_pending, [["代码", "文档"]]);
+
+    fake.questions = [{
+      id: "que_reject",
+      sessionID: "session-alpha",
+      questions: [],
+    }];
+    await client.rejectQuestion("que_reject");
+    assert.deepEqual(fake.questionRejections, ["que_reject"]);
+
+    fake.modernPermissionEndpoint = false;
+    await client.replyPermission("session-alpha", "per_legacy", "reject");
+    assert.equal(fake.permissionReplyResponses.per_legacy, "reject");
+  } finally {
+    await fake.close();
+  }
+});
+
+test("missing legacy pending-interaction endpoints are treated as empty", async () => {
+  const fake = new FakeOpenCodeServer();
+  fake.permissionListStatus = 404;
+  fake.questionListStatus = 405;
+  const port = await fake.listen();
+  try {
+    const client = new OpenCodeClient(`http://127.0.0.1:${port}`, "C:/demo");
+    assert.deepEqual(await client.listPermissions(), []);
+    assert.deepEqual(await client.listQuestions(), []);
   } finally {
     await fake.close();
   }
@@ -93,7 +163,7 @@ test("read-only requests retry one transient local reset", async () => {
   }
 });
 
-test("subscribe decodes real-format SSE events and routes them to handlers", async () => {
+test("subscribe decodes OpenCode 1.18 SSE events and routes them", async () => {
   const fake = new FakeOpenCodeServer();
   const port = await fake.listen();
   try {
@@ -101,15 +171,27 @@ test("subscribe decodes real-format SSE events and routes them to handlers", asy
     const events: string[] = [];
     const idleSessions: string[] = [];
     const permissions: string[] = [];
+    const permissionReplies: string[] = [];
+    const questions: string[] = [];
+    const questionReplies: string[] = [];
+    const questionRejections: string[] = [];
     const created: string[] = [];
+    const updatedSessions: string[] = [];
     const deleted: string[] = [];
     const statuses: string[] = [];
     const errors: string[] = [];
     const subscription = client.subscribe({
       onEvent: (event) => events.push(event.type),
       onSessionIdle: (sessionId) => idleSessions.push(sessionId),
-      onPermissionUpdated: (permission) => permissions.push(permission.id),
+      onPermissionAsked: (permission) => permissions.push(permission.id),
+      onPermissionReplied: (reply) =>
+        permissionReplies.push(`${reply.requestID}:${reply.reply}`),
+      onQuestionAsked: (request) => questions.push(request.id),
+      onQuestionReplied: (reply) =>
+        questionReplies.push(`${reply.requestID}:${reply.answers[0]?.join(",")}`),
+      onQuestionRejected: (reply) => questionRejections.push(reply.requestID),
       onSessionCreated: (session) => created.push(session.id),
+      onSessionUpdated: (session) => updatedSessions.push(session.id),
       onSessionDeleted: (sessionId) => deleted.push(sessionId),
       onSessionStatus: (sessionId, status) => statuses.push(`${sessionId}:${status}`),
       onSessionError: (sessionId, error) => errors.push(`${sessionId}:${error}`),
@@ -118,6 +200,10 @@ test("subscribe decodes real-format SSE events and routes them to handlers", asy
     fake.sendSse("session.created", {
       sessionID: "session-alpha",
       info: { id: "session-alpha", directory: "C:/demo" },
+    });
+    fake.sendSse("session.updated", {
+      sessionID: "session-alpha",
+      info: { id: "session-alpha", directory: "C:/demo", title: "updated" },
     });
     fake.sendSse("session.deleted", { info: { id: "session-alpha" } });
     fake.sendSse("session.idle", { sessionID: "session-alpha" });
@@ -129,11 +215,38 @@ test("subscribe decodes real-format SSE events and routes them to handlers", asy
       sessionID: "session-alpha",
       error: { name: "UnknownError", data: { message: "boom" } },
     });
-    fake.sendSse("permission.updated", {
-      id: "permission-2",
+    fake.sendSse("permission.asked", {
+      id: "per_2",
       sessionID: "session-alpha",
-      type: "shell_command",
-      input: { command: "rm -rf x" },
+      permission: "bash",
+      patterns: ["rm -rf x"],
+      metadata: {},
+      always: [],
+    });
+    fake.sendSse("permission.replied", {
+      sessionID: "session-alpha",
+      requestID: "per_2",
+      reply: "once",
+    });
+    fake.sendSse("question.asked", {
+      id: "que_2",
+      sessionID: "session-alpha",
+      questions: [{
+        header: "方式",
+        question: "选择方式",
+        options: [{ label: "A", description: "选 A" }],
+        multiple: false,
+        custom: true,
+      }],
+    });
+    fake.sendSse("question.replied", {
+      sessionID: "session-alpha",
+      requestID: "que_2",
+      answers: [["A"]],
+    });
+    fake.sendSse("question.rejected", {
+      sessionID: "session-alpha",
+      requestID: "que_3",
     });
     fake.sendSse("message.part.updated", {
       sessionID: "session-alpha",
@@ -147,14 +260,20 @@ test("subscribe decodes real-format SSE events and routes them to handlers", asy
     });
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.ok(events.includes("session.idle"));
-    assert.ok(events.includes("permission.updated"));
+    assert.ok(events.includes("permission.asked"));
+    assert.ok(events.includes("question.asked"));
     assert.ok(events.includes("message.part.updated"));
     assert.deepEqual(created, ["session-alpha"]);
+    assert.deepEqual(updatedSessions, ["session-alpha"]);
     assert.deepEqual(deleted, ["session-alpha"]);
     assert.deepEqual(idleSessions, ["session-alpha"]);
     assert.deepEqual(statuses, ["session-alpha:busy"]);
     assert.deepEqual(errors, ["session-alpha:boom"]);
-    assert.deepEqual(permissions, ["permission-2"]);
+    assert.deepEqual(permissions, ["per_2"]);
+    assert.deepEqual(permissionReplies, ["per_2:once"]);
+    assert.deepEqual(questions, ["que_2"]);
+    assert.deepEqual(questionReplies, ["que_2:A"]);
+    assert.deepEqual(questionRejections, ["que_3"]);
     subscription.close();
   } finally {
     await fake.close();
@@ -199,7 +318,7 @@ test("user prompt is synthesized from message.updated plus its text part", async
   }
 });
 
-test("legacy event: framing still parses", async () => {
+test("legacy event framing and CRLF framing still parse", async () => {
   const fake = new FakeOpenCodeServer();
   const port = await fake.listen();
   try {
@@ -210,8 +329,9 @@ test("legacy event: framing still parses", async () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 100));
     fake.sendSseRaw('event: session.idle\ndata: {"sessionID":"session-legacy"}\n\n');
+    fake.sendSseRaw('event: session.idle\r\ndata: {"sessionID":"session-crlf"}\r\n\r\n');
     await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.deepEqual(idleSessions, ["session-legacy"]);
+    assert.deepEqual(idleSessions, ["session-legacy", "session-crlf"]);
     subscription.close();
   } finally {
     await fake.close();

@@ -1151,7 +1151,12 @@ internal sealed class MainForm : Form
             return;
         }
 
-        SetOperating(true, $"正在从飞书自动恢复 #{ShortSessionId(request.SessionId)}…");
+        var isNewLaunch = request.Kind.Equals("new", StringComparison.OrdinalIgnoreCase);
+        SetOperating(
+            true,
+            isNewLaunch
+                ? $"正在从飞书新建项目 {request.ProjectName}…"
+                : $"正在从飞书自动恢复 #{ShortSessionId(request.SessionId)}…");
         try
         {
             if (!RuntimeCatalog.TryGet(request.Runtime, out var runtime))
@@ -1162,14 +1167,15 @@ internal sealed class MainForm : Form
                 runtime,
                 request.Cwd,
                 request.Elevated,
-                runtime.BuildResumeArguments(request.SessionId),
+                isNewLaunch ? null : runtime.BuildResumeArguments(request.SessionId),
                 lifetime.Token);
             await bridgeClient.CompleteRuntimeLaunchAsync(
                 request.RequestId,
                 success: true,
                 cancellationToken: lifetime.Token);
-            operationLabel.Text =
-                $"已从飞书请求自动打开 {runtime.DisplayName} #{ShortSessionId(request.SessionId)}";
+            operationLabel.Text = isNewLaunch
+                ? $"已从飞书启动 {runtime.DisplayName} 项目 {request.ProjectName}"
+                : $"已从飞书请求自动打开 {runtime.DisplayName} #{ShortSessionId(request.SessionId)}";
         }
         catch (OperationCanceledException error) when (!lifetime.IsCancellationRequested)
         {
@@ -1179,8 +1185,10 @@ internal sealed class MainForm : Form
         catch (Exception error)
         {
             await ReportRuntimeLaunchFailureAsync(request, error.Message);
-            AppLog.Error("自动恢复会话失败", error);
-            operationLabel.Text = $"自动恢复会话失败：{error.Message}";
+            AppLog.Error(isNewLaunch ? "飞书新建会话失败" : "自动恢复会话失败", error);
+            operationLabel.Text = isNewLaunch
+                ? $"飞书新建会话失败：{error.Message}"
+                : $"自动恢复会话失败：{error.Message}";
         }
         finally
         {

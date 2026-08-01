@@ -81,7 +81,12 @@ class FakeCodex {
   }
 }
 
-function messageEvent(messageId: string, chatId: string, text: string) {
+function messageEvent(
+  messageId: string,
+  chatId: string,
+  text: string,
+  parentId?: string,
+) {
   return {
     sender: { sender_id: { open_id: "owner" } },
     message: {
@@ -90,6 +95,7 @@ function messageEvent(messageId: string, chatId: string, text: string) {
       chat_type: "group",
       message_type: "text",
       content: JSON.stringify({ text }),
+      ...(parentId ? { parent_id: parentId } : {}),
     },
   };
 }
@@ -136,6 +142,9 @@ async function setup(directory: string) {
       onSessionCreated: (session) => {
         void controller.handleOpenCodeSessionCreated(session);
       },
+      onSessionUpdated: (session) => {
+        void controller.handleOpenCodeSessionCreated(session);
+      },
       onSessionIdle: (sessionId) => {
         void controller.handleOpenCodeSessionIdle(sessionId);
       },
@@ -148,8 +157,23 @@ async function setup(directory: string) {
       onSessionStatus: (sessionId, status) => {
         void controller.handleOpenCodeSessionStatus(sessionId, status);
       },
+      onPermissionAsked: (permission) => {
+        void controller.handleOpenCodePermissionUpdated(permission);
+      },
       onPermissionUpdated: (permission) => {
         void controller.handleOpenCodePermissionUpdated(permission);
+      },
+      onPermissionReplied: (reply) => {
+        void controller.handleOpenCodePermissionReplied(reply);
+      },
+      onQuestionAsked: (request) => {
+        void controller.handleOpenCodeQuestionAsked(request);
+      },
+      onQuestionReplied: (reply) => {
+        void controller.handleOpenCodeQuestionReplied(reply);
+      },
+      onQuestionRejected: (rejection) => {
+        void controller.handleOpenCodeQuestionRejected(rejection);
       },
       onMessageUpdated: () => {},
       onMessagePartUpdated: () => {},
@@ -258,14 +282,16 @@ test("an opencode permission is sent to Feishu and allow forwards once", async (
   try {
     await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
     await ctx.controller.handleOpenCodePermissionUpdated({
-      id: "permission-1",
+      id: "per_1",
       sessionID: "session-alpha",
-      type: "shell_command",
-      input: { command: "rm -rf /tmp/x" },
+      permission: "bash",
+      patterns: ["rm -rf /tmp/x"],
+      metadata: { command: "rm -rf /tmp/x" },
+      always: [],
     });
     const approval = ctx.store
       .listApprovals()
-      .find((item) => item.opencodePermissionId === "permission-1");
+      .find((item) => item.opencodePermissionId === "per_1");
     assert.ok(approval);
     assert.equal(approval.status, "pending");
 
@@ -280,12 +306,246 @@ test("an opencode permission is sent to Feishu and allow forwards once", async (
       },
     });
     await waitFor(
-      () => ctx.fakeOpenCode.permissionReplyResponses["permission-1"] !== undefined,
+      () => ctx.fakeOpenCode.permissionReplyResponses.per_1 !== undefined,
     );
-    assert.equal(ctx.fakeOpenCode.permissionReplyResponses["permission-1"], "once");
+    assert.equal(ctx.fakeOpenCode.permissionReplyResponses.per_1, "once");
     const resolved = ctx.store.getApproval(approval.requestId);
     assert.equal(resolved?.status, "resolved");
     assert.equal(resolved?.resolution, "allow");
+  } finally {
+    await ctx.opencode.unregister(ctx.port);
+    await ctx.fakeOpenCode.close();
+    await ctx.store.flushPending();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("duplicate OpenCode interaction events create only one Feishu card", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const ctx = await setup(directory);
+  try {
+    await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
+    const cardsBefore = ctx.feishu.cards.length;
+    const permission = {
+      id: "per_duplicate",
+      sessionID: "session-alpha",
+      permission: "bash",
+      patterns: ["git status"],
+      metadata: {},
+      always: [],
+    };
+    const question = {
+      id: "que_duplicate",
+      sessionID: "session-alpha",
+      questions: [{
+        header: "方式",
+        question: "选择方式",
+        options: [{ label: "A", description: "选 A" }],
+        multiple: false,
+        custom: true,
+      }],
+    };
+    await Promise.all([
+      ctx.controller.handleOpenCodePermissionUpdated(permission),
+      ctx.controller.handleOpenCodePermissionUpdated(permission),
+      ctx.controller.handleOpenCodeQuestionAsked(question),
+      ctx.controller.handleOpenCodeQuestionAsked(question),
+    ]);
+    assert.equal(
+      ctx.store.listApprovals().filter((item) => item.opencodePermissionId === permission.id).length,
+      1,
+    );
+    assert.equal(ctx.feishu.cards.length - cardsBefore, 2);
+    const approval = ctx.store
+      .listApprovals()
+      .find((item) => item.opencodePermissionId === permission.id);
+    assert.match(approval?.toolPreview ?? "", /git status/);
+    assert.equal(ctx.controller.health().pendingInputs, 1);
+  } finally {
+    await ctx.opencode.unregister(ctx.port);
+    await ctx.fakeOpenCode.close();
+    await ctx.store.flushPending();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("opencode single-choice buttons reply through the question API", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const ctx = await setup(directory);
+  try {
+    await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
+    const before = ctx.feishu.cards.length;
+    await ctx.controller.handleOpenCodeQuestionAsked({
+      id: "que_single",
+      sessionID: "session-alpha",
+      questions: [{
+        header: "方式",
+        question: "选择处理方式",
+        options: [
+          { label: "仅检查", description: "不改文件" },
+          { label: "检查并修复", description: "直接修复" },
+        ],
+        multiple: false,
+        custom: true,
+      }],
+    });
+    const card = ctx.feishu.cards.slice(before).at(-1);
+    assert.ok(card);
+    assert.match(JSON.stringify(card.card), /检查并修复/);
+    const actionValue = findCardAction(card.card, "input_answer", "检查并修复");
+    assert.ok(actionValue);
+
+    const result = await ctx.controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: { value: JSON.stringify(actionValue) },
+    });
+    assert.equal(result.toast?.type, "success");
+    assert.deepEqual(ctx.fakeOpenCode.questionReplyAnswers.que_single, [["检查并修复"]]);
+    await waitFor(() => ctx.feishu.patchedCards.some((item) => item.messageId === card.messageId));
+    assert.equal(ctx.controller.health().pendingInputs, 0);
+  } finally {
+    await ctx.opencode.unregister(ctx.port);
+    await ctx.fakeOpenCode.close();
+    await ctx.store.flushPending();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("opencode multi-choice quoted replies preserve string[][] answers", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const ctx = await setup(directory);
+  try {
+    await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
+    const session = ctx.store.getSession("session-alpha")!;
+    const before = ctx.feishu.cards.length;
+    await ctx.controller.handleOpenCodeQuestionAsked({
+      id: "que_multi",
+      sessionID: "session-alpha",
+      questions: [{
+        header: "范围",
+        question: "选择要处理的范围",
+        options: [
+          { label: "代码", description: "源代码" },
+          { label: "测试", description: "自动化测试" },
+          { label: "文档", description: "项目说明" },
+        ],
+        multiple: true,
+        custom: false,
+      }],
+    });
+    const card = ctx.feishu.cards.slice(before).at(-1);
+    assert.ok(card);
+    assert.match(JSON.stringify(card.card), /可多选/);
+
+    await ctx.controller.handleFeishuMessage(
+      messageEvent("multi-invalid", session.feishuChatId!, "1,自定义", card.messageId),
+    );
+    assert.equal(ctx.fakeOpenCode.questionReplyAnswers.que_multi, undefined);
+    assert.equal(ctx.controller.health().pendingInputs, 1);
+
+    await ctx.controller.handleFeishuMessage(
+      messageEvent("multi-valid", session.feishuChatId!, "1,3", card.messageId),
+    );
+    assert.deepEqual(ctx.fakeOpenCode.questionReplyAnswers.que_multi, [["代码", "文档"]]);
+    assert.equal(ctx.controller.health().pendingInputs, 0);
+  } finally {
+    await ctx.opencode.unregister(ctx.port);
+    await ctx.fakeOpenCode.close();
+    await ctx.store.flushPending();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an opencode question answered locally closes the Feishu card", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const ctx = await setup(directory);
+  try {
+    await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
+    const before = ctx.feishu.cards.length;
+    await ctx.controller.handleOpenCodeQuestionAsked({
+      id: "que_local",
+      sessionID: "session-alpha",
+      questions: [{
+        header: "确认",
+        question: "继续吗",
+        options: [{ label: "继续", description: "继续执行" }],
+        multiple: false,
+        custom: true,
+      }],
+    });
+    const card = ctx.feishu.cards.slice(before).at(-1);
+    assert.ok(card);
+    await ctx.controller.handleOpenCodeQuestionReplied({
+      sessionID: "session-alpha",
+      requestID: "que_local",
+      answers: [["本机回答"]],
+    });
+    await waitFor(() => ctx.feishu.patchedCards.some((item) => item.messageId === card.messageId));
+    assert.match(
+      JSON.stringify(ctx.feishu.patchedCards.find((item) => item.messageId === card.messageId)?.card),
+      /本机回答/,
+    );
+    assert.equal(ctx.controller.health().pendingInputs, 0);
+  } finally {
+    await ctx.opencode.unregister(ctx.port);
+    await ctx.fakeOpenCode.close();
+    await ctx.store.flushPending();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("turning an OpenCode question back to the computer keeps it pending", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const ctx = await setup(directory);
+  try {
+    await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
+    const before = ctx.feishu.cards.length;
+    await ctx.controller.handleOpenCodeQuestionAsked({
+      id: "que_local_pending",
+      sessionID: "session-alpha",
+      questions: [{
+        header: "确认",
+        question: "继续吗",
+        options: [{ label: "继续", description: "继续执行" }],
+        multiple: false,
+        custom: true,
+      }],
+    });
+    const card = ctx.feishu.cards.slice(before).at(-1);
+    assert.ok(card);
+    const actionValue = findCardAction(card.card, "input_local");
+    assert.ok(actionValue);
+    const result = await ctx.controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: { value: JSON.stringify(actionValue) },
+    });
+    assert.equal(result.toast?.type, "success");
+    assert.equal(ctx.controller.health().pendingInputs, 0);
+    assert.equal(ctx.store.getSession("session-alpha")?.status, "pending_input");
+  } finally {
+    await ctx.opencode.unregister(ctx.port);
+    await ctx.fakeOpenCode.close();
+    await ctx.store.flushPending();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("OpenCode replies update session state even when no Feishu waiter exists", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const ctx = await setup(directory);
+  try {
+    await waitFor(() => ctx.store.getSession("session-alpha") !== undefined);
+    await ctx.controller.handleOpenCodeQuestionReplied({
+      sessionID: "session-alpha",
+      requestID: "que_answered_elsewhere",
+      answers: [["A"]],
+    });
+    assert.equal(ctx.store.getSession("session-alpha")?.status, "running");
+    await ctx.controller.handleOpenCodeQuestionRejected({
+      sessionID: "session-alpha",
+      requestID: "que_rejected_elsewhere",
+    });
+    assert.equal(ctx.store.getSession("session-alpha")?.status, "waiting");
   } finally {
     await ctx.opencode.unregister(ctx.port);
     await ctx.fakeOpenCode.close();
@@ -321,4 +581,33 @@ async function waitFor(
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
+}
+
+function findCardAction(
+  value: unknown,
+  action: string,
+  answer?: string,
+): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findCardAction(item, action, answer);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    record.action === action &&
+    (answer === undefined || record.answer === answer)
+  ) {
+    return record;
+  }
+  for (const child of Object.values(record)) {
+    const found = findCardAction(child, action, answer);
+    if (found) return found;
+  }
+  return undefined;
 }

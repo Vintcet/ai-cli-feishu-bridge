@@ -62,6 +62,7 @@ export function runtimeDefinition(runtime?: RuntimeName): RuntimeDefinition {
 }
 
 export interface BridgeSettings {
+  workspaceRoot: string;
   notifyActivity: boolean;
   notifyUserPrompts: boolean;
   autoRetryErrors: boolean;
@@ -198,6 +199,7 @@ export interface StopHookPayload {
 export interface UserInputOption {
   label: string;
   description: string;
+  preview?: string;
 }
 
 export interface UserInputQuestion {
@@ -206,7 +208,11 @@ export interface UserInputQuestion {
   question: string;
   options: UserInputOption[];
   isSecret?: boolean;
+  multiple?: boolean;
+  custom?: boolean;
 }
+
+export type UserInputAnswers = Record<string, string[]>;
 
 export interface RequestUserInputHookPayload {
   hook_event_name: "PreToolUse";
@@ -232,6 +238,7 @@ export interface RequestUserInputHookPayload {
 export type ActivityHookEventName =
   | "PreToolUse"
   | "PostToolUse"
+  | "PostToolUseFailure"
   | "PreCompact"
   | "PostCompact"
   | "UserPromptSubmit";
@@ -270,7 +277,7 @@ export interface SessionEndHookPayload {
   hook_event_name: "SessionEnd";
   session_id: string;
   cwd: string;
-  reason: "other";
+  reason: string;
   transcript_path: string | null;
   runtime?: RuntimeName;
   managed_terminal_id?: string;
@@ -427,13 +434,17 @@ export function isRequestUserInputHookPayload(
       typeof typed.id === "string" &&
       typeof typed.question === "string" &&
       Array.isArray(typed.options) &&
+      (typed.multiple === undefined || typeof typed.multiple === "boolean") &&
+      (typed.custom === undefined || typeof typed.custom === "boolean") &&
       typed.options.every(
         (option) =>
           Boolean(option) &&
           typeof option === "object" &&
           !Array.isArray(option) &&
           typeof (option as Record<string, unknown>).label === "string" &&
-          typeof (option as Record<string, unknown>).description === "string",
+          typeof (option as Record<string, unknown>).description === "string" &&
+          ((option as Record<string, unknown>).preview === undefined ||
+            typeof (option as Record<string, unknown>).preview === "string"),
       )
     );
   });
@@ -445,7 +456,14 @@ export function isActivityHookPayload(value: unknown): value is ActivityHookPayl
   }
   const item = value as Record<string, unknown>;
   return (
-    ["PreToolUse", "PostToolUse", "PreCompact", "PostCompact", "UserPromptSubmit"].includes(
+    [
+      "PreToolUse",
+      "PostToolUse",
+      "PostToolUseFailure",
+      "PreCompact",
+      "PostCompact",
+      "UserPromptSubmit",
+    ].includes(
       String(item.hook_event_name),
     ) &&
     typeof item.session_id === "string" &&
@@ -485,7 +503,8 @@ export function isSessionEndHookPayload(value: unknown): value is SessionEndHook
     item.hook_event_name === "SessionEnd" &&
     typeof item.session_id === "string" &&
     typeof item.cwd === "string" &&
-    item.reason === "other"
+    typeof item.reason === "string" &&
+    item.reason.length > 0
   );
 }
 

@@ -13,6 +13,7 @@ export class FakeOpenCodeServer {
   readonly requests: Array<{ method: string; url: string; body: unknown }> = [];
   private sseClients = new Set<ServerResponse>();
   private sseCounter = 0;
+  sseConnectionCount = 0;
   sessions: Array<Record<string, unknown>> = [
     {
       id: "session-alpha",
@@ -21,10 +22,22 @@ export class FakeOpenCodeServer {
       model: "openai/gpt-5",
     },
   ];
+  activeSessionIds: string[] = ["session-alpha"];
   permissionReplyResponses: Record<string, string> = {};
+  questionReplyAnswers: Record<string, string[][]> = {};
+  questionRejections: string[] = [];
+  permissions: Array<Record<string, unknown>> = [];
+  questions: Array<Record<string, unknown>> = [];
+  modernPermissionEndpoint = true;
+  permissionListStatus = 200;
+  questionListStatus = 200;
   healthOk = true;
   currentDirectory = "C:/demo";
   resetNextRequests = 0;
+
+  get activeSseClients(): number {
+    return this.sseClients.size;
+  }
 
   async listen(): Promise<number> {
     await new Promise<void>((resolve, reject) => {
@@ -102,11 +115,36 @@ export class FakeOpenCodeServer {
         "cache-control": "no-store",
       });
       this.sseClients.add(response);
+      this.sseConnectionCount += 1;
       response.on("close", () => this.sseClients.delete(response));
       return;
     }
     if (method === "GET" && url.pathname === "/session") {
       this.sendJson(response, 200, this.sessions);
+      return;
+    }
+    if (method === "GET" && url.pathname === "/api/session/active") {
+      this.sendJson(response, 200, {
+        data: Object.fromEntries(
+          this.activeSessionIds.map((sessionId) => [sessionId, { type: "running" }]),
+        ),
+      });
+      return;
+    }
+    if (method === "GET" && url.pathname === "/permission") {
+      this.sendJson(
+        response,
+        this.permissionListStatus,
+        this.permissionListStatus === 200 ? this.permissions : { error: "permission_unavailable" },
+      );
+      return;
+    }
+    if (method === "GET" && url.pathname === "/question") {
+      this.sendJson(
+        response,
+        this.questionListStatus,
+        this.questionListStatus === 200 ? this.questions : { error: "question_unavailable" },
+      );
       return;
     }
     const sessionMatch = url.pathname.match(/^\/session\/([^/]+)$/);
@@ -142,6 +180,40 @@ export class FakeOpenCodeServer {
           ? String((body as { response?: string }).response)
           : "";
       this.permissionReplyResponses[permissionId] = reply;
+      this.sendJson(response, 200, true);
+      return;
+    }
+    const modernPermissionMatch = url.pathname.match(/^\/permission\/([^/]+)\/reply$/);
+    if (method === "POST" && modernPermissionMatch) {
+      if (!this.modernPermissionEndpoint) {
+        this.sendJson(response, 404, { error: "not_found" });
+        return;
+      }
+      const permissionId = modernPermissionMatch[1];
+      const reply =
+        typeof body === "object" && body && "reply" in body
+          ? String((body as { reply?: string }).reply)
+          : "";
+      this.permissionReplyResponses[permissionId] = reply;
+      this.sendJson(response, 200, true);
+      return;
+    }
+    const questionReplyMatch = url.pathname.match(/^\/question\/([^/]+)\/reply$/);
+    if (method === "POST" && questionReplyMatch) {
+      const answers =
+        typeof body === "object" && body && "answers" in body &&
+          Array.isArray((body as { answers?: unknown }).answers)
+          ? (body as { answers: string[][] }).answers
+          : [];
+      this.questionReplyAnswers[questionReplyMatch[1]] = answers;
+      this.questions = this.questions.filter((item) => item.id !== questionReplyMatch[1]);
+      this.sendJson(response, 200, true);
+      return;
+    }
+    const questionRejectMatch = url.pathname.match(/^\/question\/([^/]+)\/reject$/);
+    if (method === "POST" && questionRejectMatch) {
+      this.questionRejections.push(questionRejectMatch[1]);
+      this.questions = this.questions.filter((item) => item.id !== questionRejectMatch[1]);
       this.sendJson(response, 200, true);
       return;
     }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -122,12 +122,24 @@ class FakeCodex {
 
 class FakeOpenCodeManager {
   connected = false;
+  readonly routableSessions = new Set(["opencode-session-alpha"]);
+  readonly activeSessions = new Set(["opencode-session-alpha"]);
   readonly prompts: Array<{ sessionId: string; prompt: string }> = [];
 
   findInstanceBySession(sessionId: string) {
-    return this.connected && sessionId === "opencode-session-alpha"
+    return this.connected && this.routableSessions.has(sessionId)
       ? { port: 5100, cwd: "C:/demo" }
       : undefined;
+  }
+
+  findActiveInstanceBySession(sessionId: string) {
+    return this.connected && this.activeSessions.has(sessionId)
+      ? { port: 5100, cwd: "C:/demo" }
+      : undefined;
+  }
+
+  listInstances() {
+    return this.connected ? [{ port: 5100, cwd: "C:/demo" }] : [];
   }
 
   hasPendingSession(): boolean {
@@ -590,6 +602,146 @@ test("a closed opencode group prompt waits for the resumed HTTP session", async 
   }
 });
 
+test("OpenCode history remains routable metadata but only the foreground session is active", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-active-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    await store.upsertSession({
+      sessionId: "opencode-session-alpha",
+      cwd: "C:/demo",
+      status: "waiting",
+      source: "opencode",
+      runtime: "opencode",
+      managedByAssistant: true,
+    });
+    await store.upsertSession({
+      sessionId: "opencode-session-history",
+      cwd: "C:/demo",
+      status: "waiting",
+      source: "opencode",
+      runtime: "opencode",
+      managedByAssistant: true,
+    });
+    const opencode = new FakeOpenCodeManager();
+    opencode.connected = true;
+    opencode.routableSessions.add("opencode-session-history");
+    const controller = new BridgeController(
+      store,
+      new FakeFeishu() as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      opencode as unknown as OpenCodeManager,
+      controllerConfig(directory),
+    );
+
+    assert.equal(controller.health().activeSessions, 1);
+    assert.ok(opencode.findInstanceBySession("opencode-session-history"));
+    assert.equal(
+      opencode.findActiveInstanceBySession("opencode-session-history"),
+      undefined,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("private Feishu commands create workspace projects and queue new runtimes", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-new-runtime-"));
+  const dataDirectory = path.join(directory, "data");
+  const workspaceRoot = path.join(directory, "workspace");
+  try {
+    const store = new BridgeStore(dataDirectory, { defaultWorkspaceRoot: workspaceRoot });
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      { openId: "owner", chatId: "chat-owner", chatType: "p2p", boundAt: new Date().toISOString() },
+      code,
+    );
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(dataDirectory),
+    );
+
+    const cases: Array<{ command: string; runtime: string; projectName: string }> = [
+      { command: "新建 codex 主项目", runtime: "codex", projectName: "主项目" },
+      { command: "新建 Claude Code 内容工具", runtime: "claudecode", projectName: "内容工具" },
+      { command: "新建 opencode 演示项目", runtime: "opencode", projectName: "演示项目" },
+    ];
+    for (const [index, item] of cases.entries()) {
+      await controller.handleFeishuMessage(
+        messageEvent(`new-runtime-${index}`, "owner", item.command),
+      );
+      const expectedCwd = path.join(workspaceRoot, item.projectName);
+      assert.equal((await stat(expectedCwd)).isDirectory(), true);
+      const claim = controller.handleRuntimeLaunchClaim() as {
+        request?: {
+          requestId: string;
+          kind: string;
+          sessionId?: string;
+          runtime: string;
+          cwd: string;
+          projectName: string;
+          elevated: boolean;
+        };
+      };
+      assert.equal(claim.request?.kind, "new");
+      assert.equal(claim.request?.sessionId, undefined);
+      assert.equal(claim.request?.runtime, item.runtime);
+      assert.equal(claim.request?.cwd, expectedCwd);
+      assert.equal(claim.request?.projectName, item.projectName);
+      assert.equal(claim.request?.elevated, false);
+      await controller.handleRuntimeLaunchComplete({
+        requestId: claim.request!.requestId,
+        success: true,
+      });
+    }
+
+    await controller.handleFeishuMessage(
+      messageEvent("new-runtime-existing", "owner", "新建 codex 主项目"),
+    );
+    assert.match(feishu.replies.at(-1)?.text ?? "", /已找到项目/);
+    const existingClaim = controller.handleRuntimeLaunchClaim() as {
+      request?: { requestId: string; cwd: string };
+    };
+    assert.equal(existingClaim.request?.cwd, path.join(workspaceRoot, "主项目"));
+    await controller.handleRuntimeLaunchComplete({
+      requestId: existingClaim.request!.requestId,
+      success: true,
+    });
+
+    await controller.handleFeishuMessage(
+      messageEvent("new-runtime-failure", "owner", "新建 codex 启动失败项目"),
+    );
+    const failedClaim = controller.handleRuntimeLaunchClaim() as {
+      request?: { requestId: string };
+    };
+    await controller.handleRuntimeLaunchComplete({
+      requestId: failedClaim.request!.requestId,
+      success: false,
+      error: "本机找不到 Codex CLI",
+    });
+    assert.match(feishu.replies.at(-1)?.text ?? "", /Codex 未启动：本机找不到 Codex CLI/);
+
+    await controller.handleFeishuMessage(
+      messageEvent("new-runtime-invalid", "owner", "新建 codex ../越界项目"),
+    );
+    assert.match(feishu.replies.at(-1)?.text ?? "", /项目名不正确/);
+    assert.equal(
+      (controller.handleRuntimeLaunchClaim() as { request?: unknown }).request,
+      undefined,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a failed session group create waits for an explicit desktop retry", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-group-retry-"));
   try {
@@ -705,6 +857,7 @@ test("retry settings accept bounded integers and reject invalid values", async (
     );
 
     const saved = await controller.handleSettingsUpdate({
+      workspaceRoot: directory,
       autoRetryErrors: true,
       retryMaxAttempts: 20,
       retryIntervalSeconds: 600,
@@ -712,6 +865,7 @@ test("retry settings accept bounded integers and reject invalid values", async (
     });
     assert.equal(saved.ok, true);
     assert.deepEqual(store.getSettings(), {
+      workspaceRoot: path.resolve(directory),
       notifyActivity: false,
       notifyUserPrompts: false,
       autoRetryErrors: true,
@@ -727,6 +881,7 @@ test("retry settings accept bounded integers and reject invalid values", async (
       { retryIntervalSeconds: 601 },
       { retryJitterSeconds: -1 },
       { retryJitterSeconds: "3" },
+      { workspaceRoot: "relative-projects" },
     ]) {
       const result = await controller.handleSettingsUpdate(invalid);
       assert.equal(result.ok, false);
@@ -1234,7 +1389,7 @@ test("Claude AskUserQuestion answers are returned as updatedInput", async () => 
             { label: "仅构建", description: "只生成文件" },
             { label: "构建并发布", description: "生成并发布" },
           ],
-          multiSelect: false,
+          multiSelect: true,
         },
       ],
     };
@@ -1256,6 +1411,8 @@ test("Claude AskUserQuestion answers are returned as updatedInput", async () => 
               { label: "仅构建", description: "只生成文件" },
               { label: "构建并发布", description: "生成并发布" },
             ],
+            multiple: true,
+            custom: true,
           },
         ],
         claudeCodeOriginalInput: originalInput,
@@ -1269,7 +1426,7 @@ test("Claude AskUserQuestion answers are returned as updatedInput", async () => 
     }
     const questionCardId = feishu.cards[0]!.messageId;
     await controller.handleFeishuMessage(
-      messageEvent("claude-input-answer", "owner", "2", "p2p", questionCardId),
+      messageEvent("claude-input-answer", "owner", "1,2", "p2p", questionCardId),
     );
     const hookResult = await hookResultPromise as {
       hookSpecificOutput?: {
@@ -1280,10 +1437,103 @@ test("Claude AskUserQuestion answers are returned as updatedInput", async () => 
     assert.equal(hookResult.hookSpecificOutput?.permissionDecision, "allow");
     assert.deepEqual(hookResult.hookSpecificOutput?.updatedInput, {
       ...originalInput,
-      answers: { "选择发布方式": "构建并发布" },
+      answers: { "选择发布方式": "仅构建, 构建并发布" },
       annotations: {},
     });
     assert.equal(feishu.replies.at(-1)?.text, "Claude Code 已接收。");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Claude SessionEnd releases pending hooks without reviving the ended session", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-claude-end-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      {
+        openId: "owner",
+        chatId: "chat-owner",
+        chatType: "p2p",
+        boundAt: new Date().toISOString(),
+      },
+      code,
+    );
+    const sessionId = "claude-session-ending-with-hooks";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "running",
+      source: "startup",
+      runtime: "claudecode",
+      clientProcessId: process.pid,
+    });
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+
+    const approvalPromise = controller.handlePermissionHook({
+      hook_event_name: "PermissionRequest",
+      session_id: sessionId,
+      turn_id: "claude-approval-ending",
+      cwd: directory,
+      model: "claude-code",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      transcript_path: null,
+      runtime: "claudecode",
+    });
+    const inputPromise = controller.handleRequestUserInputHook({
+      hook_event_name: "PreToolUse",
+      session_id: sessionId,
+      turn_id: "claude-input-ending",
+      cwd: directory,
+      model: "claude-code",
+      runtime: "claudecode",
+      tool_name: "request_user_input",
+      tool_input: {
+        questions: [{
+          header: "确认",
+          id: "confirm",
+          question: "继续吗",
+          options: [{ label: "继续", description: "继续" }],
+        }],
+      },
+    });
+    while (
+      controller.health().pendingApprovals !== 1 ||
+      controller.health().pendingInputs !== 1
+    ) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    await controller.handleSessionEndHook({
+      hook_event_name: "SessionEnd",
+      session_id: sessionId,
+      cwd: directory,
+      reason: "prompt_input_exit",
+      transcript_path: null,
+      runtime: "claudecode",
+    });
+    assert.deepEqual(await approvalPromise, {});
+    assert.deepEqual(await inputPromise, {});
+    assert.equal(controller.health().pendingApprovals, 0);
+    assert.equal(controller.health().pendingInputs, 0);
+    assert.equal(store.getSession(sessionId)?.status, "ended");
+    assert.equal(
+      store.listApprovals().find((item) => item.sessionId === sessionId)?.resolution,
+      "local",
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

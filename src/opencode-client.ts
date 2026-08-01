@@ -1,13 +1,21 @@
 export type OpenCodePermissionResponse = "once" | "always" | "reject";
 
+export interface OpenCodeModel {
+  id?: string;
+  modelID?: string;
+  providerID?: string;
+  variant?: string;
+}
+
 export interface OpenCodeSession {
   id: string;
   title?: string;
   directory?: string;
   worktree?: string | null;
-  model?: string;
+  parentID?: string;
+  model?: string | OpenCodeModel;
   agent?: string;
-  version?: number;
+  version?: string | number;
   time?: {
     created?: number;
     updated?: number;
@@ -47,16 +55,63 @@ export interface OpenCodePermission {
   type?: string;
   description?: string;
   input?: unknown;
-  permission?: {
+  permission?: string | {
     allow?: boolean;
     ask?: boolean;
     deny?: boolean;
     option?: string;
   };
+  patterns?: string[];
+  metadata?: Record<string, unknown>;
+  always?: string[];
+  tool?: {
+    messageID?: string;
+    callID?: string;
+  };
   time?: {
     created?: number;
     updated?: number;
   };
+}
+
+export interface OpenCodeQuestionOption {
+  label: string;
+  description: string;
+}
+
+export interface OpenCodeQuestion {
+  question: string;
+  header: string;
+  options: OpenCodeQuestionOption[];
+  multiple?: boolean;
+  custom?: boolean;
+}
+
+export interface OpenCodeQuestionRequest {
+  id: string;
+  sessionID: string;
+  questions: OpenCodeQuestion[];
+  tool?: {
+    messageID?: string;
+    callID?: string;
+  };
+}
+
+export interface OpenCodeQuestionReplied {
+  sessionID: string;
+  requestID: string;
+  answers: string[][];
+}
+
+export interface OpenCodeQuestionRejected {
+  sessionID: string;
+  requestID: string;
+}
+
+export interface OpenCodePermissionReplied {
+  sessionID: string;
+  requestID: string;
+  reply: OpenCodePermissionResponse;
 }
 
 export interface OpenCodeEvent {
@@ -73,8 +128,14 @@ export interface OpenCodeMessagePartUpdatedProperties {
 
 export interface OpenCodeEventHandlers {
   onEvent?: (event: OpenCodeEvent) => void;
+  onPermissionAsked?: (permission: OpenCodePermission) => void;
   onPermissionUpdated?: (permission: OpenCodePermission) => void;
+  onPermissionReplied?: (permission: OpenCodePermissionReplied) => void;
+  onQuestionAsked?: (request: OpenCodeQuestionRequest) => void;
+  onQuestionReplied?: (reply: OpenCodeQuestionReplied) => void;
+  onQuestionRejected?: (rejection: OpenCodeQuestionRejected) => void;
   onSessionCreated?: (session: OpenCodeSession) => void;
+  onSessionUpdated?: (session: OpenCodeSession) => void;
   onSessionIdle?: (sessionID: string) => void;
   onSessionError?: (sessionID: string, error?: string) => void;
   onSessionDeleted?: (sessionID: string) => void;
@@ -101,6 +162,103 @@ export function asOpenCodePermission(value: unknown): OpenCodePermission | undef
     return undefined;
   }
   return value as unknown as OpenCodePermission;
+}
+
+export function asOpenCodeQuestionRequest(
+  value: unknown,
+): OpenCodeQuestionRequest | undefined {
+  if (
+    !isObject(value) ||
+    typeof value.id !== "string" ||
+    typeof value.sessionID !== "string" ||
+    !Array.isArray(value.questions)
+  ) {
+    return undefined;
+  }
+  const questions: OpenCodeQuestion[] = [];
+  for (const question of value.questions) {
+    if (
+      !isObject(question) ||
+      typeof question.question !== "string" ||
+      typeof question.header !== "string" ||
+      !Array.isArray(question.options)
+    ) {
+      return undefined;
+    }
+    const options: OpenCodeQuestionOption[] = [];
+    for (const option of question.options) {
+      if (!isObject(option) || typeof option.label !== "string") {
+        return undefined;
+      }
+      options.push({
+        label: option.label,
+        description: typeof option.description === "string" ? option.description : "",
+      });
+    }
+    questions.push({
+      question: question.question,
+      header: question.header,
+      options,
+      multiple: question.multiple === true,
+      custom: question.custom !== false,
+    });
+  }
+  return {
+    id: value.id,
+    sessionID: value.sessionID,
+    questions,
+    ...(isObject(value.tool) ? { tool: value.tool } : {}),
+  };
+}
+
+function asOpenCodeQuestionReplied(
+  value: unknown,
+): OpenCodeQuestionReplied | undefined {
+  if (
+    !isObject(value) ||
+    typeof value.sessionID !== "string" ||
+    typeof value.requestID !== "string" ||
+    !Array.isArray(value.answers)
+  ) {
+    return undefined;
+  }
+  const answers = value.answers.map((answer) =>
+    Array.isArray(answer)
+      ? answer.filter((item): item is string => typeof item === "string")
+      : [],
+  );
+  return { sessionID: value.sessionID, requestID: value.requestID, answers };
+}
+
+function asOpenCodeQuestionRejected(
+  value: unknown,
+): OpenCodeQuestionRejected | undefined {
+  if (
+    !isObject(value) ||
+    typeof value.sessionID !== "string" ||
+    typeof value.requestID !== "string"
+  ) {
+    return undefined;
+  }
+  return { sessionID: value.sessionID, requestID: value.requestID };
+}
+
+function asOpenCodePermissionReplied(
+  value: unknown,
+): OpenCodePermissionReplied | undefined {
+  if (
+    !isObject(value) ||
+    typeof value.sessionID !== "string" ||
+    typeof value.requestID !== "string" ||
+    !["once", "always", "reject"].includes(String(value.reply))
+  ) {
+    return undefined;
+  }
+  return {
+    sessionID: value.sessionID,
+    requestID: value.requestID,
+    reply: value.reply as OpenCodePermissionResponse,
+  };
 }
 
 export function asOpenCodeMessage(value: unknown): OpenCodeMessage | undefined {
@@ -174,10 +332,21 @@ function responseErrorMessage(
 export class OpenCodeClient {
   private readonly pendingUserMessages = new Map<string, string>();
 
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly defaultDirectory?: string,
+  ) {}
 
   private url(path: string): string {
     return `${this.baseUrl}${path}`;
+  }
+
+  private scopedPath(path: string, directory = this.defaultDirectory): string {
+    if (!directory) {
+      return path;
+    }
+    const separator = path.includes("?") ? "&" : "?";
+    return `${path}${separator}directory=${encodeURIComponent(directory)}`;
   }
 
   private async getJson(
@@ -260,7 +429,7 @@ export class OpenCodeClient {
   }
 
   async listSessions(): Promise<OpenCodeSession[]> {
-    const { response, body } = await this.getJson("/session", 10000);
+    const { response, body } = await this.getJson(this.scopedPath("/session"), 10000);
     if (!response.ok) {
       throw new Error(responseErrorMessage(response, "列出会话"));
     }
@@ -272,10 +441,31 @@ export class OpenCodeClient {
       .filter((item): item is OpenCodeSession => Boolean(item));
   }
 
+  async listActiveSessionIds(): Promise<string[]> {
+    const { response, body } = await this.getJson("/api/session/active", 5000);
+    if (response.status === 404 || response.status === 405) {
+      return [];
+    }
+    if (!response.ok) {
+      throw new Error(responseErrorMessage(response, "读取活动会话"));
+    }
+    if (!isObject(body) || !isObject(body.data)) {
+      return [];
+    }
+    return Object.entries(body.data)
+      .filter(
+        ([sessionId, status]) =>
+          sessionId.length > 0 &&
+          isObject(status) &&
+          status.type === "running",
+      )
+      .map(([sessionId]) => sessionId);
+  }
+
   async getSession(sessionId: string): Promise<OpenCodeSession | undefined> {
     try {
       const { response, body } = await this.getJson(
-        `/session/${encodeURIComponent(sessionId)}`,
+        this.scopedPath(`/session/${encodeURIComponent(sessionId)}`),
         10000,
       );
       if (!response.ok) {
@@ -288,7 +478,7 @@ export class OpenCodeClient {
   }
 
   async createSession(title?: string): Promise<OpenCodeSession> {
-    const response = await fetch(this.url("/session"), {
+    const response = await fetch(this.url(this.scopedPath("/session")), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(title ? { title } : {}),
@@ -315,12 +505,12 @@ export class OpenCodeClient {
     } = {},
   ): Promise<void> {
     const response = await fetch(
-      this.url(`/session/${encodeURIComponent(sessionId)}/prompt_async`),
+      this.url(this.scopedPath(`/session/${encodeURIComponent(sessionId)}/prompt_async`)),
       {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          model: options.model,
+          model: promptModel(options.model),
           agent: options.agent,
           noReply: options.noReply,
           parts: [{ type: "text", text }],
@@ -338,10 +528,25 @@ export class OpenCodeClient {
     permissionId: string,
     response: OpenCodePermissionResponse,
   ): Promise<void> {
-    const result = await fetch(
-      this.url(
+    const modern = await fetch(
+      this.url(this.scopedPath(`/permission/${encodeURIComponent(permissionId)}/reply`)),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reply: response }),
+        signal: AbortSignal.timeout(10000),
+      },
+    );
+    if (modern.ok) {
+      return;
+    }
+    if (modern.status !== 404 && modern.status !== 405) {
+      throw new Error(responseErrorMessage(modern, "回复权限"));
+    }
+    const legacy = await fetch(
+      this.url(this.scopedPath(
         `/session/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(permissionId)}`,
-      ),
+      )),
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -349,14 +554,70 @@ export class OpenCodeClient {
         signal: AbortSignal.timeout(10000),
       },
     );
-    if (!result.ok) {
-      throw new Error(responseErrorMessage(result, "回复权限"));
+    if (!legacy.ok) {
+      throw new Error(responseErrorMessage(legacy, "回复权限"));
+    }
+  }
+
+  async listPermissions(): Promise<OpenCodePermission[]> {
+    const { response, body } = await this.getJson(this.scopedPath("/permission"), 10000);
+    if (response.status === 404 || response.status === 405) {
+      return [];
+    }
+    if (!response.ok) {
+      throw new Error(responseErrorMessage(response, "读取待处理权限"));
+    }
+    return Array.isArray(body)
+      ? body.map(asOpenCodePermission).filter((item): item is OpenCodePermission => Boolean(item))
+      : [];
+  }
+
+  async listQuestions(): Promise<OpenCodeQuestionRequest[]> {
+    const { response, body } = await this.getJson(this.scopedPath("/question"), 10000);
+    if (response.status === 404 || response.status === 405) {
+      return [];
+    }
+    if (!response.ok) {
+      throw new Error(responseErrorMessage(response, "读取待处理问题"));
+    }
+    return Array.isArray(body)
+      ? body
+          .map(asOpenCodeQuestionRequest)
+          .filter((item): item is OpenCodeQuestionRequest => Boolean(item))
+      : [];
+  }
+
+  async replyQuestion(requestId: string, answers: string[][]): Promise<void> {
+    const response = await fetch(
+      this.url(this.scopedPath(`/question/${encodeURIComponent(requestId)}/reply`)),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ answers }),
+        signal: AbortSignal.timeout(10000),
+      },
+    );
+    if (!response.ok) {
+      throw new Error(responseErrorMessage(response, "回复问题"));
+    }
+  }
+
+  async rejectQuestion(requestId: string): Promise<void> {
+    const response = await fetch(
+      this.url(this.scopedPath(`/question/${encodeURIComponent(requestId)}/reject`)),
+      {
+        method: "POST",
+        signal: AbortSignal.timeout(10000),
+      },
+    );
+    if (!response.ok) {
+      throw new Error(responseErrorMessage(response, "拒绝问题"));
     }
   }
 
   async abort(sessionId: string): Promise<void> {
     const response = await fetch(
-      this.url(`/session/${encodeURIComponent(sessionId)}/abort`),
+      this.url(this.scopedPath(`/session/${encodeURIComponent(sessionId)}/abort`)),
       {
         method: "POST",
         signal: AbortSignal.timeout(10000),
@@ -369,7 +630,7 @@ export class OpenCodeClient {
 
   async undo(sessionId: string): Promise<void> {
     const response = await fetch(
-      this.url(`/session/${encodeURIComponent(sessionId)}/undo`),
+      this.url(this.scopedPath(`/session/${encodeURIComponent(sessionId)}/undo`)),
       {
         method: "POST",
         signal: AbortSignal.timeout(10000),
@@ -382,7 +643,9 @@ export class OpenCodeClient {
 
   async listMessages(sessionId: string, limit = 50): Promise<OpenCodeMessage[]> {
     const { response, body } = await this.getJson(
-      `/session/${encodeURIComponent(sessionId)}/message?limit=${Math.max(1, limit)}`,
+      this.scopedPath(
+        `/session/${encodeURIComponent(sessionId)}/message?limit=${Math.max(1, limit)}`,
+      ),
       10000,
     );
     if (!response.ok) {
@@ -440,7 +703,7 @@ export class OpenCodeClient {
     const run = async (): Promise<void> => {
       this.pendingUserMessages.clear();
       try {
-        const response = await fetch(this.url("/event"), {
+        const response = await fetch(this.url(this.scopedPath("/event")), {
           signal: controller.signal,
           headers: { accept: "text/event-stream" },
         });
@@ -481,6 +744,7 @@ export class OpenCodeClient {
           return;
         }
         buffer += decoder.decode(value, { stream: true });
+        buffer = buffer.replace(/\r\n/gu, "\n");
         let boundary = buffer.indexOf("\n\n");
         while (boundary >= 0) {
           const frame = buffer.slice(0, boundary);
@@ -531,6 +795,13 @@ export class OpenCodeClient {
     handlers.onEvent?.({ type: eventType, properties });
 
     switch (eventType) {
+      case "permission.asked": {
+        const permission = asOpenCodePermission(properties);
+        if (permission) {
+          handlers.onPermissionAsked?.(permission);
+        }
+        break;
+      }
       case "permission.updated": {
         const permission = asOpenCodePermission(properties);
         if (permission) {
@@ -538,10 +809,45 @@ export class OpenCodeClient {
         }
         break;
       }
+      case "permission.replied": {
+        const permission = asOpenCodePermissionReplied(properties);
+        if (permission) {
+          handlers.onPermissionReplied?.(permission);
+        }
+        break;
+      }
+      case "question.asked": {
+        const request = asOpenCodeQuestionRequest(properties);
+        if (request) {
+          handlers.onQuestionAsked?.(request);
+        }
+        break;
+      }
+      case "question.replied": {
+        const reply = asOpenCodeQuestionReplied(properties);
+        if (reply) {
+          handlers.onQuestionReplied?.(reply);
+        }
+        break;
+      }
+      case "question.rejected": {
+        const rejection = asOpenCodeQuestionRejected(properties);
+        if (rejection) {
+          handlers.onQuestionRejected?.(rejection);
+        }
+        break;
+      }
       case "session.created": {
         const session = extractOpenCodeSession(properties);
         if (session) {
           handlers.onSessionCreated?.(session);
+        }
+        break;
+      }
+      case "session.updated": {
+        const session = extractOpenCodeSession(properties);
+        if (session) {
+          handlers.onSessionUpdated?.(session);
         }
         break;
       }
@@ -642,6 +948,20 @@ export class OpenCodeClient {
       part,
     });
   }
+}
+
+function promptModel(value: string | undefined): OpenCodeModel | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const separator = value.indexOf("/");
+  if (separator <= 0 || separator >= value.length - 1) {
+    return undefined;
+  }
+  return {
+    providerID: value.slice(0, separator),
+    modelID: value.slice(separator + 1),
+  };
 }
 
 export function isEventStreamUnsupported(): boolean {

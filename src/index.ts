@@ -18,7 +18,9 @@ if (!bridgeConfig.appId || !bridgeConfig.appSecret) {
   process.exit(1);
 }
 
-const store = new BridgeStore(bridgeConfig.dataDirectory);
+const store = new BridgeStore(bridgeConfig.dataDirectory, {
+  defaultWorkspaceRoot: bridgeConfig.defaultWorkspaceRoot,
+});
 await store.init();
 const controlToken = await store.getOrCreateControlToken();
 
@@ -40,6 +42,11 @@ const opencode = new OpenCodeManager(
       onSessionCreated: (session) => {
         void controller.handleOpenCodeSessionCreated(session).catch((error) => {
           console.error("[opencode] Could not register session:", error);
+        });
+      },
+      onSessionUpdated: (session) => {
+        void controller.handleOpenCodeSessionCreated(session).catch((error) => {
+          console.error("[opencode] Could not update session:", error);
         });
       },
       onSessionIdle: (sessionId) => {
@@ -67,9 +74,34 @@ const opencode = new OpenCodeManager(
           console.error("[opencode] Could not handle session compaction:", error);
         });
       },
+      onPermissionAsked: (permission) => {
+        void controller.handleOpenCodePermissionUpdated(permission).catch((error) => {
+          console.error("[opencode] Could not handle permission request:", error);
+        });
+      },
       onPermissionUpdated: (permission) => {
         void controller.handleOpenCodePermissionUpdated(permission).catch((error) => {
-          console.error("[opencode] Could not handle permission update:", error);
+          console.error("[opencode] Could not handle legacy permission update:", error);
+        });
+      },
+      onPermissionReplied: (reply) => {
+        void controller.handleOpenCodePermissionReplied(reply).catch((error) => {
+          console.error("[opencode] Could not handle permission reply:", error);
+        });
+      },
+      onQuestionAsked: (request) => {
+        void controller.handleOpenCodeQuestionAsked(request).catch((error) => {
+          console.error("[opencode] Could not handle question request:", error);
+        });
+      },
+      onQuestionReplied: (reply) => {
+        void controller.handleOpenCodeQuestionReplied(reply).catch((error) => {
+          console.error("[opencode] Could not handle question reply:", error);
+        });
+      },
+      onQuestionRejected: (rejection) => {
+        void controller.handleOpenCodeQuestionRejected(rejection).catch((error) => {
+          console.error("[opencode] Could not handle question rejection:", error);
         });
       },
       onMessagePartUpdated: (properties) => {
@@ -147,7 +179,7 @@ const hookServer = startHookHttpServer(
   {
     health: () => ({
       ...controller.health(),
-      version: "0.16.0",
+      version: "0.17.1",
       processId: process.pid,
       startedAt: serviceStartedAt,
       feishu: wsClient.getConnectionStatus(),
@@ -196,7 +228,7 @@ process.on("SIGTERM", () => {
 
 console.log(`Starting Feishu long connection for app ${bridgeConfig.appId.slice(0, 8)}...`);
 console.log(
-  `Commands: “${bridgeConfig.bindCommand}”, “状态”, “会话”, “别名”, “排队”, “发文件”, “帮助”. Multiple Codex windows are routed by alias or session id.`,
+  `Commands: “${bridgeConfig.bindCommand}”, “新建 codex 项目名”, “工作区”, “状态”, “会话”, “别名”, “排队”, “发文件”, “帮助”. Multiple assistant windows are routed by alias or session id.`,
 );
 
 void controller.initializeSessionGroups()

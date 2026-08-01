@@ -110,6 +110,7 @@ test("persists notification and automation settings", async () => {
     const store = new BridgeStore(directory);
     await store.init();
     assert.deepEqual(store.getSettings(), {
+      workspaceRoot: "",
       notifyActivity: false,
       notifyUserPrompts: false,
       autoRetryErrors: false,
@@ -119,6 +120,7 @@ test("persists notification and automation settings", async () => {
       autoApprove: false,
     });
     await store.updateSettings({
+      workspaceRoot: directory,
       notifyActivity: true,
       notifyUserPrompts: true,
       autoRetryErrors: true,
@@ -130,6 +132,7 @@ test("persists notification and automation settings", async () => {
     const reopened = new BridgeStore(directory);
     await reopened.init();
     assert.deepEqual(reopened.getSettings(), {
+      workspaceRoot: path.resolve(directory),
       notifyActivity: true,
       notifyUserPrompts: true,
       autoRetryErrors: true,

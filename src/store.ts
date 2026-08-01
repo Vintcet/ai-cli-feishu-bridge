@@ -22,7 +22,8 @@ const emptyBindings = (): BindingStore => ({ users: {} });
 const emptySessions = (): SessionStore => ({ sessions: {} });
 const emptyRoutes = (): RouteStore => ({ messages: {}, processedInbound: {} });
 const emptyApprovals = (): ApprovalStore => ({ requests: {} });
-const defaultSettings = (): BridgeSettings => ({
+const defaultSettings = (workspaceRoot = ""): BridgeSettings => ({
+  workspaceRoot,
   notifyActivity: false,
   notifyUserPrompts: false,
   autoRetryErrors: false,
@@ -47,6 +48,8 @@ function integerInRange(
 }
 
 export interface BridgeStoreOptions {
+  /** 首次运行时使用的默认项目工作区根目录。 */
+  defaultWorkspaceRoot?: string;
   /** 高频会话写入合并落盘的时间窗口（毫秒）。 */
   persistDebounceMs?: number;
   /** 已结束会话的保留时长（毫秒），超过后从 sessions.json 中清理。 */
@@ -73,6 +76,7 @@ export class BridgeStore {
 
   private readonly persistDebounceMs: number;
   private readonly endedSessionRetentionMs: number;
+  private readonly defaultWorkspaceRoot: string;
   private readonly dirtyFiles = new Set<string>();
   private flushTimer: ReturnType<typeof setTimeout> | undefined;
   private safetyTimer: ReturnType<typeof setInterval> | undefined;
@@ -91,6 +95,9 @@ export class BridgeStore {
     this.persistDebounceMs = options.persistDebounceMs ?? defaultPersistDebounceMs;
     this.endedSessionRetentionMs =
       options.endedSessionRetentionMs ?? defaultEndedSessionRetentionMs;
+    this.defaultWorkspaceRoot = options.defaultWorkspaceRoot
+      ? path.resolve(options.defaultWorkspaceRoot)
+      : "";
   }
 
   async init(): Promise<void> {
@@ -100,7 +107,7 @@ export class BridgeStore {
       this.readJson(this.sessionFile, emptySessions()),
       this.readJson(this.routeFile, emptyRoutes()),
       this.readJson(this.approvalFile, emptyApprovals()),
-      this.readJson(this.settingsFile, defaultSettings()),
+      this.readJson(this.settingsFile, defaultSettings(this.defaultWorkspaceRoot)),
     ]);
     this.bindings = bindings;
     this.sessions = sessions;
@@ -115,6 +122,11 @@ export class BridgeStore {
       ? settings as Partial<BridgeSettings>
       : {};
     this.settings = {
+      workspaceRoot:
+        typeof loadedSettings.workspaceRoot === "string" &&
+          loadedSettings.workspaceRoot.trim()
+          ? path.resolve(loadedSettings.workspaceRoot.trim())
+          : this.defaultWorkspaceRoot,
       notifyActivity: loadedSettings.notifyActivity === true,
       notifyUserPrompts: loadedSettings.notifyUserPrompts === true,
       autoRetryErrors: loadedSettings.autoRetryErrors === true,
@@ -210,6 +222,10 @@ export class BridgeStore {
   async updateSettings(value: Partial<BridgeSettings>): Promise<BridgeSettings> {
     return this.mutate(async () => {
       this.settings = {
+        workspaceRoot:
+          typeof value.workspaceRoot === "string" && value.workspaceRoot.trim()
+            ? path.resolve(value.workspaceRoot.trim())
+            : this.settings.workspaceRoot,
         notifyActivity:
           typeof value.notifyActivity === "boolean"
             ? value.notifyActivity

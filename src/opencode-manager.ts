@@ -7,6 +7,7 @@ import { OpenCodeClient } from "./opencode-client.js";
 import type {
   OpenCodeEventHandlers,
   OpenCodePermissionResponse,
+  OpenCodeQuestionRequest,
   OpenCodeSession,
 } from "./opencode-client.js";
 
@@ -17,6 +18,7 @@ export interface OpenCodeInstance {
   cwd: string;
   client: OpenCodeClient;
   connectedAt: string;
+  allowHistoricalFallback: boolean;
   closeSubscription: () => void;
 }
 
@@ -34,8 +36,11 @@ export class OpenCodeManager {
   private readonly instances = new Map<number, OpenCodeInstance>();
   private readonly pendingPorts = new Set<number>();
   private readonly pendingSessionIds = new Map<number, string>();
+  private readonly assistantLaunchPorts = new Set<number>();
   private readonly retryTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private readonly sessionPorts = new Map<string, number>();
+  private readonly foregroundSessions = new Map<number, string>();
+  private readonly sessionMetadata = new Map<string, OpenCodeSession>();
   private readonly connectingPorts = new Set<number>();
   private readonly discoveryMisses = new Map<number, number>();
   private readonly basePort: number;
@@ -82,6 +87,15 @@ export class OpenCodeManager {
     return this.instances.get(port);
   }
 
+  findActiveInstanceBySession(sessionId: string): OpenCodeInstance | undefined {
+    for (const [port, activeSessionId] of this.foregroundSessions) {
+      if (activeSessionId === sessionId) {
+        return this.instances.get(port);
+      }
+    }
+    return undefined;
+  }
+
   hasPendingSession(sessionId: string): boolean {
     return [...this.pendingSessionIds.values()].includes(sessionId);
   }
@@ -89,6 +103,7 @@ export class OpenCodeManager {
   async launch(cwd: string, sessionId?: string): Promise<OpenCodeLaunchResult> {
     const port = await this.allocatePort();
     this.pendingPorts.add(port);
+    this.assistantLaunchPorts.add(port);
     if (sessionId) {
       this.pendingSessionIds.set(port, sessionId);
     }
@@ -111,8 +126,11 @@ export class OpenCodeManager {
           this.sessionPorts.delete(sessionId);
         }
       }
+      this.foregroundSessions.delete(port);
     }
     this.pendingPorts.delete(port);
+    this.pendingSessionIds.delete(port);
+    this.assistantLaunchPorts.delete(port);
     const timer = this.retryTimers.get(port);
     if (timer) {
       clearTimeout(timer);
@@ -184,7 +202,7 @@ export class OpenCodeManager {
   }
 
   private async connect(port: number, cwd: string): Promise<void> {
-    const client = new OpenCodeClient(`http://127.0.0.1:${port}`);
+    const client = new OpenCodeClient(`http://127.0.0.1:${port}`, cwd);
     const healthy = await client.health();
     if (!healthy) {
       throw new Error(`opencode 端口 ${port} 未就绪`);
@@ -192,50 +210,158 @@ export class OpenCodeManager {
     const wrappedHandlers: OpenCodeEventHandlers = {
       ...this.handlers.eventHandlers,
       onSessionCreated: (session) => {
-        this.rememberSession(port, session.id);
+        this.observeSession(port, cwd, session, true);
         this.handlers.eventHandlers.onSessionCreated?.(session);
       },
+      onSessionUpdated: (session) => {
+        this.observeSession(port, cwd, session, true);
+        this.handlers.eventHandlers.onSessionUpdated?.(session);
+      },
       onSessionDeleted: (sessionId) => {
-        this.forgetSession(sessionId);
+        this.forgetSession(sessionId, port);
         this.handlers.eventHandlers.onSessionDeleted?.(sessionId);
       },
+      onSessionIdle: (sessionId) => {
+        this.observeSessionActivity(port, cwd, sessionId);
+        this.handlers.eventHandlers.onSessionIdle?.(sessionId);
+      },
+      onSessionError: (sessionId, error) => {
+        this.observeSessionActivity(port, cwd, sessionId);
+        this.handlers.eventHandlers.onSessionError?.(sessionId, error);
+      },
+      onSessionStatus: (sessionId, status) => {
+        this.observeSessionActivity(port, cwd, sessionId);
+        this.handlers.eventHandlers.onSessionStatus?.(sessionId, status);
+      },
+      onSessionCompacted: (sessionId) => {
+        this.observeSessionActivity(port, cwd, sessionId);
+        this.handlers.eventHandlers.onSessionCompacted?.(sessionId);
+      },
+      onMessageUpdated: (message) => {
+        if (message.sessionID) {
+          this.observeSessionActivity(port, cwd, message.sessionID);
+        }
+        this.handlers.eventHandlers.onMessageUpdated?.(message);
+      },
+      onMessagePartUpdated: (properties) => {
+        const sessionId = properties.sessionID ?? properties.part?.sessionID;
+        if (sessionId) {
+          this.observeSessionActivity(port, cwd, sessionId);
+        }
+        this.handlers.eventHandlers.onMessagePartUpdated?.(properties);
+      },
+      onPermissionAsked: (permission) => {
+        if (permission.sessionID) {
+          this.rememberSession(port, permission.sessionID);
+        }
+        this.handlers.eventHandlers.onPermissionAsked?.(permission);
+      },
+      onPermissionUpdated: (permission) => {
+        if (permission.sessionID) {
+          this.rememberSession(port, permission.sessionID);
+        }
+        this.handlers.eventHandlers.onPermissionUpdated?.(permission);
+      },
+      onQuestionAsked: (request) => {
+        this.rememberSession(port, request.sessionID);
+        this.handlers.eventHandlers.onQuestionAsked?.(request);
+      },
+      onPermissionReplied: (reply) => {
+        this.rememberSession(port, reply.sessionID);
+        this.handlers.eventHandlers.onPermissionReplied?.(reply);
+      },
+      onQuestionReplied: (reply) => {
+        this.rememberSession(port, reply.sessionID);
+        this.handlers.eventHandlers.onQuestionReplied?.(reply);
+      },
+      onQuestionRejected: (rejection) => {
+        this.rememberSession(port, rejection.sessionID);
+        this.handlers.eventHandlers.onQuestionRejected?.(rejection);
+      },
       onDisconnected: () => {
-        void this.handleInstanceSubscriptionClosed(port).catch((error) => {
+        void this.handleInstanceSubscriptionClosed(port, client).catch((error) => {
           console.warn(`[opencode] 端口 ${port} 订阅结束后处理失败：`, error);
         });
       },
     };
     const { close: closeSubscription } = client.subscribe(wrappedHandlers);
+    const previous = this.instances.get(port);
+    const launchedByAssistant = this.assistantLaunchPorts.has(port);
+    const pendingSessionId = this.pendingSessionIds.get(port);
     const instance: OpenCodeInstance = {
       port,
       cwd,
       client,
       connectedAt: new Date().toISOString(),
+      allowHistoricalFallback:
+        previous?.allowHistoricalFallback ?? !launchedByAssistant,
       closeSubscription,
     };
     this.instances.set(port, instance);
+    previous?.closeSubscription();
     this.pendingPorts.delete(port);
-    void this.seedSessions(instance);
-    const pendingSessionId = this.pendingSessionIds.get(port);
-    if (pendingSessionId) {
-      this.pendingSessionIds.delete(port);
-      void this.seedPendingSession(instance, pendingSessionId);
-    }
+    this.pendingSessionIds.delete(port);
+    this.assistantLaunchPorts.delete(port);
+    void this.bootstrapInstance(instance, pendingSessionId);
     this.handlers.onInstanceConnected(port, cwd);
   }
 
-  private async seedSessions(instance: OpenCodeInstance): Promise<void> {
+  private async bootstrapInstance(
+    instance: OpenCodeInstance,
+    pendingSessionId?: string,
+  ): Promise<void> {
+    if (pendingSessionId) {
+      await this.seedPendingSession(instance, pendingSessionId);
+    }
+    const seededActive = await this.seedActiveSession(instance);
+    if (
+      !pendingSessionId &&
+      !seededActive &&
+      instance.allowHistoricalFallback &&
+      !this.foregroundSessions.has(instance.port)
+    ) {
+      await this.seedRecentSessionCandidate(instance);
+    }
+    await this.seedPendingInteractions(instance);
+  }
+
+  private async seedActiveSession(instance: OpenCodeInstance): Promise<boolean> {
+    try {
+      const sessionIds = await instance.client.listActiveSessionIds();
+      const sessions = (
+        await Promise.all(sessionIds.map((sessionId) => instance.client.getSession(sessionId)))
+      ).filter((session): session is OpenCodeSession => Boolean(session));
+      const candidate = selectMostRecentSession(
+        sessions.filter((session) => isForegroundSession(session, instance.cwd)),
+      );
+      if (!candidate || this.foregroundSessions.has(instance.port)) {
+        return this.foregroundSessions.has(instance.port);
+      }
+      this.observeSession(instance.port, instance.cwd, candidate, true);
+      this.handlers.eventHandlers.onSessionCreated?.(candidate);
+      return true;
+    } catch (error) {
+      console.warn(`[opencode] 端口 ${instance.port} 同步运行中会话失败：`, error);
+      return this.foregroundSessions.has(instance.port);
+    }
+  }
+
+  private async seedRecentSessionCandidate(instance: OpenCodeInstance): Promise<void> {
     try {
       const sessions = await instance.client.listSessions();
-      for (const session of sessions) {
-        if (!isSessionWithinProject(session, instance.cwd)) {
-          continue;
-        }
-        this.rememberSession(instance.port, session.id);
-        this.handlers.eventHandlers.onSessionCreated?.(session);
+      const candidate = selectMostRecentSession(
+        sessions.filter((session) => isForegroundSession(session, instance.cwd)),
+      );
+      if (!candidate || this.foregroundSessions.has(instance.port)) {
+        return;
       }
+      this.observeSession(instance.port, instance.cwd, candidate, true);
+      this.handlers.eventHandlers.onSessionCreated?.(candidate);
+      console.log(
+        `[opencode] 端口 ${instance.port} 自动发现时暂用最近会话 #${candidate.id}。`,
+      );
     } catch (error) {
-      console.warn(`[opencode] 端口 ${instance.port} 同步会话失败：`, error);
+      console.warn(`[opencode] 端口 ${instance.port} 同步最近会话失败：`, error);
     }
   }
 
@@ -251,10 +377,10 @@ export class OpenCodeManager {
         );
         return;
       }
-      if (this.sessionPorts.get(session.id) === instance.port) {
+      if (this.foregroundSessions.get(instance.port) === session.id) {
         return;
       }
-      this.rememberSession(instance.port, session.id);
+      this.observeSession(instance.port, instance.cwd, session, true, true);
       this.handlers.eventHandlers.onSessionCreated?.(session);
       console.log(
         `[opencode] 端口 ${instance.port} 登记恢复的会话 #${session.id}。`,
@@ -264,12 +390,83 @@ export class OpenCodeManager {
     }
   }
 
+  private async seedPendingInteractions(instance: OpenCodeInstance): Promise<void> {
+    const [permissionsResult, questionsResult] = await Promise.allSettled([
+      instance.client.listPermissions(),
+      instance.client.listQuestions(),
+    ]);
+    if (permissionsResult.status === "fulfilled") {
+      const permissions = permissionsResult.value;
+      for (const permission of permissions) {
+        if (permission.sessionID) {
+          this.rememberSession(instance.port, permission.sessionID);
+        }
+        this.handlers.eventHandlers.onPermissionAsked?.(permission);
+      }
+    } else {
+      console.warn(
+        `[opencode] 端口 ${instance.port} 同步待处理权限失败：`,
+        permissionsResult.reason,
+      );
+    }
+    if (questionsResult.status === "fulfilled") {
+      const questions = questionsResult.value;
+      for (const question of questions) {
+        this.rememberSession(instance.port, question.sessionID);
+        this.handlers.eventHandlers.onQuestionAsked?.(question);
+      }
+    } else {
+      console.warn(
+        `[opencode] 端口 ${instance.port} 同步待处理问题失败：`,
+        questionsResult.reason,
+      );
+    }
+  }
+
   rememberSession(port: number, sessionId: string): void {
     this.sessionPorts.set(sessionId, port);
   }
 
-  forgetSession(sessionId: string): void {
-    this.sessionPorts.delete(sessionId);
+  forgetSession(sessionId: string, port?: number): void {
+    if (port === undefined || this.sessionPorts.get(sessionId) === port) {
+      this.sessionPorts.delete(sessionId);
+    }
+    for (const [activePort, activeSessionId] of this.foregroundSessions) {
+      if (
+        activeSessionId === sessionId &&
+        (port === undefined || activePort === port)
+      ) {
+        this.foregroundSessions.delete(activePort);
+      }
+    }
+    if (port === undefined) {
+      this.sessionMetadata.delete(sessionId);
+    }
+  }
+
+  private observeSession(
+    port: number,
+    cwd: string,
+    session: OpenCodeSession,
+    activate: boolean,
+    allowDifferentDirectory = false,
+  ): void {
+    this.sessionMetadata.set(session.id, session);
+    this.rememberSession(port, session.id);
+    if (
+      activate &&
+      (allowDifferentDirectory || isForegroundSession(session, cwd))
+    ) {
+      this.foregroundSessions.set(port, session.id);
+    }
+  }
+
+  private observeSessionActivity(port: number, cwd: string, sessionId: string): void {
+    this.rememberSession(port, sessionId);
+    const session = this.sessionMetadata.get(sessionId);
+    if (!session || isForegroundSession(session, cwd)) {
+      this.foregroundSessions.set(port, sessionId);
+    }
   }
 
   async sendPrompt(
@@ -298,6 +495,34 @@ export class OpenCodeManager {
       throw new Error("找不到对应的 opencode 实例");
     }
     await instance.client.replyPermission(sessionId, permissionId, response);
+  }
+
+  async replyQuestion(
+    sessionId: string,
+    requestId: string,
+    answers: string[][],
+  ): Promise<void> {
+    const instance = this.findInstanceBySession(sessionId);
+    if (!instance) {
+      throw new Error("找不到对应的 opencode 实例");
+    }
+    await instance.client.replyQuestion(requestId, answers);
+  }
+
+  async rejectQuestion(sessionId: string, requestId: string): Promise<void> {
+    const instance = this.findInstanceBySession(sessionId);
+    if (!instance) {
+      throw new Error("找不到对应的 opencode 实例");
+    }
+    await instance.client.rejectQuestion(requestId);
+  }
+
+  async listQuestions(sessionId: string): Promise<OpenCodeQuestionRequest[]> {
+    const instance = this.findInstanceBySession(sessionId);
+    if (!instance) {
+      return [];
+    }
+    return instance.client.listQuestions();
   }
 
   async listSessions(port: number): Promise<OpenCodeSession[]> {
@@ -397,9 +622,12 @@ export class OpenCodeManager {
     }
   }
 
-  private async handleInstanceSubscriptionClosed(port: number): Promise<void> {
+  private async handleInstanceSubscriptionClosed(
+    port: number,
+    disconnectedClient: OpenCodeClient,
+  ): Promise<void> {
     const instance = this.instances.get(port);
-    if (!instance) {
+    if (!instance || instance.client !== disconnectedClient) {
       return;
     }
     if (this.connectingPorts.has(port)) {
@@ -483,16 +711,27 @@ async function defaultIsLocalPortAvailable(port: number): Promise<boolean> {
   });
 }
 
-function isSessionWithinProject(
-  session: OpenCodeSession,
-  instanceCwd: string,
-): boolean {
+function isForegroundSession(session: OpenCodeSession, instanceCwd: string): boolean {
+  if (session.parentID) {
+    return false;
+  }
   if (!session.directory || !instanceCwd) {
     return true;
   }
-  const child = normalizePath(session.directory);
-  const parent = normalizePath(instanceCwd);
-  return child === parent || child.startsWith(`${parent}/`);
+  return normalizePath(session.directory) === normalizePath(instanceCwd);
+}
+
+function selectMostRecentSession(
+  sessions: OpenCodeSession[],
+): OpenCodeSession | undefined {
+  return [...sessions].sort(
+    (left, right) => sessionUpdatedAt(right) - sessionUpdatedAt(left),
+  )[0];
+}
+
+function sessionUpdatedAt(session: OpenCodeSession): number {
+  const updated = session.time?.updated ?? session.time?.created ?? 0;
+  return Number.isFinite(updated) ? updated : 0;
 }
 
 function normalizePath(value: string): string {

@@ -2,6 +2,7 @@ import type {
   ApprovalRecord,
   ApprovalResolution,
   SessionRecord,
+  UserInputAnswers,
   UserInputQuestion,
 } from "./domain.js";
 import {
@@ -144,15 +145,19 @@ export function buildUserInputCard(
         (option, optionIndex) =>
           `${optionIndex + 1}. **${truncate(option.label, 80)}**${
             option.description ? ` — ${truncate(option.description, 180)}` : ""
-          }`,
+          }${option.preview ? `\n   > 预览：${truncate(option.preview.replace(/\s+/gu, " "), 260)}` : ""}`,
       )
       .join("\n");
+    const behaviorNotes = [
+      question.multiple ? "可多选" : undefined,
+      question.custom === false ? "仅限所列选项" : "可填写自定义答案",
+    ].filter(Boolean).join(" · ");
     return [
       {
         tag: "div",
         text: {
           tag: "lark_md",
-          content: `**${questionIndex + 1}. ${truncate(question.header, 80)}**\n${truncate(question.question, 600)}${question.isSecret ? "\n\n_此答案不会在处理结果卡片中回显。_" : ""}${options ? `\n\n${options}` : ""}`,
+          content: `**${questionIndex + 1}. ${truncate(question.header, 80)}**\n${truncate(question.question, 600)}\n_${behaviorNotes}_${question.isSecret ? "\n\n_此答案不会在处理结果卡片中回显。_" : ""}${options ? `\n\n${options}` : ""}`,
         },
       },
       ...(questionIndex < questions.length - 1 ? [{ tag: "hr" }] : []),
@@ -160,7 +165,12 @@ export function buildUserInputCard(
   });
 
   const actions: Record<string, unknown>[] = [];
-  if (questions.length === 1 && questions[0]!.options.length <= 3) {
+  if (
+    questions.length === 1 &&
+    !questions[0]!.multiple &&
+    questions[0]!.options.length > 0 &&
+    questions[0]!.options.length <= 3
+  ) {
     for (const option of questions[0]!.options) {
       actions.push({
         tag: "button",
@@ -186,9 +196,7 @@ export function buildUserInputCard(
     },
   });
 
-  const replyHint = questions.length === 1
-    ? "也可以引用本卡片回复选项编号、选项文字或自定义答案。"
-    : `请引用本卡片，按问题顺序回复 ${questions.length} 个答案，并用中文分号“；”分隔，例如：1；2；自定义答案。`;
+  const replyHint = inputReplyHint(questions);
   return {
     config: { wide_screen_mode: true, update_multi: true },
     header: {
@@ -217,20 +225,22 @@ export function buildUserInputCard(
 export function buildResolvedUserInputCard(
   session: SessionRecord,
   questions: UserInputQuestion[],
-  answers: Record<string, string> | undefined,
-  resolution: "answered" | "local" | "timeout",
+  answers: UserInputAnswers | undefined,
+  resolution: "answered" | "local" | "timeout" | "rejected",
 ): Card {
   const runtime = runtimeDisplayName(session.runtime);
   const result = resolution === "answered"
     ? questions
         .map(
             (question, index) =>
-            `${index + 1}. **${truncate(question.header, 60)}：** ${question.isSecret ? "已提供（已隐藏）" : truncate(answers?.[question.id] ?? "", 300)}`,
+            `${index + 1}. **${truncate(question.header, 60)}：** ${question.isSecret ? "已提供（已隐藏）" : truncate((answers?.[question.id] ?? []).join("、"), 300)}`,
         )
         .join("\n")
     : resolution === "local"
       ? `已转回电脑端，请在原 ${runtime} 窗口回答。`
-      : "飞书回答已超时，已转回电脑端。";
+      : resolution === "rejected"
+        ? `已在原 ${runtime} 窗口取消这组问题。`
+        : "飞书回答已超时，已转回电脑端。";
   return {
     config: { wide_screen_mode: true, update_multi: true },
     header: {
@@ -247,6 +257,18 @@ export function buildResolvedUserInputCard(
       },
     ],
   };
+}
+
+function inputReplyHint(questions: UserInputQuestion[]): string {
+  const hasMultiple = questions.some((question) => question.multiple);
+  const customAllowed = questions.some((question) => question.custom !== false);
+  const answerForm = hasMultiple
+    ? "多选题请用逗号分隔，例如“1,3”"
+    : "可回复选项编号或选项文字";
+  const customForm = customAllowed ? "，也可填写自定义答案" : "";
+  return questions.length === 1
+    ? `请引用本卡片回复；${answerForm}${customForm}。`
+    : `请引用本卡片，按问题顺序用中文分号“；”分隔 ${questions.length} 个答案；${answerForm}${customForm}。`;
 }
 
 export function buildActivityCard(

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { lstat, mkdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -31,6 +32,10 @@ import type {
   OpenCodeMessage,
   OpenCodeMessagePartUpdatedProperties,
   OpenCodePermission,
+  OpenCodePermissionReplied,
+  OpenCodeQuestionRejected,
+  OpenCodeQuestionReplied,
+  OpenCodeQuestionRequest,
   OpenCodeSession,
 } from "./opencode-client.js";
 import {
@@ -51,6 +56,7 @@ import type {
   SessionRecord,
   SessionStartHookPayload,
   StopHookPayload,
+  UserInputAnswers,
   UserInputQuestion,
 } from "./domain.js";
 import {
@@ -86,17 +92,19 @@ interface ApprovalWaiter {
 }
 
 type UserInputResolution =
-  | { kind: "answered"; answers: Record<string, string> }
-  | { kind: "local" | "timeout" };
+  | { kind: "answered"; answers: UserInputAnswers }
+  | { kind: "local" | "timeout" | "rejected" };
 
 interface UserInputWaiter {
+  source: "hook" | "opencode";
   sessionId: string;
   turnId: string;
   cwd: string;
   questions: UserInputQuestion[];
   messageIds: string[];
   timer: NodeJS.Timeout;
-  resolve: (resolution: UserInputResolution) => void;
+  resolve?: (resolution: UserInputResolution) => void;
+  opencodeRequestId?: string;
 }
 
 interface QueuedRemotePrompt {
@@ -112,12 +120,17 @@ interface PendingRuntimeLaunchPrompt extends QueuedRemotePrompt {
 }
 
 type RuntimeLaunchStatus = "pending" | "claimed" | "launched";
+type RuntimeLaunchKind = "resume" | "new";
 
 interface RuntimeLaunchRequest {
   requestId: string;
-  sessionId: string;
+  kind: RuntimeLaunchKind;
+  sessionId?: string;
   runtime: RuntimeName;
   cwd: string;
+  projectName?: string;
+  sourceMessageId?: string;
+  chatId?: string;
   elevated: boolean;
   createdAt: string;
   status: RuntimeLaunchStatus;
@@ -183,6 +196,11 @@ interface AliasCommand {
   alias?: string;
 }
 
+interface NewRuntimeCommand {
+  runtime: RuntimeName;
+  projectName: string;
+}
+
 interface SessionAliasResult {
   ok: boolean;
   error?: string;
@@ -192,6 +210,7 @@ interface SessionAliasResult {
 export class BridgeController {
   private readonly approvalWaiters = new Map<string, ApprovalWaiter>();
   private readonly inputWaiters = new Map<string, UserInputWaiter>();
+  private readonly submittingInputs = new Set<string>();
   private readonly remoteInputLocks = new Set<string>();
   private readonly runtimeQueues = new Map<string, QueuedRemotePrompt[]>();
   private readonly managedQueueDepth = new Map<string, number>();
@@ -208,6 +227,8 @@ export class BridgeController {
   private readonly runtimeLaunchRequestIds = new Map<string, string>();
   private readonly opencodePortSessions = new Map<number, Set<string>>();
   private readonly opencodeToolParts = new Map<string, Map<string, string>>();
+  private readonly opencodePermissionClaims = new Set<string>();
+  private readonly opencodeQuestionClaims = new Set<string>();
   private readonly sessionGroupCreates = new Map<
     string,
     Promise<SessionRecord | undefined>
@@ -294,9 +315,11 @@ export class BridgeController {
       ok: true,
       request: {
         requestId: request.requestId,
+        kind: request.kind,
         sessionId: request.sessionId,
         runtime: request.runtime,
         cwd: request.cwd,
+        projectName: request.projectName,
         elevated: request.elevated,
         createdAt: request.createdAt,
       },
@@ -318,6 +341,10 @@ export class BridgeController {
       return { ok: true, alreadyResolved: true };
     }
     if (success) {
+      if (request.kind === "new") {
+        this.clearRuntimeLaunchRequest(request);
+        return { ok: true, kind: request.kind };
+      }
       request.status = "launched";
       return { ok: true, sessionId: request.sessionId };
     }
@@ -447,7 +474,8 @@ export class BridgeController {
       this.managedQueueDepth.delete(session.sessionId);
       this.pendingRemotePrompts.delete(session.sessionId);
       this.fileReturnRequests.delete(session.sessionId);
-      this.resolveInputsForSession(session.sessionId, "local");
+      await this.resolveInputsForSession(session.sessionId, "local");
+      await this.resolveApprovalsForSession(session.sessionId);
       void this.finishActivity(session.sessionId, "窗口已关闭");
       await this.store.upsertSession({
         sessionId: session.sessionId,
@@ -603,7 +631,26 @@ export class BridgeController {
       "autoRetryErrors",
       "autoApprove",
     ] as const;
-    const update: Record<string, boolean | number> = {};
+    const update: Record<string, boolean | number | string> = {};
+    if (value.workspaceRoot !== undefined) {
+      if (
+        typeof value.workspaceRoot !== "string" ||
+        !value.workspaceRoot.trim() ||
+        value.workspaceRoot.length > 1024 ||
+        !path.isAbsolute(value.workspaceRoot.trim())
+      ) {
+        return { ok: false, error: "默认工作区必须是有效的绝对目录。" };
+      }
+      const workspaceRoot = path.resolve(value.workspaceRoot.trim());
+      try {
+        if (!(await stat(workspaceRoot)).isDirectory()) {
+          return { ok: false, error: "默认工作区不是文件夹。" };
+        }
+      } catch {
+        return { ok: false, error: "默认工作区不存在或无法访问。" };
+      }
+      update.workspaceRoot = workspaceRoot;
+    }
     for (const key of booleanKeys) {
       if (value[key] !== undefined) {
         if (typeof value[key] !== "boolean") {
@@ -713,7 +760,7 @@ export class BridgeController {
     const record = await this.store.upsertSession({
       sessionId,
       cwd,
-      model: session.model,
+      model: stringifyModel(session.model),
       status: existing?.status === "ended" ? "waiting" : existing?.status ?? "waiting",
       source: "opencode",
       runtime: "opencode",
@@ -746,7 +793,11 @@ export class BridgeController {
     if (!current || current.runtime !== "opencode" || current.status === "ended") {
       return;
     }
-    if (status === "busy") {
+    if (
+      status === "busy" &&
+      !this.hasPendingInputForSession(sessionId) &&
+      !this.store.hasPendingApprovalForSession(sessionId)
+    ) {
       await this.store.upsertSession({
         sessionId,
         cwd: current.cwd,
@@ -775,6 +826,12 @@ export class BridgeController {
     this.remoteInputLocks.delete(sessionId);
     const current = this.store.getSession(sessionId);
     if (!current || current.runtime !== "opencode" || current.status === "ended") {
+      return;
+    }
+    if (
+      this.hasPendingInputForSession(sessionId) ||
+      this.store.hasPendingApprovalForSession(sessionId)
+    ) {
       return;
     }
     const result = await this.opencode?.lastAssistantText(sessionId);
@@ -872,53 +929,243 @@ export class BridgeController {
     if (!sessionId) {
       return;
     }
-    const current = this.store.getSession(sessionId);
-    const instance = this.opencode?.findInstanceBySession(sessionId);
-    const cwd = current?.cwd || instance?.cwd || "";
-    const session = await this.store.upsertSession({
-      sessionId,
-      cwd,
-      model: current?.model,
-      status: "pending_approval",
-      runtime: "opencode",
-      managedByAssistant: true,
-    });
-    const now = Date.now();
-    const approval: ApprovalRecord = {
-      requestId: randomUUID(),
-      sessionId,
-      turnId: current?.lastTurnId ?? `opencode-${now}`,
-      cwd,
-      toolName: permission.type ?? "permission",
-      toolPreview: previewJson(permission.input ?? permission),
-      createdAt: new Date(now).toISOString(),
-      expiresAt: new Date(now + this.config.approvalTimeoutMs).toISOString(),
-      status: "pending",
-      messageIds: [],
-      opencodePermissionId: permission.id,
-    };
-    await this.store.createApproval(approval);
-    const timeoutTimer = setTimeout(() => {
-      void this.completeApproval(approval.requestId, "timeout");
-    }, this.config.approvalTimeoutMs);
-    timeoutTimer.unref?.();
-
-    for (const recipient of await this.notificationRecipients(session)) {
-      try {
-        const messageId = await this.feishu.sendCard(
-          recipient.chatId,
-          buildApprovalCard(session, approval),
-        );
-        await this.store.addApprovalMessage(approval.requestId, messageId);
-        await this.addRoute(messageId, sessionId, recipient.chatId, "approval", approval.requestId);
-      } catch (error) {
-        console.error("[opencode] Failed to send an approval card:", error);
+    const claimKey = this.opencodeInteractionKey(sessionId, permission.id);
+    if (this.opencodePermissionClaims.has(claimKey)) {
+      return;
+    }
+    this.opencodePermissionClaims.add(claimKey);
+    try {
+      const duplicate = this.store.listApprovals().some(
+        (approval) =>
+          approval.sessionId === sessionId &&
+          approval.opencodePermissionId === permission.id &&
+          approval.status === "pending",
+      );
+      if (duplicate) {
+        return;
       }
+      const current = this.store.getSession(sessionId);
+      const instance = this.opencode?.findInstanceBySession(sessionId);
+      const cwd = current?.cwd || instance?.cwd || "";
+      const session = await this.store.upsertSession({
+        sessionId,
+        cwd,
+        model: current?.model,
+        status: "pending_approval",
+        runtime: "opencode",
+        managedByAssistant: true,
+      });
+      const now = Date.now();
+      const approval: ApprovalRecord = {
+        requestId: randomUUID(),
+        sessionId,
+        turnId: current?.lastTurnId ?? `opencode-${now}`,
+        cwd,
+        toolName:
+          typeof permission.permission === "string"
+            ? permission.permission
+            : permission.type ?? "permission",
+        toolPreview: previewJson({
+          permission: permission.permission ?? permission.type,
+          patterns: permission.patterns,
+          input: permission.input,
+          metadata: permission.metadata,
+          always: permission.always,
+        }),
+        createdAt: new Date(now).toISOString(),
+        expiresAt: new Date(now + this.config.approvalTimeoutMs).toISOString(),
+        status: "pending",
+        messageIds: [],
+        opencodePermissionId: permission.id,
+      };
+      await this.store.createApproval(approval);
+      const timeoutTimer = setTimeout(() => {
+        void this.completeApproval(approval.requestId, "timeout");
+      }, this.config.approvalTimeoutMs);
+      timeoutTimer.unref?.();
+
+      for (const recipient of await this.notificationRecipients(session)) {
+        try {
+          const messageId = await this.feishu.sendCard(
+            recipient.chatId,
+            buildApprovalCard(session, approval),
+          );
+          await this.store.addApprovalMessage(approval.requestId, messageId);
+          await this.addRoute(messageId, sessionId, recipient.chatId, "approval", approval.requestId);
+        } catch (error) {
+          console.error("[opencode] Failed to send an approval card:", error);
+        }
+      }
+      if (this.store.getSettings().autoApprove) {
+        const completed = await this.completeApproval(approval.requestId, "allow");
+        if (completed) {
+          console.log(`[opencode] Auto-approved permission for #${session.shortId}.`);
+        } else {
+          console.warn(`[opencode] Could not auto-approve permission for #${session.shortId}.`);
+        }
+      }
+    } catch (error) {
+      this.opencodePermissionClaims.delete(claimKey);
+      throw error;
     }
-    if (this.store.getSettings().autoApprove) {
-      await this.completeApproval(approval.requestId, "allow");
-      console.log(`[opencode] Auto-approved permission for #${session.shortId}.`);
+  }
+
+  async handleOpenCodePermissionReplied(
+    reply: OpenCodePermissionReplied,
+  ): Promise<void> {
+    const claimKey = this.opencodeInteractionKey(reply.sessionID, reply.requestID);
+    const approval = this.store
+      .listApprovals()
+      .find(
+        (item) =>
+          item.sessionId === reply.sessionID &&
+          item.opencodePermissionId === reply.requestID &&
+          item.status === "pending",
+      );
+    if (!approval) {
+      this.opencodePermissionClaims.delete(claimKey);
+      if (!this.store.hasPendingApprovalForSession(reply.sessionID)) {
+        await this.updateOpenCodeInteractionStatus(
+          reply.sessionID,
+          reply.reply === "reject" ? "waiting" : "running",
+        );
+      }
+      return;
     }
+    try {
+      await this.completeApproval(
+        approval.requestId,
+        reply.reply === "reject" ? "deny" : "allow",
+        false,
+      );
+    } finally {
+      this.opencodePermissionClaims.delete(claimKey);
+    }
+  }
+
+  async handleOpenCodeQuestionAsked(request: OpenCodeQuestionRequest): Promise<void> {
+    const claimKey = this.opencodeInteractionKey(request.sessionID, request.id);
+    if (this.opencodeQuestionClaims.has(claimKey)) {
+      return;
+    }
+    this.opencodeQuestionClaims.add(claimKey);
+    let requestId: string | undefined;
+    try {
+      const current = this.store.getSession(request.sessionID);
+      const instance = this.opencode?.findInstanceBySession(request.sessionID);
+      const cwd = current?.cwd || instance?.cwd || "";
+      if (!cwd || request.questions.length === 0) {
+        this.opencodeQuestionClaims.delete(claimKey);
+        return;
+      }
+      const questions: UserInputQuestion[] = request.questions.map((question, index) => ({
+        header: question.header || `问题 ${index + 1}`,
+        id: `opencode_question_${index + 1}`,
+        question: question.question,
+        options: question.options,
+        multiple: question.multiple === true,
+        custom: question.custom !== false,
+      }));
+      const session = await this.store.upsertSession({
+        sessionId: request.sessionID,
+        cwd,
+        model: current?.model,
+        turnId: current?.lastTurnId ?? `opencode-${request.id}`,
+        status: "pending_input",
+        runtime: "opencode",
+        managedByAssistant: true,
+      });
+      const recipients = await this.notificationRecipients(session);
+      if (recipients.length === 0) {
+        return;
+      }
+
+      requestId = randomUUID();
+      const timer = setTimeout(() => {
+        void this.completeUserInput(requestId!, { kind: "timeout" });
+      }, this.config.inputTimeoutMs);
+      timer.unref?.();
+      this.inputWaiters.set(requestId, {
+        source: "opencode",
+        sessionId: request.sessionID,
+        turnId: current?.lastTurnId ?? `opencode-${request.id}`,
+        cwd,
+        questions,
+        messageIds: [],
+        timer,
+        opencodeRequestId: request.id,
+      });
+
+      let sentCount = 0;
+      for (const recipient of recipients) {
+        try {
+          const messageId = await this.feishu.sendCard(
+            recipient.chatId,
+            buildUserInputCard(session, requestId, questions),
+          );
+          sentCount += 1;
+          this.inputWaiters.get(requestId)?.messageIds.push(messageId);
+          await this.addRoute(
+            messageId,
+            request.sessionID,
+            recipient.chatId,
+            "input",
+            requestId,
+          );
+        } catch (error) {
+          console.error("[opencode] Failed to send a question card:", error);
+        }
+      }
+      if (sentCount === 0) {
+        await this.completeUserInput(requestId, { kind: "local" });
+      }
+    } catch (error) {
+      if (requestId) {
+        const waiter = this.inputWaiters.get(requestId);
+        if (waiter) {
+          clearTimeout(waiter.timer);
+          this.inputWaiters.delete(requestId);
+        }
+      }
+      this.opencodeQuestionClaims.delete(claimKey);
+      throw error;
+    }
+  }
+
+  async handleOpenCodeQuestionReplied(reply: OpenCodeQuestionReplied): Promise<void> {
+    const claimKey = this.opencodeInteractionKey(reply.sessionID, reply.requestID);
+    const pending = this.findOpenCodeInput(reply.sessionID, reply.requestID);
+    if (!pending) {
+      this.opencodeQuestionClaims.delete(claimKey);
+      await this.updateOpenCodeInteractionStatus(reply.sessionID, "running");
+      return;
+    }
+    const answers: UserInputAnswers = {};
+    pending.waiter.questions.forEach((question, index) => {
+      answers[question.id] = reply.answers[index] ?? [];
+    });
+    try {
+      await this.completeUserInput(pending.requestId, { kind: "answered", answers });
+    } finally {
+      this.opencodeQuestionClaims.delete(claimKey);
+    }
+  }
+
+  async handleOpenCodeQuestionRejected(
+    rejection: OpenCodeQuestionRejected,
+  ): Promise<void> {
+    const claimKey = this.opencodeInteractionKey(rejection.sessionID, rejection.requestID);
+    const pending = this.findOpenCodeInput(rejection.sessionID, rejection.requestID);
+    if (pending) {
+      try {
+        await this.completeUserInput(pending.requestId, { kind: "rejected" });
+      } finally {
+        this.opencodeQuestionClaims.delete(claimKey);
+      }
+      return;
+    }
+    this.opencodeQuestionClaims.delete(claimKey);
+    await this.updateOpenCodeInteractionStatus(rejection.sessionID, "waiting");
   }
 
   async handleOpenCodeMessagePartUpdated(
@@ -1094,10 +1341,13 @@ export class BridgeController {
   async handleSessionEndHook(
     payload: SessionEndHookPayload,
   ): Promise<Record<string, unknown>> {
+    await this.resolveInputsForSession(payload.session_id, "local");
+    await this.resolveApprovalsForSession(payload.session_id);
     const session = await this.store.upsertSession({
       sessionId: payload.session_id,
       cwd: payload.cwd,
       status: "ended",
+      runtime: payload.runtime,
       ...(payload.managed_terminal_id !== undefined
         ? { managedTerminalId: payload.managed_terminal_id }
         : {}),
@@ -1110,7 +1360,6 @@ export class BridgeController {
     this.managedQueueDepth.delete(payload.session_id);
     this.pendingRemotePrompts.delete(payload.session_id);
     this.fileReturnRequests.delete(payload.session_id);
-    this.resolveInputsForSession(payload.session_id, "local");
     void this.finishActivity(payload.session_id, "会话已结束");
     this.managedTerminals.release(payload.session_id);
     console.log(`[session] Ended session #${session.shortId}.`);
@@ -1252,6 +1501,7 @@ export class BridgeController {
         void this.completeUserInput(requestId, { kind: "timeout" });
       }, timeoutMs);
       this.inputWaiters.set(requestId, {
+        source: "hook",
         sessionId: payload.session_id,
         turnId: payload.turn_id,
         cwd: payload.cwd,
@@ -1293,7 +1543,7 @@ export class BridgeController {
     const answerText = payload.tool_input.questions
       .map(
         (question, index) =>
-          `${index + 1}. ${question.header} (${question.id}): ${resolution.answers[question.id] ?? ""}`,
+          `${index + 1}. ${question.header} (${question.id}): ${(resolution.answers[question.id] ?? []).join("、")}`,
       )
       .join("\n");
     if (payload.runtime === "claudecode") {
@@ -1304,8 +1554,21 @@ export class BridgeController {
           payload.tool_input.questions.flatMap((question) => {
             const questionText = questionTextById[question.id];
             return questionText
-              ? [[questionText, resolution.answers[question.id] ?? ""]]
+              ? [[questionText, (resolution.answers[question.id] ?? []).join(", ")]]
               : [];
+          }),
+        );
+        const annotations = Object.fromEntries(
+          payload.tool_input.questions.flatMap((question) => {
+            const questionText = questionTextById[question.id];
+            const selected = resolution.answers[question.id] ?? [];
+            if (!questionText || selected.length !== 1) {
+              return [];
+            }
+            const preview = question.options.find(
+              (option) => option.label === selected[0],
+            )?.preview;
+            return preview ? [[questionText, { preview }]] : [];
           }),
         );
         return {
@@ -1315,7 +1578,7 @@ export class BridgeController {
             updatedInput: {
               ...originalInput,
               answers,
-              annotations: {},
+              annotations,
             },
           },
         };
@@ -1620,6 +1883,34 @@ export class BridgeController {
     // “帮助” can still be sent to the corresponding Codex session.
     const isPrivateChat = chatType === "p2p";
 
+    if (isPrivateChat) {
+      const newRuntimeCommand = parseNewRuntimeCommand(text);
+      if (newRuntimeCommand) {
+        await this.handleFeishuNewRuntimeCommand(
+          newRuntimeCommand,
+          messageId,
+          chatId,
+        );
+        return;
+      }
+      if (/^新建(?:\s|$)/iu.test(text)) {
+        await this.respond(messageId, chatId, newRuntimeCommandUsage());
+        return;
+      }
+    }
+
+    if (isPrivateChat && (text === "工作区" || text.toLowerCase() === "workspace")) {
+      const workspaceRoot = this.store.getSettings().workspaceRoot;
+      await this.respond(
+        messageId,
+        chatId,
+        workspaceRoot
+          ? `默认工作区：${workspaceRoot}\n新建命令示例：新建 codex 我的项目`
+          : "尚未设置默认工作区。请在电脑端“设置”中选择。",
+      );
+      return;
+    }
+
     if (isPrivateChat && text === "状态") {
       const sessions = this.listActiveSessions();
       const pending = sessions.filter((session) => session.status === "pending_approval").length;
@@ -1659,7 +1950,7 @@ export class BridgeController {
       await this.respond(
         messageId,
         chatId,
-        "用法：\n1. 引用助手同步窗口的 Codex 通知并回复；\n2. 发送 @别名 内容，运行中会直接插话；\n3. 发送“排队 @别名 内容”，排到下一轮；\n4. 发送“发文件 @别名 要求”，让 Codex 完成后把文件发回；\n5. 可直接发送图片或文件，下一条再发送处理要求；\n6. 发送“会话”或“别名”查看路由；\n7. 外部会话仅支持通知、审批和补充信息，普通消息不会写入；\n8. 审批和补充信息卡片都可在飞书处理。",
+        "用法：\n1. 发送“新建 codex 项目名”“新建 claude 项目名”或“新建 opencode 项目名”；\n2. 发送“工作区”查看默认项目根目录；\n3. 引用助手同步窗口的通知并回复；\n4. 发送 @别名 内容，运行中会直接插话；\n5. 发送“排队 @别名 内容”，排到下一轮；\n6. 发送“发文件 @别名 要求”，让助手完成后把文件发回；\n7. 可直接发送图片或文件，下一条再发送处理要求；\n8. 发送“会话”或“别名”查看路由；\n9. 外部会话仅支持通知、审批和补充信息；审批和补充信息卡片可在飞书处理。",
       );
       return;
     }
@@ -1689,10 +1980,7 @@ export class BridgeController {
         );
         return;
       }
-      const completed = await this.completeUserInput(quotedRoute.requestId, {
-        kind: "answered",
-        answers,
-      });
+      const completed = await this.answerUserInput(quotedRoute.requestId, answers);
       const inputSession = this.store.getSession(waiter.sessionId);
       await this.respond(
         messageId,
@@ -1837,7 +2125,7 @@ export class BridgeController {
     }
     if (
       targetRuntime.transport === "http_event_stream" &&
-      !this.opencode?.findInstanceBySession(target.sessionId)
+      !this.opencode?.findActiveInstanceBySession(target.sessionId)
     ) {
       await this.respond(
         messageId,
@@ -1896,9 +2184,8 @@ export class BridgeController {
       if (!question || !question.options.some((option) => option.label === answer)) {
         return { toast: { type: "error", content: "这个答案不属于当前问题。" } };
       }
-      const completed = await this.completeUserInput(requestId, {
-        kind: "answered",
-        answers: { [questionId]: answer },
+      const completed = await this.answerUserInput(requestId, {
+        [questionId]: [answer],
       });
       const runtime = runtimeDisplayName(this.store.getSession(waiter.sessionId)?.runtime);
       return {
@@ -1934,12 +2221,93 @@ export class BridgeController {
     };
   }
 
+  private async handleFeishuNewRuntimeCommand(
+    command: NewRuntimeCommand,
+    messageId: string,
+    chatId: string,
+  ): Promise<void> {
+    const validationError = projectDirectoryNameValidationError(command.projectName);
+    if (validationError) {
+      await this.respond(messageId, chatId, `项目名不正确：${validationError}`);
+      return;
+    }
+    const workspaceRoot = this.store.getSettings().workspaceRoot;
+    if (!workspaceRoot) {
+      await this.respond(
+        messageId,
+        chatId,
+        "尚未设置默认工作区。请先在电脑端“设置”中选择默认工作区。",
+      );
+      return;
+    }
+    let prepared: { cwd: string; created: boolean };
+    try {
+      prepared = await prepareProjectDirectory(workspaceRoot, command.projectName);
+    } catch (error) {
+      await this.respond(
+        messageId,
+        chatId,
+        `项目目录准备失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    await this.queueNewRuntimeLaunch(
+      command.runtime,
+      prepared.cwd,
+      command.projectName,
+      messageId,
+      chatId,
+      prepared.created,
+    );
+  }
+
+  private async queueNewRuntimeLaunch(
+    runtime: RuntimeName,
+    cwd: string,
+    projectName: string,
+    sourceMessageId: string,
+    chatId: string,
+    directoryCreated: boolean,
+  ): Promise<void> {
+    const requestId = randomUUID();
+    const timeoutMs = this.config.runtimeLaunchTimeoutMs ?? 2 * 60 * 1000;
+    const timer = setTimeout(() => {
+      const request = this.runtimeLaunchRequests.get(requestId);
+      if (request) {
+        void this.failRuntimeLaunch(
+          request,
+          "等待桌面助手打开窗口超时。请确认面板正在运行，然后重试。",
+        );
+      }
+    }, timeoutMs);
+    timer.unref?.();
+    const request: RuntimeLaunchRequest = {
+      requestId,
+      kind: "new",
+      runtime,
+      cwd,
+      projectName,
+      sourceMessageId,
+      chatId,
+      elevated: false,
+      createdAt: new Date().toISOString(),
+      status: "pending",
+      timer,
+    };
+    this.runtimeLaunchRequests.set(requestId, request);
+    await this.respond(
+      sourceMessageId,
+      chatId,
+      `${directoryCreated ? "已创建" : "已找到"}项目“${projectName}”：${cwd}\n正在请求电脑端启动 ${runtimeDisplayName(runtime)}；会话登记后会自动创建对应飞书群。`,
+    );
+  }
+
   private isRuntimeAvailable(session: SessionRecord): boolean {
     if (session.status === "ended") {
       return false;
     }
     if (runtimeDefinition(session.runtime).transport === "http_event_stream") {
-      return Boolean(this.opencode?.findInstanceBySession(session.sessionId));
+      return Boolean(this.opencode?.findActiveInstanceBySession(session.sessionId));
     }
     return this.managedTerminals.isReady(session);
   }
@@ -1992,6 +2360,7 @@ export class BridgeController {
     timer.unref?.();
     const request: RuntimeLaunchRequest = {
       requestId,
+      kind: "resume",
       sessionId: session.sessionId,
       runtime: session.runtime ?? "codex",
       cwd: session.cwd,
@@ -2015,14 +2384,24 @@ export class BridgeController {
     request: RuntimeLaunchRequest,
     detail: string,
   ): Promise<void> {
-    clearTimeout(request.timer);
-    this.runtimeLaunchRequests.delete(request.requestId);
-    if (this.runtimeLaunchRequestIds.get(request.sessionId) === request.requestId) {
-      this.runtimeLaunchRequestIds.delete(request.sessionId);
+    this.clearRuntimeLaunchRequest(request);
+    if (request.kind === "new") {
+      if (request.sourceMessageId && request.chatId) {
+        await this.respond(
+          request.sourceMessageId,
+          request.chatId,
+          `${runtimeDisplayName(request.runtime)} 未启动：${detail}`,
+        );
+      }
+      return;
     }
-    const queue = this.pendingRuntimeLaunchPrompts.get(request.sessionId) ?? [];
-    this.pendingRuntimeLaunchPrompts.delete(request.sessionId);
-    const session = this.store.getSession(request.sessionId);
+    const sessionId = request.sessionId;
+    if (!sessionId) {
+      return;
+    }
+    const queue = this.pendingRuntimeLaunchPrompts.get(sessionId) ?? [];
+    this.pendingRuntimeLaunchPrompts.delete(sessionId);
+    const session = this.store.getSession(sessionId);
     for (const item of queue) {
       await this.respond(
         item.sourceMessageId,
@@ -2040,9 +2419,7 @@ export class BridgeController {
     const requestId = this.runtimeLaunchRequestIds.get(sessionId);
     const request = requestId ? this.runtimeLaunchRequests.get(requestId) : undefined;
     if (request) {
-      clearTimeout(request.timer);
-      this.runtimeLaunchRequests.delete(request.requestId);
-      this.runtimeLaunchRequestIds.delete(sessionId);
+      this.clearRuntimeLaunchRequest(request);
     }
     const queue = this.pendingRuntimeLaunchPrompts.get(sessionId);
     if (!queue?.length) {
@@ -2061,6 +2438,17 @@ export class BridgeController {
         item.queueRequested || index > 0,
         item.requestFileReturn,
       );
+    }
+  }
+
+  private clearRuntimeLaunchRequest(request: RuntimeLaunchRequest): void {
+    clearTimeout(request.timer);
+    this.runtimeLaunchRequests.delete(request.requestId);
+    if (
+      request.sessionId &&
+      this.runtimeLaunchRequestIds.get(request.sessionId) === request.requestId
+    ) {
+      this.runtimeLaunchRequestIds.delete(request.sessionId);
     }
   }
 
@@ -2285,7 +2673,7 @@ export class BridgeController {
     chatId: string,
     requestFileReturn: boolean,
   ): Promise<void> {
-    if (!this.opencode?.findInstanceBySession(session.sessionId)) {
+    if (!this.opencode?.findActiveInstanceBySession(session.sessionId)) {
       await this.respond(
         sourceMessageId,
         chatId,
@@ -2376,7 +2764,7 @@ export class BridgeController {
       );
       return;
     }
-    if (!this.opencode?.findInstanceBySession(sessionId)) {
+    if (!this.opencode?.findActiveInstanceBySession(sessionId)) {
       this.remoteInputLocks.add(sessionId);
       await this.respond(
         item.sourceMessageId,
@@ -2428,6 +2816,8 @@ export class BridgeController {
     sessionId: string,
     reason: string,
   ): Promise<void> {
+    await this.resolveInputsForSession(sessionId, "local");
+    await this.resolveApprovalsForSession(sessionId);
     const session = this.store.getSession(sessionId);
     if (session && session.status !== "ended") {
       await this.store.upsertSession({
@@ -2446,6 +2836,7 @@ export class BridgeController {
     this.fileReturnRequests.delete(sessionId);
     this.managedRetryCounts.delete(sessionId);
     this.opencodeToolParts.delete(sessionId);
+    this.clearOpenCodeInteractionClaims(sessionId);
     if (session) {
       void this.finishActivity(sessionId, reason).catch((error) => {
         console.warn("[opencode] Could not finalize activity:", error);
@@ -2563,6 +2954,112 @@ export class BridgeController {
     );
   }
 
+  private findOpenCodeInput(
+    sessionId: string,
+    opencodeRequestId: string,
+  ): { requestId: string; waiter: UserInputWaiter } | undefined {
+    for (const [requestId, waiter] of this.inputWaiters) {
+      if (
+        waiter.source === "opencode" &&
+        waiter.sessionId === sessionId &&
+        waiter.opencodeRequestId === opencodeRequestId
+      ) {
+        return { requestId, waiter };
+      }
+    }
+    return undefined;
+  }
+
+  private opencodeInteractionKey(sessionId: string, requestId: string): string {
+    return `${sessionId}\u0000${requestId}`;
+  }
+
+  private clearOpenCodeInteractionClaims(sessionId: string): void {
+    const prefix = `${sessionId}\u0000`;
+    for (const key of this.opencodePermissionClaims) {
+      if (key.startsWith(prefix)) {
+        this.opencodePermissionClaims.delete(key);
+      }
+    }
+    for (const key of this.opencodeQuestionClaims) {
+      if (key.startsWith(prefix)) {
+        this.opencodeQuestionClaims.delete(key);
+      }
+    }
+  }
+
+  private async updateOpenCodeInteractionStatus(
+    sessionId: string,
+    status: "running" | "waiting",
+  ): Promise<void> {
+    const current = this.store.getSession(sessionId);
+    const instance = this.opencode?.findInstanceBySession(sessionId);
+    const cwd = current?.cwd || instance?.cwd || "";
+    if (
+      !cwd ||
+      current?.status === "ended" ||
+      this.hasPendingInputForSession(sessionId) ||
+      this.store.hasPendingApprovalForSession(sessionId)
+    ) {
+      return;
+    }
+    await this.store.upsertSession({
+      sessionId,
+      cwd,
+      model: current?.model,
+      status,
+      runtime: "opencode",
+      managedByAssistant: true,
+    });
+  }
+
+  private async answerUserInput(
+    requestId: string,
+    answers: UserInputAnswers,
+  ): Promise<boolean> {
+    const waiter = this.inputWaiters.get(requestId);
+    if (!waiter || this.submittingInputs.has(requestId)) {
+      return false;
+    }
+    if (waiter.source === "hook") {
+      return this.completeUserInput(requestId, { kind: "answered", answers });
+    }
+    if (!waiter.opencodeRequestId || !this.opencode) {
+      return false;
+    }
+
+    this.submittingInputs.add(requestId);
+    try {
+      const orderedAnswers = waiter.questions.map((question) => answers[question.id] ?? []);
+      await this.opencode.replyQuestion(
+        waiter.sessionId,
+        waiter.opencodeRequestId,
+        orderedAnswers,
+      );
+      const completed = await this.completeUserInput(requestId, {
+        kind: "answered",
+        answers,
+      });
+      this.opencodeQuestionClaims.delete(
+        this.opencodeInteractionKey(waiter.sessionId, waiter.opencodeRequestId),
+      );
+      return completed || !this.inputWaiters.has(requestId);
+    } catch (error) {
+      console.error("[input] Failed to forward answer to opencode:", error);
+      try {
+        const pending = await this.opencode.listQuestions(waiter.sessionId);
+        if (!pending.some((request) => request.id === waiter.opencodeRequestId)) {
+          await this.completeUserInput(requestId, { kind: "local" });
+        }
+      } catch (probeError) {
+        console.warn("[input] Could not confirm opencode question state:", probeError);
+      }
+      return false;
+    } finally {
+      this.submittingInputs.delete(requestId);
+    }
+  }
+
   private async completeUserInput(
     requestId: string,
     resolution: UserInputResolution,
@@ -2573,13 +3070,23 @@ export class BridgeController {
     }
     clearTimeout(waiter.timer);
     this.inputWaiters.delete(requestId);
+    this.submittingInputs.delete(requestId);
+    const status = waiter.source === "opencode"
+      ? resolution.kind === "answered"
+        ? "running"
+        : resolution.kind === "rejected"
+          ? "waiting"
+          : "pending_input"
+      : resolution.kind === "answered"
+        ? "running"
+        : "waiting";
     const session = await this.store.upsertSession({
       sessionId: waiter.sessionId,
       cwd: waiter.cwd,
       turnId: waiter.turnId,
-      status: resolution.kind === "answered" ? "running" : "waiting",
+      status,
     });
-    waiter.resolve(resolution);
+    waiter.resolve?.(resolution);
     const card = buildResolvedUserInputCard(
       session,
       waiter.questions,
@@ -2593,14 +3100,25 @@ export class BridgeController {
     return true;
   }
 
-  private resolveInputsForSession(
+  private async resolveInputsForSession(
     sessionId: string,
     resolution: "local" | "timeout",
-  ): void {
-    for (const [requestId, waiter] of this.inputWaiters) {
-      if (waiter.sessionId === sessionId) {
-        void this.completeUserInput(requestId, { kind: resolution });
-      }
+  ): Promise<void> {
+    const requestIds = [...this.inputWaiters]
+      .filter(([, waiter]) => waiter.sessionId === sessionId)
+      .map(([requestId]) => requestId);
+    for (const requestId of requestIds) {
+      await this.completeUserInput(requestId, { kind: resolution });
+    }
+  }
+
+  private async resolveApprovalsForSession(sessionId: string): Promise<void> {
+    const requestIds = this.store
+      .listApprovals()
+      .filter((approval) => approval.sessionId === sessionId && approval.status === "pending")
+      .map((approval) => approval.requestId);
+    for (const requestId of requestIds) {
+      await this.completeApproval(requestId, "local");
     }
   }
 
@@ -2912,10 +3430,44 @@ export class BridgeController {
   private async completeApproval(
     requestId: string,
     resolution: ApprovalResolution,
+    forwardOpenCode = true,
   ): Promise<boolean> {
-    const approval = await this.store.resolveApproval(requestId, resolution);
-    if (!approval) {
+    const pending = this.store.getApproval(requestId);
+    if (!pending || pending.status !== "pending") {
       return false;
+    }
+    let forwardedToOpenCode = false;
+    if (
+      forwardOpenCode &&
+      pending.opencodePermissionId &&
+      (resolution === "allow" || resolution === "deny")
+    ) {
+      try {
+        if (!this.opencode) {
+          return false;
+        }
+        await this.opencode.replyPermission(
+          pending.sessionId,
+          pending.opencodePermissionId,
+          resolution === "allow" ? "once" : "reject",
+        );
+        forwardedToOpenCode = true;
+      } catch (error) {
+        console.error("[approval] Failed to forward decision to opencode:", error);
+        return false;
+      }
+    }
+    const approval = await this.store.resolveApproval(requestId, resolution);
+    if (
+      pending.opencodePermissionId &&
+      forwardedToOpenCode
+    ) {
+      this.opencodePermissionClaims.delete(
+        this.opencodeInteractionKey(pending.sessionId, pending.opencodePermissionId),
+      );
+    }
+    if (!approval) {
+      return forwardedToOpenCode && this.store.getApproval(requestId)?.status === "resolved";
     }
 
     const waiter = this.approvalWaiters.get(requestId);
@@ -2941,17 +3493,6 @@ export class BridgeController {
     void Promise.allSettled(
       approval.messageIds.map((messageId) => this.feishu.patchCard(messageId, card)),
     );
-    if (approval.opencodePermissionId && (resolution === "allow" || resolution === "deny")) {
-      try {
-        await this.opencode?.replyPermission(
-          approval.sessionId,
-          approval.opencodePermissionId,
-          resolution === "allow" ? "once" : "reject",
-        );
-      } catch (error) {
-        console.error("[approval] Failed to forward decision to opencode:", error);
-      }
-    }
     console.log(
       `[approval] ${resolution} for session #${session.shortId}.`,
     );
@@ -3011,7 +3552,7 @@ export class BridgeController {
     const sessions = openSessions
       .flatMap((session): SessionRecord[] => {
         if (runtimeDefinition(session.runtime).transport === "http_event_stream") {
-          const instance = this.opencode?.findInstanceBySession(session.sessionId);
+          const instance = this.opencode?.findActiveInstanceBySession(session.sessionId);
           return instance ? [session] : [];
         }
         if (!this.managedTerminals.isManaged(session)) {
@@ -3210,7 +3751,7 @@ export class BridgeController {
 
   private activeSessionDefinition(): string {
     const fallbackMs = Math.min(this.config.sessionActiveMs, 5 * 60 * 1000);
-    return `活跃定义：助手打开的 Codex / Claude Code 窗口从打开到关闭始终算活跃；opencode 窗口从连接到关闭始终算活跃；外部会话会跟踪真实 CLI 进程，进程关闭后自动移除。无法取得进程信息时仅临时保留 ${formatDuration(fallbackMs)}。`;
+    return `活跃定义：助手打开的 Codex / Claude Code 窗口从打开到关闭始终算活跃；每个 opencode 窗口只登记当前对话，历史会话不算活跃；外部会话会跟踪真实 CLI 进程，进程关闭后自动移除。无法取得进程信息时仅临时保留 ${formatDuration(fallbackMs)}。`;
   }
 
   private formatSessionList(): string {
@@ -3416,6 +3957,97 @@ function parseBindCommand(
   return { matched: true, code: code || undefined };
 }
 
+function parseNewRuntimeCommand(text: string): NewRuntimeCommand | undefined {
+  const match = text.match(
+    /^新建\s+(claude\s+code|open\s+code|codex|claude|claudecode|opencode)\s+([\s\S]+)$/iu,
+  );
+  if (!match?.[1] || !match[2]?.trim()) {
+    return undefined;
+  }
+  const runtimeText = match[1].replace(/\s+/gu, "").toLocaleLowerCase("en-US");
+  const runtime: RuntimeName = runtimeText === "codex"
+    ? "codex"
+    : runtimeText === "opencode"
+    ? "opencode"
+    : "claudecode";
+  return {
+    runtime,
+    projectName: stripMatchingQuotes(match[2].trim()).normalize("NFC"),
+  };
+}
+
+function newRuntimeCommandUsage(): string {
+  return "用法：新建 codex 项目名\n也支持：新建 claude 项目名、新建 opencode 项目名。\n项目会放在电脑端“设置”中的默认工作区；目录不存在时自动创建。";
+}
+
+function stripMatchingQuotes(value: string): string {
+  if (value.length >= 2) {
+    const first = value[0];
+    const last = value.at(-1);
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return value.slice(1, -1).trim();
+    }
+  }
+  return value;
+}
+
+function projectDirectoryNameValidationError(value: string): string | undefined {
+  const name = value.trim().normalize("NFC");
+  if (!name) {
+    return "项目名不能为空。";
+  }
+  if (Array.from(name).length > 80) {
+    return "项目名最多 80 个字符。";
+  }
+  if (name === "." || name === "..") {
+    return "不能使用点目录。";
+  }
+  if (/[<>:"/\\|?*\u0000-\u001f]/u.test(name)) {
+    return "不能包含斜杠、盘符或 Windows 文件名保留字符。";
+  }
+  if (/[. ]$/u.test(name)) {
+    return "不能以句点或空格结尾。";
+  }
+  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(name)) {
+    return "不能使用 Windows 保留名称。";
+  }
+  return undefined;
+}
+
+async function prepareProjectDirectory(
+  workspaceRoot: string,
+  projectName: string,
+): Promise<{ cwd: string; created: boolean }> {
+  const root = path.resolve(workspaceRoot);
+  await mkdir(root, { recursive: true });
+  const rootRealPath = await realpath(root);
+  const projectPath = path.join(root, projectName.trim().normalize("NFC"));
+  let created = false;
+  try {
+    await mkdir(projectPath);
+    created = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw error;
+    }
+  }
+  const projectInfo = await lstat(projectPath);
+  if (!projectInfo.isDirectory() || projectInfo.isSymbolicLink()) {
+    throw new Error("同名路径不是可用的普通文件夹。");
+  }
+  const projectRealPath = await realpath(projectPath);
+  if (!isPathWithinRoot(rootRealPath, projectRealPath)) {
+    throw new Error("项目目录超出了默认工作区。");
+  }
+  return { cwd: projectRealPath, created };
+}
+
+function isPathWithinRoot(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative);
+}
+
 function parsePromptDirectives(text: string): {
   prompt: string;
   queue: boolean;
@@ -3445,33 +4077,75 @@ function parsePromptDirectives(text: string): {
 function parseUserInputAnswers(
   text: string,
   questions: UserInputQuestion[],
-): Record<string, string> | undefined {
+): UserInputAnswers | undefined {
   const parts = questions.length === 1
     ? [text.trim()]
     : text.split(/[；;\n]+/).map((part) => part.trim()).filter(Boolean);
   if (parts.length !== questions.length) {
     return undefined;
   }
-  const answers: Record<string, string> = {};
+  const answers: UserInputAnswers = {};
   for (const [index, question] of questions.entries()) {
     const raw = parts[index]?.trim();
     if (!raw) return undefined;
-    const numeric = Number.parseInt(raw, 10);
-    const option = /^\d+$/.test(raw) && numeric >= 1
-      ? question.options[numeric - 1]
-      : question.options.find(
-          (candidate) => candidate.label.toLocaleLowerCase("zh-CN") ===
-            raw.toLocaleLowerCase("zh-CN"),
-        );
-    answers[question.id] = truncate(option?.label ?? raw, 1_000);
+    const parsed = parseUserInputAnswer(raw, question);
+    if (!parsed) return undefined;
+    answers[question.id] = parsed;
   }
   return answers;
 }
 
+function parseUserInputAnswer(
+  raw: string,
+  question: UserInputQuestion,
+): string[] | undefined {
+  const exact = matchUserInputOption(raw, question);
+  if (exact) {
+    return [exact.label];
+  }
+  if (!question.multiple) {
+    return question.custom === false ? undefined : [truncate(raw, 1_000)];
+  }
+  const tokens = raw.split(/[，,、+]+/u).map((item) => item.trim()).filter(Boolean);
+  if (tokens.length === 0) {
+    return undefined;
+  }
+  const selected: string[] = [];
+  for (const token of tokens) {
+    const option = matchUserInputOption(token, question);
+    if (!option && question.custom === false) {
+      return undefined;
+    }
+    const value = truncate(option?.label ?? token, 1_000);
+    if (!selected.includes(value)) {
+      selected.push(value);
+    }
+  }
+  return selected;
+}
+
+function matchUserInputOption(
+  raw: string,
+  question: UserInputQuestion,
+): UserInputQuestion["options"][number] | undefined {
+  const numeric = Number.parseInt(raw, 10);
+  return /^\d+$/.test(raw) && numeric >= 1
+    ? question.options[numeric - 1]
+    : question.options.find(
+        (candidate) => candidate.label.toLocaleLowerCase("zh-CN") ===
+          raw.toLocaleLowerCase("zh-CN"),
+      );
+}
+
 function inputAnswerUsage(questions: UserInputQuestion[]): string {
+  const hasMultiple = questions.some((question) => question.multiple);
+  const customAllowed = questions.some((question) => question.custom !== false);
+  const detail = `${hasMultiple ? "多选题用逗号分隔选项" : "回复选项编号或文字"}${
+    customAllowed ? "，也可填写自定义答案" : ""
+  }`;
   return questions.length === 1
-    ? "请引用问题卡片，回复选项编号、选项文字或自定义答案。"
-    : `需要按顺序提供 ${questions.length} 个答案，并用中文分号“；”分隔，例如：1；2；自定义答案。`;
+    ? `请引用问题卡片，${detail}。`
+    : `需要按顺序提供 ${questions.length} 个答案，用中文分号“；”分隔；${detail}。`;
 }
 
 function activityEventFromPayload(payload: ActivityHookPayload): ActivityCardEvent {
@@ -3487,6 +4161,12 @@ function activityEventFromPayload(payload: ActivityHookPayload): ActivityCardEve
       return {
         at,
         label: `${humanizeToolName(payload.tool_name)} 已完成`,
+        detail: payload.tool_response_preview,
+      };
+    case "PostToolUseFailure":
+      return {
+        at,
+        label: `${humanizeToolName(payload.tool_name)} 执行失败`,
         detail: payload.tool_response_preview,
       };
     case "PreCompact":

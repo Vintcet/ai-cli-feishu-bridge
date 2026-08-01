@@ -60,14 +60,24 @@ function New-BridgeHookGroup {
 
 function Test-IsBridgeHookGroup {
     param([object]$Group)
-    if ($null -eq $Group) {
+    if ($null -eq $Group -or $Group -isnot [System.Collections.IDictionary]) {
         return $false
     }
+    $bridgeHookPattern = '/dist/hooks/(?:session-start|session-end|permission|request-user-input|activity|stop)\.js'
+    $directCommand = ([string]$Group["command"]).Replace('\', '/')
+    $directCommandWindows = ([string]$Group["commandWindows"]).Replace('\', '/')
+    if ($directCommand -match $bridgeHookPattern -or
+        $directCommandWindows -match $bridgeHookPattern) {
+        return $true
+    }
     foreach ($hook in @($Group["hooks"])) {
-        $command = [string]$hook["command"]
-        $commandWindows = [string]$hook["commandWindows"]
-        if ($command -match 'codex-feishu-bridge[\\/]dist[\\/]hooks[\\/]' -or
-            $commandWindows -match 'codex-feishu-bridge[\\/]dist[\\/]hooks[\\/]') {
+        if ($null -eq $hook -or $hook -isnot [System.Collections.IDictionary]) {
+            continue
+        }
+        $command = ([string]$hook["command"]).Replace('\', '/')
+        $commandWindows = ([string]$hook["commandWindows"]).Replace('\', '/')
+        if ($command -match $bridgeHookPattern -or
+            $commandWindows -match $bridgeHookPattern) {
             return $true
         }
     }

@@ -63,16 +63,16 @@ function Test-IsBridgeHookGroup {
         return $false
     }
     # Remove both the current grouped format and the unfinished legacy direct format.
-    $directCommand = [string]$Group["command"]
-    if ($directCommand -match 'codex-feishu-bridge[\\/]dist[\\/]hooks[\\/]') {
+    $directCommand = ([string]$Group["command"]).Replace('\', '/')
+    if ($directCommand -match '/dist/hooks/claude-code-[^/"]+\.js') {
         return $true
     }
     foreach ($hook in @($Group["hooks"])) {
         if ($null -eq $hook -or $hook -isnot [System.Collections.IDictionary]) {
             continue
         }
-        $command = [string]$hook["command"]
-        if ($command -match 'codex-feishu-bridge[\\/]dist[\\/]hooks[\\/]') {
+        $command = ([string]$hook["command"]).Replace('\', '/')
+        if ($command -match '/dist/hooks/claude-code-[^/"]+\.js') {
             return $true
         }
     }
@@ -113,6 +113,15 @@ Set-BridgeHookGroups "PreToolUse" @(
 )
 Set-BridgeHookGroups "PostToolUse" @(
     (New-BridgeHookGroup ".*" (New-BridgeHookCommand "claude-code-post-tool-use" 5))
+)
+Set-BridgeHookGroups "PostToolUseFailure" @(
+    (New-BridgeHookGroup ".*" (New-BridgeHookCommand "claude-code-activity" 5))
+)
+Set-BridgeHookGroups "PreCompact" @(
+    (New-BridgeHookGroup "" (New-BridgeHookCommand "claude-code-activity" 5))
+)
+Set-BridgeHookGroups "PostCompact" @(
+    (New-BridgeHookGroup "" (New-BridgeHookCommand "claude-code-activity" 5))
 )
 Set-BridgeHookGroups "UserPromptSubmit" @(
     (New-BridgeHookGroup "" (New-BridgeHookCommand "claude-code-user-prompt-submit" 5))
