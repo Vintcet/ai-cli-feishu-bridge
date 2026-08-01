@@ -26,7 +26,10 @@ internal static class ManagedTerminalHost
         var terminalId = ReadArgument(args, "--id");
         var cwd = ReadArgument(args, "--cwd");
         var bridgeUrl = ReadArgument(args, "--bridge-url") ?? "http://127.0.0.1:8765";
-        var rawCodexArguments = ReadArgument(args, "--codex-args");
+        var runtime = ReadArgument(args, "--runtime") ?? "codex";
+        var toolCommand = ReadArgument(args, "--tool-command");
+        var rawToolArguments = ReadArgument(args, "--tool-args") ??
+            ReadArgument(args, "--codex-args");
         if (string.IsNullOrWhiteSpace(terminalId) ||
             !terminalId.All(character => char.IsAsciiLetterOrDigit(character) || character is '_' or '-') ||
             terminalId.Length is < 8 or > 64)
@@ -36,6 +39,17 @@ internal static class ManagedTerminalHost
         if (string.IsNullOrWhiteSpace(cwd) || !Directory.Exists(cwd))
         {
             return 3;
+        }
+        if (runtime is not ("codex" or "claudecode"))
+        {
+            return 2;
+        }
+        toolCommand = string.IsNullOrWhiteSpace(toolCommand)
+            ? runtime == "claudecode" ? "claude" : "codex"
+            : toolCommand.Trim();
+        if (toolCommand.Length > 32_000 || toolCommand.IndexOfAny(['\r', '\n']) >= 0)
+        {
+            return 2;
         }
 
         if (!EnsureConsole())
@@ -50,7 +64,8 @@ internal static class ManagedTerminalHost
 
         var elevated = IsElevated();
         var projectName = new DirectoryInfo(cwd).Name;
-        SetConsoleTitle($"Codex · {projectName}{(elevated ? " · 管理员" : "")}");
+        var displayName = runtime == "claudecode" ? "Claude Code" : "Codex";
+        SetConsoleTitle($"{displayName} · {projectName}{(elevated ? " · 管理员" : "")}");
 
         using var cancellation = new CancellationTokenSource();
         Console.CancelKeyPress += (_, eventArgs) =>
@@ -61,12 +76,15 @@ internal static class ManagedTerminalHost
 
         try
         {
-            var codexArguments = CodexArgumentParser.Parse(rawCodexArguments);
+            var toolArguments = runtime == "claudecode"
+                ? CodexArgumentParser.ParseClaudeCode(rawToolArguments)
+                : CodexArgumentParser.Parse(rawToolArguments);
             RegisterTerminalAsync(
                     terminalId,
                     cwd,
                     bridgeUrl,
                     elevated,
+                    runtime,
                     ready: false,
                     cancellationToken: CancellationToken.None)
                 .GetAwaiter()
@@ -77,7 +95,9 @@ internal static class ManagedTerminalHost
                 terminalId,
                 bridgeUrl,
                 elevated,
-                codexArguments);
+                runtime,
+                toolCommand,
+                toolArguments);
             if (job is not null)
             {
                 AssignProcessToJobObject(job, powershell.Handle);
@@ -87,11 +107,13 @@ internal static class ManagedTerminalHost
                 cwd,
                 bridgeUrl,
                 elevated,
+                runtime,
                 powershell,
                 cancellation.Token);
             var pipeTask = RunPipeServerAsync(
                 terminalId,
                 elevated,
+                runtime,
                 powershell,
                 cancellation.Token);
             powershell.WaitForExit();
@@ -103,7 +125,7 @@ internal static class ManagedTerminalHost
         catch (Exception error)
         {
             Console.WriteLine();
-            Console.WriteLine($"Codex 启动失败：{error.Message}");
+            Console.WriteLine($"{displayName} 启动失败：{error.Message}");
             Console.WriteLine("按任意键关闭窗口。");
             try { Console.ReadKey(intercept: true); } catch { }
             return 5;
@@ -129,7 +151,9 @@ internal static class ManagedTerminalHost
         string terminalId,
         string bridgeUrl,
         bool elevated,
-        IReadOnlyList<string> codexArguments)
+        string runtime,
+        string toolCommand,
+        IReadOnlyList<string> toolArguments)
     {
         var executable = File.Exists(@"C:\Program Files\PowerShell\7\pwsh.exe")
             ? @"C:\Program Files\PowerShell\7\pwsh.exe"
@@ -144,15 +168,21 @@ internal static class ManagedTerminalHost
         startInfo.ArgumentList.Add("-NoLogo");
         startInfo.ArgumentList.Add("-Command");
         startInfo.ArgumentList.Add(
-            "$codexArgsJson = $env:CODEX_FEISHU_CODEX_ARGS_JSON; " +
-            "Remove-Item Env:CODEX_FEISHU_CODEX_ARGS_JSON -ErrorAction SilentlyContinue; " +
-            "$codexArgs = @($codexArgsJson | ConvertFrom-Json); " +
-            "& codex @codexArgs; exit $LASTEXITCODE");
+            "$toolCommand = $env:CODEX_FEISHU_TOOL_COMMAND; " +
+            "$toolArgsJson = $env:CODEX_FEISHU_TOOL_ARGS_JSON; " +
+            "Remove-Item Env:CODEX_FEISHU_TOOL_COMMAND -ErrorAction SilentlyContinue; " +
+            "Remove-Item Env:CODEX_FEISHU_TOOL_ARGS_JSON -ErrorAction SilentlyContinue; " +
+            "$toolArgs = @($toolArgsJson | ConvertFrom-Json); " +
+            "& $toolCommand @toolArgs; exit $LASTEXITCODE");
         startInfo.Environment["CODEX_FEISHU_MANAGED_TERMINAL_ID"] = terminalId;
         startInfo.Environment["CODEX_FEISHU_MANAGED_TERMINAL_ELEVATED"] = elevated ? "1" : "0";
         startInfo.Environment["CODEX_FEISHU_BRIDGE_URL"] = bridgeUrl;
-        startInfo.Environment["CODEX_FEISHU_CODEX_ARGS_JSON"] = JsonSerializer.Serialize(
-            BuildCodexArguments(terminalId, bridgeUrl, elevated, codexArguments));
+        startInfo.Environment["CODEX_FEISHU_RUNTIME"] = runtime;
+        startInfo.Environment["CODEX_FEISHU_TOOL_COMMAND"] = toolCommand;
+        startInfo.Environment["CODEX_FEISHU_TOOL_ARGS_JSON"] = JsonSerializer.Serialize(
+            runtime == "claudecode"
+                ? toolArguments
+                : BuildCodexArguments(terminalId, bridgeUrl, elevated, toolArguments));
 
         var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         if (!process.Start())
@@ -167,13 +197,14 @@ internal static class ManagedTerminalHost
         string cwd,
         string bridgeUrl,
         bool elevated,
+        string runtime,
         bool ready,
         CancellationToken cancellationToken)
     {
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
         using var response = await client.PostAsJsonAsync(
             $"{bridgeUrl.TrimEnd('/')}/managed-terminals/register",
-            new { terminalId, cwd, elevated, ready },
+            new { terminalId, cwd, elevated, runtime, ready },
             cancellationToken);
         response.EnsureSuccessStatusCode();
     }
@@ -196,6 +227,7 @@ internal static class ManagedTerminalHost
         string cwd,
         string bridgeUrl,
         bool elevated,
+        string runtime,
         Process powershell,
         CancellationToken cancellationToken)
     {
@@ -209,6 +241,7 @@ internal static class ManagedTerminalHost
                     cwd,
                     bridgeUrl,
                     elevated,
+                    runtime,
                     ready: !powershell.HasExited,
                     cancellationToken: cancellationToken);
             }
@@ -251,6 +284,7 @@ internal static class ManagedTerminalHost
     private static async Task RunPipeServerAsync(
         string terminalId,
         bool elevated,
+        string runtime,
         Process powershell,
         CancellationToken cancellationToken)
     {
@@ -269,9 +303,9 @@ internal static class ManagedTerminalHost
                     var input = TerminalInputParser.Parse(line);
                     if (powershell.HasExited)
                     {
-                        throw new InvalidOperationException("Codex 窗口已经关闭。");
+                        throw new InvalidOperationException("同步窗口已经关闭。");
                     }
-                    InjectPrompt(input);
+                    InjectPrompt(input, runtime);
                     response = new { ok = true, error = (string?)null };
                 }
                 catch (Exception error) when (error is not OperationCanceledException)
@@ -373,12 +407,12 @@ internal static class ManagedTerminalHost
         }
     }
 
-    private static void InjectPrompt(TerminalInputRequest input)
+    private static void InjectPrompt(TerminalInputRequest input, string runtime)
     {
         var inputHandle = GetStdHandle(StdInputHandle);
         if (inputHandle == IntPtr.Zero || inputHandle == new IntPtr(-1))
         {
-            throw new InvalidOperationException("无法访问 Codex 窗口输入缓冲区。");
+            throw new InvalidOperationException("无法访问同步窗口输入缓冲区。");
         }
 
         var records = new List<InputRecord>(input.Prompt.Length * 2);
@@ -389,16 +423,16 @@ internal static class ManagedTerminalHost
         }
         WriteInputRecords(inputHandle, records);
 
-        // Codex deliberately treats a rapid burst of characters as pasted text. Give its
-        // paste detector time to flush before sending the submit key, otherwise Enter can
-        // become a newline inside the prompt. Enter steers the current turn; Tab queues the
-        // prompt for the next turn.
+        // Both TUIs treat a rapid burst as pasted text. Wait for the paste detector before
+        // submitting. Codex uses Tab for an explicit next-turn queue; Claude Code queues
+        // typed input with Enter while a turn is running.
         Thread.Sleep(600);
-        var submitCharacter = input.SubmitMode == TerminalSubmitMode.Queue ? '\t' : '\r';
-        var submitVirtualKey = input.SubmitMode == TerminalSubmitMode.Queue
+        var useTab = runtime == "codex" && input.SubmitMode == TerminalSubmitMode.Queue;
+        var submitCharacter = useTab ? '\t' : '\r';
+        var submitVirtualKey = useTab
             ? VirtualKeyTab
             : VirtualKeyReturn;
-        var submitScanCode = input.SubmitMode == TerminalSubmitMode.Queue
+        var submitScanCode = useTab
             ? VirtualScanTab
             : VirtualScanReturn;
         WriteInputRecords(inputHandle,
@@ -414,7 +448,7 @@ internal static class ManagedTerminalHost
         if (!WriteConsoleInput(inputHandle, buffer, (uint)buffer.Length, out var written) ||
             written != buffer.Length)
         {
-            throw new InvalidOperationException("向 Codex 窗口写入回复失败。");
+            throw new InvalidOperationException("向同步窗口写入回复失败。");
         }
     }
 

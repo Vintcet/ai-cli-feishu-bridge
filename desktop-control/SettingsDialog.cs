@@ -48,7 +48,7 @@ internal sealed class SettingsDialog : Form
         ConfigureCheckBox(
             notifyUserPromptsBox,
             "同步电脑端输入到飞书",
-            "把你在 PC Codex 窗口提交的消息同步到对应飞书会话；飞书发来的消息不会重复回显。",
+            "把你在 PC 助手窗口提交的消息同步到对应飞书会话；飞书发来的消息不会重复回显。",
             148,
             settings.NotifyUserPrompts);
         ConfigureCheckBox(
@@ -61,7 +61,7 @@ internal sealed class SettingsDialog : Form
         ConfigureCheckBox(
             autoApproveBox,
             "审批请求自动允许",
-            "高风险：Codex 请求权限时不再等待人工确认，并在飞书留下记录。",
+            "高风险：助手请求权限时不再等待人工确认，并在飞书留下记录。",
             404,
             settings.AutoApprove);
         autoRetryBox.CheckedChanged += (_, _) =>
@@ -104,7 +104,7 @@ internal sealed class SettingsDialog : Form
         {
             var confirmation = MessageBox.Show(
                 this,
-                "开启后，Codex 的权限请求将直接允许，不再等待你确认。确定开启吗？",
+                "开启后，助手的权限请求将直接允许，不再等待你确认。确定开启吗？",
                 "确认开启自动审批",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning,

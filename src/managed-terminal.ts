@@ -1,7 +1,7 @@
 import net from "node:net";
 import path from "node:path";
 
-import type { SessionRecord } from "./domain.js";
+import type { RuntimeName, SessionRecord } from "./domain.js";
 
 interface TerminalReply {
   ok?: boolean;
@@ -16,6 +16,7 @@ export interface ManagedTerminalRegistration {
   normalizedCwd: string;
   elevated: boolean;
   ready: boolean;
+  runtime: Exclude<RuntimeName, "opencode">;
   createdAt: number;
   lastSeenAt: number;
   sessionId?: string;
@@ -25,6 +26,7 @@ export interface ManagedTerminalClaim {
   terminalId: string;
   elevated: boolean;
   createdAt: number;
+  runtime: Exclude<RuntimeName, "opencode">;
 }
 
 export function managedTerminalSessionId(terminalId: string): string {
@@ -71,6 +73,7 @@ export class ManagedTerminalRouter {
       cwd?: unknown;
       elevated?: unknown;
       ready?: unknown;
+      runtime?: unknown;
     },
     existingSessionId?: string,
   ): void {
@@ -81,6 +84,14 @@ export class ManagedTerminalRouter {
     }
     const now = Date.now();
     const current = this.registrations.get(terminalId);
+    const runtime = value.runtime === undefined
+      ? current?.runtime ?? "codex"
+      : value.runtime === "codex" || value.runtime === "claudecode"
+        ? value.runtime
+        : undefined;
+    if (!runtime) {
+      throw new Error("托管终端运行时无效。");
+    }
     this.registrations.set(terminalId, {
       terminalId,
       cwd: path.resolve(cwd),
@@ -90,6 +101,7 @@ export class ManagedTerminalRouter {
         typeof value.ready === "boolean"
           ? value.ready
           : current?.ready ?? true,
+      runtime,
       createdAt: current?.createdAt ?? now,
       lastSeenAt: now,
       sessionId: existingSessionId ?? current?.sessionId,
@@ -123,6 +135,7 @@ export class ManagedTerminalRouter {
       terminalId: candidate.terminalId,
       elevated: candidate.elevated,
       createdAt: candidate.createdAt,
+      runtime: candidate.runtime,
     };
   }
 
@@ -144,7 +157,7 @@ export class ManagedTerminalRouter {
       throw new Error("托管终端 ID 与项目目录不匹配，已拒绝认领。");
     }
     if (registration.sessionId && registration.sessionId !== sessionId) {
-      throw new Error("托管终端已经属于另一个 Codex 会话。");
+      throw new Error("托管终端已经属于另一个会话。");
     }
     registration.sessionId = sessionId;
     registration.ready = true;
@@ -152,6 +165,7 @@ export class ManagedTerminalRouter {
       terminalId: registration.terminalId,
       elevated: registration.elevated,
       createdAt: registration.createdAt,
+      runtime: registration.runtime,
     };
   }
 
@@ -170,7 +184,7 @@ export class ManagedTerminalRouter {
   ): Promise<void> {
     const terminalId = session.managedTerminalId;
     if (!terminalId || !/^[a-zA-Z0-9_-]{8,64}$/.test(terminalId)) {
-      throw new Error("托管终端 ID 无效，请从桌面助手重新打开这个 Codex 窗口。");
+      throw new Error("托管终端 ID 无效，请从桌面助手重新打开这个同步窗口。");
     }
 
     const normalizedPrompt = prompt.replace(/[\r\n]+/g, " ").trim();
@@ -186,10 +200,10 @@ export class ManagedTerminalRouter {
 
     const registration = this.registrations.get(terminalId);
     if (!registration || Date.now() - registration.lastSeenAt > 20_000) {
-      throw new Error("对应的 Codex 窗口已经关闭或暂时离线。");
+      throw new Error("对应的同步窗口已经关闭或暂时离线。");
     }
     if (!registration.ready) {
-      throw new Error("Codex 窗口仍在启动，请稍等几秒后再回复。");
+      throw new Error("同步窗口仍在启动，请稍等几秒后再回复。");
     }
     if (registration.sessionId && registration.sessionId !== session.sessionId) {
       throw new Error("托管终端与目标会话不匹配，已拒绝输入以避免串线。");
@@ -227,7 +241,7 @@ export class ManagedTerminalRouter {
         await new Promise((resolve) => setTimeout(resolve, attempt * 150));
       }
     }
-    throw lastError ?? new Error("无法连接托管 Codex 窗口。");
+    throw lastError ?? new Error("无法连接托管同步窗口。");
   }
 
   private async sendOnce(
@@ -270,24 +284,24 @@ export class ManagedTerminalRouter {
         }
       });
       socket.once("timeout", () =>
-        finish(pipeError("ETIMEDOUT", "连接托管 Codex 窗口超时。")),
+          finish(pipeError("ETIMEDOUT", "连接托管同步窗口超时。")),
       );
       socket.once("error", (error: NodeJS.ErrnoException) => {
         if (error.code === "EACCES") {
           finish(pipeError(
             error.code,
-            "管理员 Codex 窗口拒绝了桥接连接。请用最新版桌面助手重新打开这个会话。",
+            "管理员同步窗口拒绝了桥接连接。请用最新版桌面助手重新打开这个会话。",
           ));
           return;
         }
         finish(pipeError(
           error.code ?? "EPIPE",
-          "对应的 Codex 窗口暂时无法接收输入。",
+          "对应的同步窗口暂时无法接收输入。",
         ));
       });
       socket.once("close", () => {
         if (!settled) {
-          finish(pipeError("ECONNRESET", "对应的 Codex 窗口在接收回复前已关闭。"));
+          finish(pipeError("ECONNRESET", "对应的同步窗口在接收回复前已关闭。"));
         }
       });
     });

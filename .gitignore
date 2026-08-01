@@ -2,6 +2,8 @@ node_modules/
 dist/
 .env
 data/*.json
+data/*.err
+data/*.out
 data/uploads/
 data/hook-test-home/
 *.log

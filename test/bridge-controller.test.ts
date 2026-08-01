@@ -945,6 +945,105 @@ test("request_user_input can be answered by replying to the Feishu card", async 
   }
 });
 
+test("Claude AskUserQuestion answers are returned as updatedInput", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-claude-input-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      {
+        openId: "owner",
+        chatId: "chat-owner",
+        chatType: "p2p",
+        boundAt: new Date().toISOString(),
+      },
+      code,
+    );
+    const sessionId = "b7da810f-78d4-470c-a836-f1aa6a9bb442";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "running",
+      source: "startup",
+      runtime: "claudecode",
+      clientProcessId: process.pid,
+    });
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+
+    const originalInput = {
+      questions: [
+        {
+          header: "发布方式",
+          question: "选择发布方式",
+          options: [
+            { label: "仅构建", description: "只生成文件" },
+            { label: "构建并发布", description: "生成并发布" },
+          ],
+          multiSelect: false,
+        },
+      ],
+    };
+    const hookResultPromise = controller.handleRequestUserInputHook({
+      hook_event_name: "PreToolUse",
+      session_id: sessionId,
+      turn_id: "claude-turn-input-1",
+      cwd: directory,
+      model: "claude-code",
+      runtime: "claudecode",
+      tool_name: "request_user_input",
+      tool_input: {
+        questions: [
+          {
+            header: "发布方式",
+            id: "claude_question_1",
+            question: "选择发布方式",
+            options: [
+              { label: "仅构建", description: "只生成文件" },
+              { label: "构建并发布", description: "生成并发布" },
+            ],
+          },
+        ],
+        claudeCodeOriginalInput: originalInput,
+        claudeCodeQuestionTextById: {
+          claude_question_1: "选择发布方式",
+        },
+      },
+    });
+    while (feishu.cards.length === 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const questionCardId = feishu.cards[0]!.messageId;
+    await controller.handleFeishuMessage(
+      messageEvent("claude-input-answer", "owner", "2", "p2p", questionCardId),
+    );
+    const hookResult = await hookResultPromise as {
+      hookSpecificOutput?: {
+        permissionDecision?: string;
+        updatedInput?: Record<string, unknown>;
+      };
+    };
+    assert.equal(hookResult.hookSpecificOutput?.permissionDecision, "allow");
+    assert.deepEqual(hookResult.hookSpecificOutput?.updatedInput, {
+      ...originalInput,
+      answers: { "选择发布方式": "构建并发布" },
+      annotations: {},
+    });
+    assert.equal(feishu.replies.at(-1)?.text, "Claude Code 已接收。");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("activity hooks reuse one progress card and complete it on Stop", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-activity-"));
   try {

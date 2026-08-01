@@ -17,6 +17,7 @@ import {
   buildUserPromptCards,
   type ActivityCardEvent,
 } from "./cards.js";
+import { readLastClaudeAssistantMessage } from "./claude-code-transcript.js";
 import type { CodexExitResult } from "./codex-runner.js";
 import { CodexRunner } from "./codex-runner.js";
 import {
@@ -43,6 +44,7 @@ import type {
   MessageRouteKind,
   PermissionHookPayload,
   RequestUserInputHookPayload,
+  RuntimeName,
   SessionEndHookPayload,
   SessionRecord,
   SessionStartHookPayload,
@@ -61,6 +63,7 @@ import {
   statusLabel,
   stringifyModel,
   truncate,
+  runtimeDisplayName,
 } from "./domain.js";
 import { FeishuGateway } from "./feishu.js";
 import {
@@ -467,7 +470,7 @@ export class BridgeController {
       ok: true,
       alreadyResolved: false,
       resolution,
-      message: approvalText(resolution),
+      message: approvalText(resolution, this.store.getSession(existing.sessionId)),
     };
   }
 
@@ -914,6 +917,7 @@ export class BridgeController {
       model: payload.model,
       status: managedTerminalId ? "waiting" : "running",
       source: payload.source,
+      runtime: payload.runtime ?? claimedTerminal?.runtime,
       clientProcessId: managedTerminalId
         ? null
         : payload.client_process_id ?? null,
@@ -1000,6 +1004,7 @@ export class BridgeController {
       model: payload.model,
       turnId: payload.turn_id,
       status: "pending_approval",
+      runtime: payload.runtime,
       ...(payload.managed_terminal_id !== undefined
         ? { managedTerminalId: payload.managed_terminal_id }
         : {}),
@@ -1102,6 +1107,7 @@ export class BridgeController {
       model: payload.model,
       turnId: payload.turn_id,
       status: "pending_input",
+      runtime: payload.runtime,
       ...(payload.managed_terminal_id !== undefined
         ? { managedTerminalId: payload.managed_terminal_id }
         : {}),
@@ -1168,6 +1174,31 @@ export class BridgeController {
           `${index + 1}. ${question.header} (${question.id}): ${resolution.answers[question.id] ?? ""}`,
       )
       .join("\n");
+    if (payload.runtime === "claudecode") {
+      const originalInput = payload.tool_input.claudeCodeOriginalInput;
+      const questionTextById = payload.tool_input.claudeCodeQuestionTextById;
+      if (originalInput && questionTextById) {
+        const answers = Object.fromEntries(
+          payload.tool_input.questions.flatMap((question) => {
+            const questionText = questionTextById[question.id];
+            return questionText
+              ? [[questionText, resolution.answers[question.id] ?? ""]]
+              : [];
+          }),
+        );
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "allow",
+            updatedInput: {
+              ...originalInput,
+              answers,
+              annotations: {},
+            },
+          },
+        };
+      }
+    }
     return {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
@@ -1201,13 +1232,23 @@ export class BridgeController {
       this.remoteInputLocks.delete(payload.session_id);
     }
     const previous = this.store.getSession(payload.session_id);
+
+    let assistantMessage = payload.last_assistant_message;
+    let turnId = payload.turn_id;
+    if (payload.runtime === "claudecode" && payload.transcript_path) {
+      const transcriptMessage = await readLastClaudeAssistantMessage(payload.transcript_path);
+      assistantMessage ||= transcriptMessage?.text ?? null;
+      turnId = transcriptMessage?.turnId ?? turnId;
+    }
+
     const session = await this.store.upsertSession({
       sessionId: payload.session_id,
       cwd: payload.cwd,
       model: payload.model,
-      turnId: payload.turn_id,
+      turnId,
       status: "waiting",
-      assistantMessage: payload.last_assistant_message,
+      assistantMessage,
+      runtime: payload.runtime,
       ...(payload.managed_terminal_id !== undefined
         ? { managedTerminalId: payload.managed_terminal_id }
         : {}),
@@ -1215,13 +1256,13 @@ export class BridgeController {
         ? { managedTerminalElevated: payload.managed_terminal_elevated }
         : {}),
     });
-    const codexError = codexErrorFromMessage(payload.last_assistant_message);
+    const codexError = codexErrorFromMessage(assistantMessage);
     await this.finishActivity(
       payload.session_id,
       codexError ? "本轮发生错误" : "本轮处理完成",
     );
 
-    if (previous?.lastNotificationTurnId === payload.turn_id) {
+    if (previous?.lastNotificationTurnId === turnId) {
       return {};
     }
     if (codexError) {
@@ -1252,7 +1293,7 @@ export class BridgeController {
           console.error("[stop] Failed to send a Codex error card:", error);
         }
       }
-      await this.store.markStopNotified(payload.session_id, payload.turn_id);
+      await this.store.markStopNotified(payload.session_id, turnId);
       if (canRetry) {
         this.managedRetryCounts.set(payload.session_id, retryCount + 1);
         setTimeout(() => {
@@ -1286,9 +1327,10 @@ export class BridgeController {
     this.decrementManagedQueueDepth(payload.session_id);
 
     const fileDirectives = extractBridgeFileDirectives(
-      payload.last_assistant_message?.trim() || "Codex 已结束本轮处理。",
+      assistantMessage?.trim() || `${runtimeDisplayName(session.runtime)} 已结束本轮处理。`,
     );
-    const message = fileDirectives.displayMessage || "Codex 已结束本轮处理。";
+    const message = fileDirectives.displayMessage ||
+      `${runtimeDisplayName(session.runtime)} 已结束本轮处理。`;
     let sentCount = 0;
     for (const recipient of await this.notificationRecipients(session)) {
       try {
@@ -1302,7 +1344,7 @@ export class BridgeController {
       }
     }
     if (sentCount > 0) {
-      await this.store.markStopNotified(payload.session_id, payload.turn_id);
+      await this.store.markStopNotified(payload.session_id, turnId);
       console.log(`[stop] Notified Feishu for session #${session.shortId}.`);
     }
     if (fileReturnRequest && fileDirectives.paths.length > 0) {
@@ -1517,10 +1559,13 @@ export class BridgeController {
         kind: "answered",
         answers,
       });
+      const inputSession = this.store.getSession(waiter.sessionId);
       await this.respond(
         messageId,
         chatId,
-        completed ? CODEX_RECEIVED : codexNotReceived("问题已处理或失效。"),
+        completed
+          ? receivedText(inputSession)
+          : notReceivedText(inputSession, "问题已处理或失效。"),
       );
       return;
     }
@@ -1528,6 +1573,7 @@ export class BridgeController {
     if (quotedRoute?.requestId && this.store.hasPendingApprovalForSession(quotedRoute.sessionId)) {
       const approvalResolution = approvalResolutionFromText(text);
       if (approvalResolution) {
+        const approvalSession = this.store.getSession(quotedRoute.sessionId);
         const completed = await this.completeApproval(
           quotedRoute.requestId,
           approvalResolution,
@@ -1535,7 +1581,9 @@ export class BridgeController {
         await this.respond(
           messageId,
           chatId,
-          completed ? approvalText(approvalResolution) : "这条审批已经处理或失效。",
+          completed
+            ? approvalText(approvalResolution, approvalSession)
+            : "这条审批已经处理或失效。",
         );
       } else {
         await this.respond(
@@ -1699,10 +1747,11 @@ export class BridgeController {
         kind: "answered",
         answers: { [questionId]: answer },
       });
+      const runtime = runtimeDisplayName(this.store.getSession(waiter.sessionId)?.runtime);
       return {
         toast: {
           type: completed ? "success" : "warning",
-          content: completed ? "已把答案交给 Codex。" : "这组问题已经处理或失效。",
+          content: completed ? `已把答案交给 ${runtime}。` : "这组问题已经处理或失效。",
         },
       };
     }
@@ -1725,7 +1774,9 @@ export class BridgeController {
     return {
       toast: {
         type: completed ? "success" : "warning",
-        content: completed ? approvalText(resolution) : "这条审批已经处理或失效。",
+        content: completed
+          ? approvalText(resolution, this.store.getSession(approval.sessionId))
+          : "这条审批已经处理或失效。",
       },
     };
   }
@@ -2281,6 +2332,7 @@ export class BridgeController {
           model: payload.model,
           turnId: payload.turn_id,
           status: "running",
+          runtime: payload.runtime,
           ...(payload.managed_terminal_id !== undefined
             ? { managedTerminalId: payload.managed_terminal_id }
             : {}),
@@ -2713,6 +2765,7 @@ export class BridgeController {
         openedAt: new Date(registration.createdAt).toISOString(),
         lastSeenAt: new Date(registration.lastSeenAt).toISOString(),
         source: "managed_window",
+        runtime: registration.runtime,
         managedTerminalId: registration.terminalId,
         managedTerminalElevated: registration.elevated,
       });
@@ -2871,23 +2924,24 @@ export class BridgeController {
 
   private activeSessionDefinition(): string {
     const fallbackMs = Math.min(this.config.sessionActiveMs, 5 * 60 * 1000);
-    return `活跃定义：助手打开的 Codex 窗口从打开到关闭始终算活跃；opencode 窗口从连接到关闭始终算活跃；外部会话会跟踪真实 Codex 进程，进程关闭后自动移除。无法取得进程信息时仅临时保留 ${formatDuration(fallbackMs)}。`;
+    return `活跃定义：助手打开的 Codex / Claude Code 窗口从打开到关闭始终算活跃；opencode 窗口从连接到关闭始终算活跃；外部会话会跟踪真实 CLI 进程，进程关闭后自动移除。无法取得进程信息时仅临时保留 ${formatDuration(fallbackMs)}。`;
   }
 
   private formatSessionList(): string {
     const sessions = this.listActiveSessions();
     if (sessions.length === 0) {
-      return `当前没有活跃 Codex 会话。\n${this.activeSessionDefinition()}`;
+      return `当前没有活跃助手会话。\n${this.activeSessionDefinition()}`;
     }
     const lines = sessions.slice(0, 20).map(
       (session, index) => {
+        const kind = runtimeDisplayName(session.runtime);
         const mode = session.runtime === "opencode"
           ? " · opencode 窗口"
           : session.managedTerminalId
             ? session.managedTerminalElevated
-              ? " · 管理员同步"
-              : " · 窗口同步"
-            : " · 外部会话（仅通知）";
+              ? ` · ${kind} 管理员同步`
+              : ` · ${kind} 窗口同步`
+            : ` · ${kind} 外部会话（仅通知）`;
         const address = session.alias
           ? `@${session.alias}  (#${session.shortId})`
           : sessionAddress(session);
@@ -2975,7 +3029,7 @@ export class BridgeController {
     ownerOpenId: string,
   ): Promise<SessionRecord | undefined> {
     const name = this.sessionGroupName(session);
-    const kind = session.runtime === "opencode" ? "opencode" : "Codex";
+    const kind = runtimeDisplayName(session.runtime);
     try {
       const group = await this.feishu.createSessionGroup(
         ownerOpenId,
@@ -3020,7 +3074,11 @@ export class BridgeController {
   }
 
   private sessionGroupName(session: SessionRecord): string {
-    const prefix = session.runtime === "opencode" ? "OpenCode｜" : "Codex｜";
+    const prefix = session.runtime === "opencode"
+      ? "OpenCode｜"
+      : session.runtime === "claudecode"
+        ? "Claude｜"
+        : "Codex｜";
     return `${prefix}${session.alias || session.projectName || session.shortId}`.slice(0, 60);
   }
 
@@ -3153,7 +3211,7 @@ function activityEventFromPayload(payload: ActivityHookPayload): ActivityCardEve
     case "PostCompact":
       return { at, label: "上下文压缩完成" };
     case "UserPromptSubmit":
-      return { at, label: "已提交新任务，Codex 开始处理" };
+      return { at, label: `已提交新任务，${runtimeDisplayName(payload.runtime)} 开始处理` };
   }
 }
 
@@ -3162,8 +3220,7 @@ function normalizePromptForMatch(value: string): string {
 }
 
 function externalSessionInputBlockedMessage(session: SessionRecord): string {
-  void session;
-  return codexNotReceived("外部会话不支持飞书输入。请回到原窗口继续。");
+  return notReceivedText(session, "外部会话不支持飞书输入。请回到原窗口继续。");
 }
 
 const CODEX_RECEIVED = "Codex 已接收。";
@@ -3173,18 +3230,28 @@ function codexNotReceived(reason: string): string {
 }
 
 function receivedText(
-  session: { runtime?: "codex" | "opencode" } | undefined,
+  session: { runtime?: RuntimeName } | undefined,
 ): string {
-  return session?.runtime === "opencode" ? "opencode 已接收。" : CODEX_RECEIVED;
+  if (session?.runtime === "opencode") {
+    return "opencode 已接收。";
+  }
+  if (session?.runtime === "claudecode") {
+    return "Claude Code 已接收。";
+  }
+  return CODEX_RECEIVED;
 }
 
 function notReceivedText(
-  session: { runtime?: "codex" | "opencode" } | undefined,
+  session: { runtime?: RuntimeName } | undefined,
   reason: string,
 ): string {
-  return session?.runtime === "opencode"
-    ? `opencode 未接收：${reason}`
-    : codexNotReceived(reason);
+  if (session?.runtime === "opencode") {
+    return `opencode 未接收：${reason}`;
+  }
+  if (session?.runtime === "claudecode") {
+    return `Claude Code 未接收：${reason}`;
+  }
+  return codexNotReceived(reason);
 }
 
 function isRetryableCodexError(value: string): boolean {
@@ -3343,14 +3410,18 @@ function approvalResolutionFromText(text: string): ApprovalResolution | undefine
   return undefined;
 }
 
-function approvalText(resolution: ApprovalResolution): string {
+function approvalText(
+  resolution: ApprovalResolution,
+  session?: { runtime?: RuntimeName },
+): string {
+  const runtime = runtimeDisplayName(session?.runtime);
   switch (resolution) {
     case "allow":
-      return "已批准，Codex 将继续执行。";
+      return `已批准，${runtime} 将继续执行。`;
     case "deny":
       return "已拒绝这次操作。";
     case "local":
-      return "已转回电脑端确认。";
+      return `已转回电脑端，请在原 ${runtime} 窗口确认。`;
     case "timeout":
       return "审批已超时，已转回电脑端。";
   }

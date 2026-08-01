@@ -24,7 +24,7 @@ internal sealed class ApprovalDialog : Form
         this.approval = approval;
         this.resolver = resolver;
 
-        Text = $"Codex 审批 · {approval.ProjectName}";
+        Text = $"助手审批 · {approval.ProjectName}";
         Icon = SystemIcons.Shield;
         StartPosition = FormStartPosition.CenterParent;
         ClientSize = new Size(760, 560);
@@ -84,7 +84,7 @@ internal sealed class ApprovalDialog : Form
         var title = new Label
         {
             AutoSize = true,
-            Text = "Codex 需要你的确认",
+            Text = "助手需要你的确认",
             ForeColor = Color.FromArgb(15, 23, 42),
             Font = new Font("Microsoft YaHei UI", 17F, FontStyle.Bold),
             Margin = new Padding(0, 0, 0, 14),

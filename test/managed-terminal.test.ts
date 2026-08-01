@@ -24,11 +24,18 @@ test("claims same-directory windows by explicit terminal id", () => {
   const router = new ManagedTerminalRouter();
   const cwd = path.resolve("same-project");
   router.register({ terminalId: "terminal111", cwd, elevated: false, ready: true });
-  router.register({ terminalId: "terminal222", cwd, elevated: true, ready: true });
+  router.register({
+    terminalId: "terminal222",
+    cwd,
+    elevated: true,
+    ready: true,
+    runtime: "claudecode",
+  });
 
   const claim = router.claimById("terminal222", cwd, "session-second");
   assert.equal(claim?.terminalId, "terminal222");
   assert.equal(claim?.elevated, true);
+  assert.equal(claim?.runtime, "claudecode");
   const registrations = router.listOnline();
   assert.equal(
     registrations.find((item) => item.terminalId === "terminal222")?.sessionId,

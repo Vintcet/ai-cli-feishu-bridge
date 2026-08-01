@@ -13,6 +13,7 @@ internal static class Program
             ("full codex command", TestFullCodexCommand),
             ("quoted arguments", TestQuotedArguments),
             ("opencode arguments", TestOpenCodeArguments),
+            ("claude code arguments", TestClaudeCodeArguments),
             ("shell-looking text stays data", TestShellLookingText),
             ("terminal input defaults to steer", TestTerminalInputDefaultsToSteer),
             ("terminal input supports queue", TestTerminalInputSupportsQueue),
@@ -107,6 +108,18 @@ internal static class Program
             ["--port", "5100", "-s", "019faef0-d0bb-7703-af82-17ee9b45397b"],
             CodexArgumentParser.ParseOpenCode(
                 "opencode --port 5100 -s 019faef0-d0bb-7703-af82-17ee9b45397b"));
+    }
+
+    private static void TestClaudeCodeArguments()
+    {
+        AssertSequence(
+            ["--resume", "019faef0-d0bb-7703-af82-17ee9b45397b"],
+            CodexArgumentParser.ParseClaudeCode(
+                "--resume 019faef0-d0bb-7703-af82-17ee9b45397b"));
+        AssertSequence(
+            ["--resume", "019faef0-d0bb-7703-af82-17ee9b45397b"],
+            CodexArgumentParser.ParseClaudeCode(
+                "claude --resume 019faef0-d0bb-7703-af82-17ee9b45397b"));
     }
 
     private static void TestShellLookingText()

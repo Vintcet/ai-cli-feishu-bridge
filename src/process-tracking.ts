@@ -21,6 +21,8 @@ interface ProcessMatchCache {
 
 let processMatchCache: ProcessMatchCache | undefined;
 
+const trackedAssistantProcessPattern = /^(?:codex|claude)(?:\.exe)?$/i;
+
 export function findCodexAncestor(
   startProcessId: number,
   snapshots: ProcessSnapshot[],
@@ -37,7 +39,7 @@ export function findCodexAncestor(
     if (!current) {
       break;
     }
-    if (/^codex(?:\.exe)?$/i.test(current.name)) {
+    if (trackedAssistantProcessPattern.test(current.name)) {
       return { processId: current.processId, startedAt: current.startedAt };
     }
     currentId = current.parentProcessId;
@@ -131,7 +133,7 @@ export function matchTrackedCodexProcessIds(
   const matches = new Set<number>();
   for (const client of clients) {
     const snapshot = snapshotById.get(client.processId);
-    if (!snapshot || !/^codex(?:\.exe)?$/i.test(snapshot.name)) {
+    if (!snapshot || !trackedAssistantProcessPattern.test(snapshot.name)) {
       continue;
     }
     if (client.startedAt) {

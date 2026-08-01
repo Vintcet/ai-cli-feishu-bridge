@@ -7,6 +7,7 @@ import type {
 import {
   looksLikeQuestion,
   redactSensitiveText,
+  runtimeDisplayName,
   sessionLabel,
   truncate,
 } from "./domain.js";
@@ -23,14 +24,18 @@ export interface ActivityCardEvent {
   detail?: string;
 }
 
-function approvalResultText(resolution: ApprovalResolution): string {
+function approvalResultText(
+  resolution: ApprovalResolution,
+  session: SessionRecord,
+): string {
+  const runtime = runtimeDisplayName(session.runtime);
   switch (resolution) {
     case "allow":
-      return "已批准，Codex 将继续执行。";
+      return `已批准，${runtime} 将继续执行。`;
     case "deny":
-      return "已拒绝，Codex 会收到拒绝结果。";
+      return `已拒绝，${runtime} 会收到拒绝结果。`;
     case "local":
-      return "已转回电脑端，请在原 Codex 窗口确认。";
+      return `已转回电脑端，请在原 ${runtime} 窗口确认。`;
     case "timeout":
       return "飞书审批已超时，已转回电脑端确认。";
   }
@@ -40,12 +45,13 @@ export function buildApprovalCard(
   session: SessionRecord,
   approval: ApprovalRecord,
 ): Card {
+  const runtime = runtimeDisplayName(session.runtime);
   const detail = truncate(approval.toolPreview || "（没有可展示的参数）", 2600);
   return {
     config: { wide_screen_mode: true, update_multi: true },
     header: {
       template: "orange",
-      title: { tag: "plain_text", content: "Codex 需要你的确认" },
+      title: { tag: "plain_text", content: `${runtime} 需要你的确认` },
     },
     elements: [
       {
@@ -68,7 +74,7 @@ export function buildApprovalCard(
         elements: [
           {
             tag: "plain_text",
-            content: "只批准这一次。也可以在 Codex 飞书助手的本机审批窗口处理，先处理的一端生效。",
+            content: "只批准这一次。也可以在飞书助手的本机审批窗口处理，先处理的一端生效。",
           },
         ],
       },
@@ -106,19 +112,20 @@ export function buildResolvedApprovalCard(
   approval: ApprovalRecord,
   resolution: ApprovalResolution,
 ): Card {
+  const runtime = runtimeDisplayName(session.runtime);
   const template = resolution === "allow" ? "green" : resolution === "deny" ? "red" : "grey";
   return {
     config: { wide_screen_mode: true, update_multi: true },
     header: {
       template,
-      title: { tag: "plain_text", content: "Codex 审批已处理" },
+      title: { tag: "plain_text", content: `${runtime} 审批已处理` },
     },
     elements: [
       {
         tag: "div",
         text: {
           tag: "lark_md",
-          content: `**会话：** ${sessionLabel(session)}\n**工具：** ${approval.toolName}\n\n${approvalResultText(resolution)}`,
+          content: `**会话：** ${sessionLabel(session)}\n**工具：** ${approval.toolName}\n\n${approvalResultText(resolution, session)}`,
         },
       },
     ],
@@ -130,6 +137,7 @@ export function buildUserInputCard(
   requestId: string,
   questions: UserInputQuestion[],
 ): Card {
+  const runtime = runtimeDisplayName(session.runtime);
   const questionElements = questions.flatMap((question, questionIndex) => {
     const options = question.options
       .map(
@@ -185,7 +193,7 @@ export function buildUserInputCard(
     config: { wide_screen_mode: true, update_multi: true },
     header: {
       template: "orange",
-      title: { tag: "plain_text", content: "Codex 等待你补充信息" },
+      title: { tag: "plain_text", content: `${runtime} 等待你补充信息` },
     },
     elements: [
       {
@@ -212,6 +220,7 @@ export function buildResolvedUserInputCard(
   answers: Record<string, string> | undefined,
   resolution: "answered" | "local" | "timeout",
 ): Card {
+  const runtime = runtimeDisplayName(session.runtime);
   const result = resolution === "answered"
     ? questions
         .map(
@@ -220,13 +229,13 @@ export function buildResolvedUserInputCard(
         )
         .join("\n")
     : resolution === "local"
-      ? "已转回电脑端，请在原 Codex 窗口回答。"
+      ? `已转回电脑端，请在原 ${runtime} 窗口回答。`
       : "飞书回答已超时，已转回电脑端。";
   return {
     config: { wide_screen_mode: true, update_multi: true },
     header: {
       template: resolution === "answered" ? "green" : "grey",
-      title: { tag: "plain_text", content: "Codex 补充信息已处理" },
+      title: { tag: "plain_text", content: `${runtime} 补充信息已处理` },
     },
     elements: [
       {
@@ -246,6 +255,7 @@ export function buildActivityCard(
   startedAt: string,
   completed = false,
 ): Card {
+  const runtime = runtimeDisplayName(session.runtime);
   const eventElements = events.flatMap((event) => [
     {
       tag: "div",
@@ -267,7 +277,7 @@ export function buildActivityCard(
       template: completed ? "green" : "blue",
       title: {
         tag: "plain_text",
-        content: completed ? "Codex 本轮处理完成" : "Codex 正在处理",
+        content: completed ? `${runtime} 本轮处理完成` : `${runtime} 正在处理`,
       },
     },
     elements: [
@@ -310,18 +320,19 @@ export function buildStopCards(
   session: SessionRecord,
   assistantMessage: string,
 ): Card[] {
+  const runtime = runtimeDisplayName(session.runtime);
   const safeMessage = redactSensitiveText(assistantMessage).trim();
   const waitingForReply = looksLikeQuestion(safeMessage);
   const continuationHint = session.managedByAssistant === true
     ? "下一轮请直接发送消息。"
     : "外部会话不支持飞书输入。";
-  const chunks = splitTextForFeishu(safeMessage || "Codex 已结束本轮处理。", 2_800);
+  const chunks = splitTextForFeishu(safeMessage || `${runtime} 已结束本轮处理。`, 2_800);
   return chunks.map((chunk, index) => buildMessageCard({
     session,
     text: chunk,
-    title: waitingForReply ? "Codex 等待你回复" : "Codex 本轮已完成",
+    title: waitingForReply ? `${runtime} 等待你回复` : `${runtime} 本轮已完成`,
     template: waitingForReply ? "orange" : "green",
-    sectionTitle: "Codex 回复",
+    sectionTitle: `${runtime} 回复`,
     partIndex: index,
     partCount: chunks.length,
     footer: index === chunks.length - 1 ? continuationHint : undefined,
@@ -349,12 +360,13 @@ export function buildErrorCard(session: SessionRecord, error: string): Card {
 }
 
 export function buildErrorCards(session: SessionRecord, error: string): Card[] {
+  const runtime = runtimeDisplayName(session.runtime);
   const chunks = splitTextForFeishu(redactSensitiveText(error), 2_800);
   return (chunks.length > 0 ? chunks : ["未知错误"]).map((chunk, index) =>
     buildMessageCard({
       session,
       text: chunk,
-      title: "Codex 运行错误",
+      title: `${runtime} 运行错误`,
       template: "red",
       sectionTitle: "错误信息",
       partIndex: index,

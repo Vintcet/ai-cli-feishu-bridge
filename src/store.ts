@@ -11,6 +11,7 @@ import type {
   BindingStore,
   MessageRoute,
   RouteStore,
+  RuntimeName,
   SessionRecord,
   SessionStatus,
   SessionStore,
@@ -369,7 +370,7 @@ export class BridgeStore {
     assistantMessage?: string | null;
     error?: string;
     source?: string;
-    runtime?: "codex" | "opencode" | null;
+    runtime?: RuntimeName | null;
     clientProcessId?: number | null;
     clientProcessStartedAt?: string | null;
     managedTerminalId?: string | null;

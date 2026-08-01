@@ -58,6 +58,7 @@ internal sealed class BridgeClient : IDisposable
     {
         AppLog.Info($"启动桥接（root={BridgeRoot}，port={Port}）...");
         await RunPowerShellScriptAsync("install-hooks.ps1", TimeSpan.FromSeconds(10));
+        await RunPowerShellScriptAsync("install-claude-code-hooks.ps1", TimeSpan.FromSeconds(10));
         await RunPowerShellScriptAsync("start-bridge.ps1", TimeSpan.FromSeconds(10));
         AppLog.Info("桥接启动命令已执行。");
     }
@@ -256,7 +257,34 @@ internal sealed class BridgeClient : IDisposable
         });
     }
 
-    public string StartManagedTerminal(string cwd, bool elevated, string? codexArguments = null)
+    public string StartManagedTerminal(string cwd, bool elevated, string? codexArguments = null) =>
+        StartManagedTerminalCore(cwd, elevated, "codex", codexArguments, null);
+
+    public string StartManagedClaudeCodeTerminal(
+        string cwd,
+        bool elevated,
+        string? claudeCodeArguments = null)
+    {
+        var claudeCodeCommand = FindClaudeCodeCommand();
+        if (claudeCodeCommand is null)
+        {
+            throw new InvalidOperationException(
+                "找不到 Claude Code CLI。请先安装 claude，并确保其在 PATH 或常见用户安装目录中。");
+        }
+        return StartManagedTerminalCore(
+            cwd,
+            elevated,
+            "claudecode",
+            claudeCodeArguments,
+            claudeCodeCommand);
+    }
+
+    private string StartManagedTerminalCore(
+        string cwd,
+        bool elevated,
+        string runtime,
+        string? toolArguments,
+        string? toolCommand)
     {
         var fullPath = Path.GetFullPath(cwd);
         if (!Directory.Exists(fullPath))
@@ -278,11 +306,12 @@ internal sealed class BridgeClient : IDisposable
         }
 
         var terminalId = Guid.NewGuid().ToString("N");
-        var normalizedArguments = codexArguments?.Trim() ?? "";
+        var displayName = runtime == "claudecode" ? "Claude Code" : "Codex";
+        var normalizedArguments = toolArguments?.Trim() ?? "";
         if (normalizedArguments.Length > 4_000 ||
             normalizedArguments.IndexOfAny(['\r', '\n']) >= 0)
         {
-            throw new InvalidOperationException("Codex 启动参数无效或过长。");
+            throw new InvalidOperationException($"{displayName} 启动参数无效或过长。");
         }
         var windowsTerminal = FindWindowsTerminal();
         var startInfo = windowsTerminal is not null
@@ -292,13 +321,17 @@ internal sealed class BridgeClient : IDisposable
                 terminalId,
                 fullPath,
                 elevated,
-                normalizedArguments)
+                runtime,
+                normalizedArguments,
+                toolCommand)
             : BuildClassicTerminalStartInfo(
                 terminalHost,
                 terminalId,
                 fullPath,
                 elevated,
-                normalizedArguments);
+                runtime,
+                normalizedArguments,
+                toolCommand);
 
         try
         {
@@ -479,13 +512,41 @@ internal sealed class BridgeClient : IDisposable
         return null;
     }
 
+    private static string? FindClaudeCodeCommand()
+    {
+        var candidates = new List<string>();
+        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (var entry in path.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            candidates.Add(Path.Combine(entry.Trim('"'), "claude.exe"));
+            candidates.Add(Path.Combine(entry.Trim('"'), "claude.cmd"));
+        }
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        candidates.Add(Path.Combine(userProfile, ".local", "bin", "claude.exe"));
+        candidates.Add(Path.Combine(userProfile, ".local", "bin", "claude.cmd"));
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        candidates.Add(Path.Combine(appData, "npm", "claude.cmd"));
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        candidates.Add(Path.Combine(localAppData, "Programs", "Claude", "claude.exe"));
+        foreach (var candidate in candidates)
+        {
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
     private ProcessStartInfo BuildWindowsTerminalStartInfo(
         string windowsTerminal,
         string terminalHost,
         string terminalId,
         string cwd,
         bool elevated,
-        string codexArguments)
+        string runtime,
+        string toolArguments,
+        string? toolCommand)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -502,10 +563,18 @@ internal sealed class BridgeClient : IDisposable
         startInfo.ArgumentList.Add("new");
         startInfo.ArgumentList.Add("new-tab");
         startInfo.ArgumentList.Add("--title");
-        startInfo.ArgumentList.Add($"Codex · {new DirectoryInfo(cwd).Name}{(elevated ? " · 管理员" : "")}");
+        var displayName = runtime == "claudecode" ? "Claude Code" : "Codex";
+        startInfo.ArgumentList.Add($"{displayName} · {new DirectoryInfo(cwd).Name}{(elevated ? " · 管理员" : "")}");
         startInfo.ArgumentList.Add("--startingDirectory");
         startInfo.ArgumentList.Add(cwd);
-        AddManagedTerminalArguments(startInfo, terminalHost, terminalId, cwd, codexArguments);
+        AddManagedTerminalArguments(
+            startInfo,
+            terminalHost,
+            terminalId,
+            cwd,
+            runtime,
+            toolArguments,
+            toolCommand);
         return startInfo;
     }
 
@@ -514,7 +583,9 @@ internal sealed class BridgeClient : IDisposable
         string terminalId,
         string cwd,
         bool elevated,
-        string codexArguments)
+        string runtime,
+        string toolArguments,
+        string? toolCommand)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -527,7 +598,14 @@ internal sealed class BridgeClient : IDisposable
         {
             startInfo.Verb = "runas";
         }
-        AddManagedTerminalArguments(startInfo, null, terminalId, cwd, codexArguments);
+        AddManagedTerminalArguments(
+            startInfo,
+            null,
+            terminalId,
+            cwd,
+            runtime,
+            toolArguments,
+            toolCommand);
         return startInfo;
     }
 
@@ -536,7 +614,9 @@ internal sealed class BridgeClient : IDisposable
         string? executable,
         string terminalId,
         string cwd,
-        string codexArguments)
+        string runtime,
+        string toolArguments,
+        string? toolCommand)
     {
         if (executable is not null)
         {
@@ -549,10 +629,17 @@ internal sealed class BridgeClient : IDisposable
         startInfo.ArgumentList.Add(cwd);
         startInfo.ArgumentList.Add("--bridge-url");
         startInfo.ArgumentList.Add($"http://127.0.0.1:{Port}");
-        if (!string.IsNullOrWhiteSpace(codexArguments))
+        startInfo.ArgumentList.Add("--runtime");
+        startInfo.ArgumentList.Add(runtime);
+        if (!string.IsNullOrWhiteSpace(toolCommand))
         {
-            startInfo.ArgumentList.Add("--codex-args");
-            startInfo.ArgumentList.Add(codexArguments);
+            startInfo.ArgumentList.Add("--tool-command");
+            startInfo.ArgumentList.Add(toolCommand);
+        }
+        if (!string.IsNullOrWhiteSpace(toolArguments))
+        {
+            startInfo.ArgumentList.Add("--tool-args");
+            startInfo.ArgumentList.Add(toolArguments);
         }
     }
 

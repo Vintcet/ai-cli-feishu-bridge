@@ -21,6 +21,14 @@ internal static class CodexArgumentParser
             rawArguments,
             IsOpenCodeCommand);
 
+    public static IReadOnlyList<string> ParseClaudeCode(string? rawArguments) =>
+        ParseArguments(
+            "claude",
+            "Claude Code 启动参数无效或过长。",
+            "无法解析 Claude Code 启动参数。",
+            rawArguments,
+            IsClaudeCodeCommand);
+
     private static IReadOnlyList<string> ParseArguments(
         string toolCommand,
         string invalidMessage,
@@ -79,6 +87,15 @@ internal static class CodexArgumentParser
         return fileName.Equals("opencode", StringComparison.OrdinalIgnoreCase) ||
                fileName.Equals("opencode.exe", StringComparison.OrdinalIgnoreCase) ||
                fileName.Equals("opencode.cmd", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsClaudeCodeCommand(string value)
+    {
+        var fileName = Path.GetFileName(value);
+        return fileName.Equals("claude", StringComparison.OrdinalIgnoreCase) ||
+               fileName.Equals("claude.exe", StringComparison.OrdinalIgnoreCase) ||
+               fileName.Equals("claude.cmd", StringComparison.OrdinalIgnoreCase) ||
+               fileName.Equals("claude.ps1", StringComparison.OrdinalIgnoreCase);
     }
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

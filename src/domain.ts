@@ -11,6 +11,8 @@ export type SessionStatus =
   | "error"
   | "ended";
 
+export type RuntimeName = "codex" | "opencode" | "claudecode";
+
 export interface BridgeSettings {
   notifyActivity: boolean;
   notifyUserPrompts: boolean;
@@ -49,7 +51,7 @@ export interface SessionRecord {
   lastNotificationTurnId?: string;
   lastError?: string;
   source?: string;
-  runtime?: "codex" | "opencode";
+  runtime?: RuntimeName;
   endedAt?: string;
   clientProcessId?: number;
   clientProcessStartedAt?: string;
@@ -123,6 +125,7 @@ export interface PermissionHookPayload {
   tool_name: string;
   tool_input: unknown;
   transcript_path: string | null;
+  runtime?: RuntimeName;
   agent_id?: string;
   agent_type?: string;
   managed_terminal_id?: string;
@@ -139,6 +142,7 @@ export interface StopHookPayload {
   last_assistant_message: string | null;
   stop_hook_active: boolean;
   transcript_path: string | null;
+  runtime?: RuntimeName;
   managed_terminal_id?: string;
   managed_terminal_elevated?: boolean;
 }
@@ -167,7 +171,10 @@ export interface RequestUserInputHookPayload {
   tool_input: {
     questions: UserInputQuestion[];
     autoResolutionMs?: number;
+    claudeCodeOriginalInput?: Record<string, unknown>;
+    claudeCodeQuestionTextById?: Record<string, string>;
   };
+  runtime?: RuntimeName;
   tool_use_id?: string;
   transcript_path?: string | null;
   managed_terminal_id?: string;
@@ -191,6 +198,7 @@ export interface ActivityHookPayload {
   tool_name?: string;
   tool_preview?: string;
   tool_response_preview?: string;
+  runtime?: RuntimeName;
   managed_terminal_id?: string;
   managed_terminal_elevated?: boolean;
 }
@@ -203,6 +211,7 @@ export interface SessionStartHookPayload {
   permission_mode: string;
   source: "startup" | "resume" | "clear" | "compact";
   transcript_path: string | null;
+  runtime?: RuntimeName;
   client_process_id?: number;
   client_process_started_at?: string;
   managed_terminal_id?: string;
@@ -215,6 +224,7 @@ export interface SessionEndHookPayload {
   cwd: string;
   reason: "other";
   transcript_path: string | null;
+  runtime?: RuntimeName;
   managed_terminal_id?: string;
   managed_terminal_elevated?: boolean;
 }
@@ -287,6 +297,12 @@ export function sessionLabel(
   return session.alias
     ? `@${session.alias} · ${session.projectName} #${session.shortId}`
     : `${session.projectName} #${session.shortId}`;
+}
+
+export function runtimeDisplayName(runtime?: RuntimeName): string {
+  if (runtime === "opencode") return "opencode";
+  if (runtime === "claudecode") return "Claude Code";
+  return "Codex";
 }
 
 export function isPermissionHookPayload(value: unknown): value is PermissionHookPayload {

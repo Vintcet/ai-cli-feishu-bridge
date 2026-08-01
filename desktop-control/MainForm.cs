@@ -38,6 +38,7 @@ internal sealed class MainForm : Form
     private readonly TabControl sessionTabs = new();
     private readonly Button connectionButton = new();
     private readonly Button newCodexButton = new();
+    private readonly Button newClaudeCodeButton = new();
     private readonly Button newOpenCodeButton = new();
     private readonly Button approvalButton = new();
     private readonly Button aliasButton = new();
@@ -290,7 +291,7 @@ internal sealed class MainForm : Form
         var subtitle = new Label
         {
             AutoSize = true,
-            Text = "管理飞书连接，并同步 Codex 插话、排队、确认、进度与文件",
+            Text = "管理飞书连接，并同步 Codex、Claude Code 与 opencode 会话",
             ForeColor = Color.FromArgb(148, 163, 184),
             Font = new Font("Microsoft YaHei UI", 9.5F),
             Location = new Point(29, 59),
@@ -367,9 +368,12 @@ internal sealed class MainForm : Form
         toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         operationLabel.Text = "桥接状态会每 2 秒自动刷新";
-        operationLabel.AutoSize = true;
+        operationLabel.AutoSize = false;
+        operationLabel.AutoEllipsis = true;
+        operationLabel.Dock = DockStyle.Fill;
         operationLabel.ForeColor = Muted;
-        operationLabel.Anchor = AnchorStyles.Left;
+        operationLabel.TextAlign = ContentAlignment.MiddleLeft;
+        operationLabel.Margin = new Padding(0, 0, 12, 0);
         operationLabel.Font = new Font("Microsoft YaHei UI", 9.5F);
 
         var buttons = new FlowLayoutPanel
@@ -384,6 +388,8 @@ internal sealed class MainForm : Form
         ConfigureButton(connectionButton, "连接", Primary, Color.White);
         ConfigureButton(newCodexButton, "新建 Codex", Success, Color.White);
         newCodexButton.Size = new Size(112, 38);
+        ConfigureButton(newClaudeCodeButton, "新建 Claude", Color.FromArgb(217, 119, 87), Color.White);
+        newClaudeCodeButton.Size = new Size(118, 38);
         ConfigureButton(newOpenCodeButton, "新建 opencode", OpenCodeAccent, Color.White);
         newOpenCodeButton.Size = new Size(124, 38);
         ConfigureButton(approvalButton, "本机审批", Color.White, Warning, Warning);
@@ -404,6 +410,7 @@ internal sealed class MainForm : Form
             }
         };
         newCodexButton.Click += async (_, _) => await NewCodexAsync();
+        newClaudeCodeButton.Click += async (_, _) => await NewClaudeCodeAsync();
         newOpenCodeButton.Click += async (_, _) => await NewOpenCodeAsync();
         approvalButton.Click += (_, _) => OpenPendingApproval();
         refreshButton.Click += async (_, _) => await RefreshStatusAsync(force: true);
@@ -411,6 +418,7 @@ internal sealed class MainForm : Form
 
         buttons.Controls.Add(connectionButton);
         buttons.Controls.Add(newCodexButton);
+        buttons.Controls.Add(newClaudeCodeButton);
         buttons.Controls.Add(newOpenCodeButton);
         buttons.Controls.Add(approvalButton);
         buttons.Controls.Add(refreshButton);
@@ -494,7 +502,7 @@ internal sealed class MainForm : Form
         var title = new Label
         {
             AutoSize = true,
-            Text = "Codex 会话",
+            Text = "助手会话",
             ForeColor = Color.FromArgb(15, 23, 42),
             Font = new Font("Microsoft YaHei UI", 12F, FontStyle.Bold),
             Location = new Point(2, 3),
@@ -608,7 +616,7 @@ internal sealed class MainForm : Form
         sessionGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Status", HeaderText = "状态", Width = 105 });
         sessionGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Queue", HeaderText = "排队", Width = 65 });
         sessionGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Model", HeaderText = "模型", Width = 125 });
-        sessionGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Source", HeaderText = "方式", Width = 105 });
+        sessionGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Source", HeaderText = "方式", Width = 118 });
         sessionGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "FeishuGroup", HeaderText = "飞书群", Width = 135 });
         sessionGrid.Columns.Add(new DataGridViewTextBoxColumn
         {
@@ -637,7 +645,7 @@ internal sealed class MainForm : Form
         historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Project", HeaderText = "项目", Width = 145 });
         historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ShortId", HeaderText = "会话 ID", Width = 95 });
         historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Model", HeaderText = "模型", Width = 125 });
-        historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Mode", HeaderText = "启动方式", Width = 90 });
+        historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Mode", HeaderText = "启动方式", Width = 115 });
         historyGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "FeishuGroup", HeaderText = "飞书群", Width = 135 });
         historyGrid.Columns.Add(new DataGridViewTextBoxColumn
         {
@@ -715,7 +723,7 @@ internal sealed class MainForm : Form
         var note = new Label
         {
             AutoSize = true,
-            Text = "关闭控制面板不会断开桥接，也不会关闭已启动的 Codex 窗口",
+            Text = "关闭控制面板不会断开桥接，也不会关闭已启动的助手窗口",
             ForeColor = Muted,
             Anchor = AnchorStyles.Left,
             Font = new Font("Microsoft YaHei UI", 8.5F),
@@ -855,6 +863,16 @@ internal sealed class MainForm : Form
                     ? $"已请求以管理员身份继续 {SessionDisplayName(session)}；完成 UAC 确认后，opencode 会在新窗口恢复"
                     : $"opencode 窗口已启动，正在恢复 {SessionDisplayName(session)}";
             }
+            else if (session.Runtime == "claudecode")
+            {
+                bridgeClient.StartManagedClaudeCodeTerminal(
+                    session.Cwd,
+                    session.ManagedTerminalElevated,
+                    $"--resume {session.SessionId}");
+                operationLabel.Text = session.ManagedTerminalElevated
+                    ? $"已请求以管理员身份继续 {SessionDisplayName(session)}；完成 UAC 确认后，Claude Code 会在新窗口恢复"
+                    : $"Claude Code 窗口已启动，正在恢复 {SessionDisplayName(session)}";
+            }
             else
             {
                 bridgeClient.StartManagedTerminal(
@@ -892,7 +910,7 @@ internal sealed class MainForm : Form
         var confirmation = MessageBox.Show(
             this,
             $"确定从助手的历史记录中删除 {SessionDisplayName(session)} 吗？\r\n\r\n" +
-            "这不会删除 Codex 原始对话或项目文件，之后仍可使用完整会话 ID 手动恢复。",
+            "这不会删除原 CLI 对话或项目文件，之后仍可使用完整会话 ID 手动恢复。",
             "删除历史记录",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Warning,
@@ -1056,6 +1074,50 @@ internal sealed class MainForm : Form
         }
     }
 
+    private async Task NewClaudeCodeAsync()
+    {
+        if (operating) return;
+        try
+        {
+            var status = await bridgeClient.GetStatusAsync(lifetime.Token);
+            if (status is null)
+            {
+                await ConnectAsync();
+                status = await bridgeClient.GetStatusAsync(lifetime.Token);
+            }
+            if (status is null)
+            {
+                throw new InvalidOperationException("请先连接飞书桥接服务，再新建 Claude Code 窗口。");
+            }
+
+            var initialDirectory = lastProjectDirectory ??
+                Directory.GetParent(bridgeClient.BridgeRoot)?.FullName ??
+                bridgeClient.BridgeRoot;
+            using var dialog = new NewClaudeCodeDialog(initialDirectory);
+            if (dialog.ShowDialog(this) != DialogResult.OK)
+            {
+                return;
+            }
+
+            lastProjectDirectory = dialog.SelectedDirectory;
+            bridgeClient.StartManagedClaudeCodeTerminal(
+                dialog.SelectedDirectory,
+                dialog.RunAsAdministrator,
+                dialog.ClaudeCodeArguments);
+            operationLabel.Text = dialog.RunAsAdministrator
+                ? "已请求管理员启动；完成 UAC 确认后，Windows Terminal 窗口会自动登记 Claude Code"
+                : "Windows Terminal / Claude Code 窗口已启动，正在等待会话登记";
+        }
+        catch (OperationCanceledException error) when (!lifetime.IsCancellationRequested)
+        {
+            operationLabel.Text = error.Message;
+        }
+        catch (Exception error)
+        {
+            ShowOperationError("新建 Claude Code 失败", error);
+        }
+    }
+
     private async Task ConnectAsync()
     {
         if (operating) return;
@@ -1209,7 +1271,7 @@ internal sealed class MainForm : Form
         }
         else if (status.QueuedPrompts > 0)
         {
-            operationLabel.Text = $"有 {status.QueuedPrompts} 条 Codex 消息正在排队";
+            operationLabel.Text = $"有 {status.QueuedPrompts} 条助手消息正在排队";
         }
         else if (status.Bindings == 0 && !string.IsNullOrWhiteSpace(status.BindingCommand))
         {
@@ -1229,6 +1291,7 @@ internal sealed class MainForm : Form
         connectionButton.FlatAppearance.BorderColor = Border;
         connectionButton.Enabled = !operating;
         newCodexButton.Enabled = !operating;
+        newClaudeCodeButton.Enabled = !operating;
         newOpenCodeButton.Enabled = !operating;
         approvalButton.Enabled =
             !operating && !status.Settings.AutoApprove && status.PendingApprovals > 0;
@@ -1250,9 +1313,7 @@ internal sealed class MainForm : Form
                         : session.ManagedTerminal && session.Status == "running"
                             ? "窗口运行中"
                             : session.StatusLabel;
-            var mode = session.ManagedTerminal
-                ? session.ManagedTerminalElevated ? "管理员同步" : "窗口同步"
-                : SourceLabel(session.Source);
+            var mode = SessionModeLabel(session);
             var rowIndex = sessionGrid.Rows.Add(
                 string.IsNullOrWhiteSpace(session.Alias) ? "—" : $"@{session.Alias}",
                 session.ProjectName,
@@ -1319,7 +1380,7 @@ internal sealed class MainForm : Form
                 session.ProjectName,
                 $"#{session.ShortId}",
                 string.IsNullOrWhiteSpace(session.Model) ? "—" : session.Model,
-                session.ManagedTerminalElevated ? "管理员" : "普通",
+                HistoryModeLabel(session),
                 FeishuGroupLabel(session),
                 session.Cwd,
                 FormatTime(session.OpenedAt),
@@ -1357,6 +1418,7 @@ internal sealed class MainForm : Form
         connectionButton.FlatAppearance.BorderColor = Primary;
         connectionButton.Enabled = !operating;
         newCodexButton.Enabled = !operating;
+        newClaudeCodeButton.Enabled = !operating;
         newOpenCodeButton.Enabled = !operating;
         approvalButton.Text = "本机审批";
         approvalButton.Enabled = false;
@@ -1392,6 +1454,7 @@ internal sealed class MainForm : Form
         operating = value;
         connectionButton.Enabled = !value;
         newCodexButton.Enabled = !value;
+        newClaudeCodeButton.Enabled = !value;
         newOpenCodeButton.Enabled = !value;
         approvalButton.Enabled =
             !value &&
@@ -1582,10 +1645,10 @@ internal sealed class MainForm : Form
 
     private static string ApprovalResolutionMessage(string? resolution) => resolution switch
     {
-        "allow" => "审批已在飞书批准，Codex 正在继续执行",
-        "deny" => "审批已在飞书拒绝，Codex 已停止这次操作",
-        "local" => "桥接服务曾中断，这条审批已交还 Codex 原窗口",
-        "timeout" => "审批等待超时，已交还 Codex 原窗口",
+        "allow" => "审批已在飞书批准，目标助手正在继续执行",
+        "deny" => "审批已在飞书拒绝，目标助手已停止这次操作",
+        "local" => "桥接服务曾中断，这条审批已交还原 CLI 窗口",
+        "timeout" => "审批等待超时，已交还原 CLI 窗口",
         _ => "这条审批已在另一端处理",
     };
 
@@ -1660,13 +1723,24 @@ internal sealed class MainForm : Form
         _ => "未连接",
     };
 
-    private static string SourceLabel(string source) => source switch
+    private static string SessionModeLabel(CodexSession session)
     {
-        "startup" => "外部·仅通知",
-        "resume" => "外部·仅通知",
-        "clear" => "外部·仅通知",
-        "compact" => "外部·仅通知",
-        _ => source,
+        var runtime = RuntimeShortLabel(session);
+        if (session.Runtime == "opencode") return runtime;
+        if (!session.ManagedTerminal) return $"{runtime} 外部";
+        return session.ManagedTerminalElevated
+            ? $"{runtime} 管理员"
+            : $"{runtime} 同步";
+    }
+
+    private static string HistoryModeLabel(CodexSession session) =>
+        $"{RuntimeShortLabel(session)} {(session.ManagedTerminalElevated ? "管理员" : "普通")}";
+
+    private static string RuntimeShortLabel(CodexSession session) => session.Runtime switch
+    {
+        "claudecode" => "Claude",
+        "opencode" => "opencode",
+        _ => "Codex",
     };
 
     private static DateTimeOffset ParseTime(string value) =>

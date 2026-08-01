@@ -25,7 +25,7 @@ internal sealed class SessionAliasDialog : Form
 
         var title = new Label
         {
-            Text = "给这个 Codex 会话起一个容易识别的名字",
+            Text = "给这个助手会话起一个容易识别的名字",
             AutoSize = true,
             Font = new Font("Microsoft YaHei UI", 12F, FontStyle.Bold),
             ForeColor = Color.FromArgb(15, 23, 42),
