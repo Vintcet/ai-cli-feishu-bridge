@@ -10,6 +10,20 @@ function handlers(): HookHttpHandlers {
     managedTerminalUnregister: async () => ({ ok: true }),
     sessionAlias: async () => ({ ok: true }),
     sessionHistoryHide: async (payload) => ({ ok: true, sessionId: payload.sessionId }),
+    runtimeLaunchClaim: () => ({
+      ok: true,
+      request: {
+        requestId: "launch-1",
+        sessionId: "session-1",
+        runtime: "codex",
+        cwd: "C:/demo",
+        elevated: false,
+      },
+    }),
+    runtimeLaunchComplete: async (payload) => ({
+      ok: true,
+      requestId: payload.requestId,
+    }),
     localApproval: async (payload) => ({ ok: true, requestId: payload.requestId }),
     settingsUpdate: async (payload) => ({ ok: true, settings: payload }),
     permission: async () => ({}),
@@ -124,6 +138,58 @@ test("history hide endpoint requires the persistent control token", async () => 
     assert.equal(
       (await authorized.json() as { sessionId?: string }).sessionId,
       "session-1",
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+});
+
+test("runtime launch endpoints require the persistent control token", async () => {
+  const token = "e".repeat(64);
+  const server = startHookHttpServer("127.0.0.1", 0, handlers(), token);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("listening", resolve);
+      server.once("error", reject);
+    });
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const base = `http://127.0.0.1:${address.port}`;
+    const unauthorized = await fetch(`${base}/runtime-launches/claim`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(unauthorized.status, 401);
+    const authorized = await fetch(`${base}/runtime-launches/claim`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-codex-feishu-control-token": token,
+      },
+      body: "{}",
+    });
+    assert.equal(authorized.status, 200);
+    const claim = await authorized.json() as {
+      request?: { requestId?: string; cwd?: string };
+    };
+    assert.equal(claim.request?.requestId, "launch-1");
+    assert.equal(claim.request?.cwd, "C:/demo");
+
+    const completed = await fetch(`${base}/runtime-launches/complete`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-codex-feishu-control-token": token,
+      },
+      body: JSON.stringify({ requestId: "launch-1", success: true }),
+    });
+    assert.equal(completed.status, 200);
+    assert.equal(
+      (await completed.json() as { requestId?: string }).requestId,
+      "launch-1",
     );
   } finally {
     await new Promise<void>((resolve, reject) => {

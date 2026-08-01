@@ -985,7 +985,15 @@ internal sealed class MainForm : Form
             var initialDirectory = lastProjectDirectory ??
                 Directory.GetParent(bridgeClient.BridgeRoot)?.FullName ??
                 bridgeClient.BridgeRoot;
-            using var dialog = new NewRuntimeDialog(runtime, initialDirectory);
+            var knownSessions = status.Sessions
+                .Concat(status.HistorySessions)
+                .GroupBy(session => session.SessionId)
+                .Select(group => group.First())
+                .ToList();
+            using var dialog = new NewRuntimeDialog(
+                runtime,
+                initialDirectory,
+                knownSessions);
             if (dialog.ShowDialog(this) != DialogResult.OK)
             {
                 return;
@@ -1097,6 +1105,7 @@ internal sealed class MainForm : Form
             else
             {
                 ApplyStatus(status);
+                await ProcessPendingRuntimeLaunchAsync();
             }
             lastRefreshLabel.Text = $"最后刷新：{DateTime.Now:HH:mm:ss}";
         }
@@ -1111,6 +1120,89 @@ internal sealed class MainForm : Form
         finally
         {
             refreshing = false;
+        }
+    }
+
+    private async Task ProcessPendingRuntimeLaunchAsync()
+    {
+        if (operating || closing || lifetime.IsCancellationRequested)
+        {
+            return;
+        }
+
+        RuntimeLaunchRequest? request;
+        try
+        {
+            request = await bridgeClient.ClaimRuntimeLaunchAsync(lifetime.Token);
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception error)
+        {
+            AppLog.WarnThrottled(
+                $"读取自动恢复请求失败：{error.Message}",
+                TimeSpan.FromSeconds(10));
+            return;
+        }
+        if (request is null)
+        {
+            return;
+        }
+
+        SetOperating(true, $"正在从飞书自动恢复 #{ShortSessionId(request.SessionId)}…");
+        try
+        {
+            if (!RuntimeCatalog.TryGet(request.Runtime, out var runtime))
+            {
+                throw new InvalidOperationException($"不支持的运行时：{request.Runtime}");
+            }
+            await bridgeClient.LaunchRuntimeAsync(
+                runtime,
+                request.Cwd,
+                request.Elevated,
+                runtime.BuildResumeArguments(request.SessionId),
+                lifetime.Token);
+            await bridgeClient.CompleteRuntimeLaunchAsync(
+                request.RequestId,
+                success: true,
+                cancellationToken: lifetime.Token);
+            operationLabel.Text =
+                $"已从飞书请求自动打开 {runtime.DisplayName} #{ShortSessionId(request.SessionId)}";
+        }
+        catch (OperationCanceledException error) when (!lifetime.IsCancellationRequested)
+        {
+            await ReportRuntimeLaunchFailureAsync(request, error.Message);
+            operationLabel.Text = error.Message;
+        }
+        catch (Exception error)
+        {
+            await ReportRuntimeLaunchFailureAsync(request, error.Message);
+            AppLog.Error("自动恢复会话失败", error);
+            operationLabel.Text = $"自动恢复会话失败：{error.Message}";
+        }
+        finally
+        {
+            SetOperating(false);
+        }
+    }
+
+    private async Task ReportRuntimeLaunchFailureAsync(
+        RuntimeLaunchRequest request,
+        string error)
+    {
+        try
+        {
+            await bridgeClient.CompleteRuntimeLaunchAsync(
+                request.RequestId,
+                success: false,
+                error: error,
+                cancellationToken: CancellationToken.None);
+        }
+        catch (Exception reportError)
+        {
+            AppLog.Error("提交自动恢复失败结果异常", reportError);
         }
     }
 
@@ -1550,6 +1642,9 @@ internal sealed class MainForm : Form
         string.IsNullOrWhiteSpace(session.Alias)
             ? $"{session.ProjectName} #{session.ShortId}"
             : $"@{session.Alias}";
+
+    private static string ShortSessionId(string sessionId) =>
+        sessionId.Length <= 8 ? sessionId : sessionId[^8..];
 
     private static void RestoreGridState(
         DataGridView grid,

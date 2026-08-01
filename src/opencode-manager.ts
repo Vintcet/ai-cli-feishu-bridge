@@ -82,6 +82,10 @@ export class OpenCodeManager {
     return this.instances.get(port);
   }
 
+  hasPendingSession(sessionId: string): boolean {
+    return [...this.pendingSessionIds.values()].includes(sessionId);
+  }
+
   async launch(cwd: string, sessionId?: string): Promise<OpenCodeLaunchResult> {
     const port = await this.allocatePort();
     this.pendingPorts.add(port);

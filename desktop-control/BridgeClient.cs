@@ -206,6 +206,70 @@ internal sealed class BridgeClient : IDisposable
         }
     }
 
+    public async Task<RuntimeLaunchRequest?> ClaimRuntimeLaunchAsync(
+        CancellationToken cancellationToken = default)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "runtime-launches/claim")
+        {
+            Content = JsonContent.Create(new { }),
+        };
+        request.Headers.Add(
+            "X-Codex-Feishu-Control-Token",
+            ReadControlToken(BridgeRoot));
+        using var response = await httpClient.SendAsync(request, cancellationToken);
+        RuntimeLaunchClaimResult? result = null;
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            result = await JsonSerializer.DeserializeAsync<RuntimeLaunchClaimResult>(
+                stream,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
+                cancellationToken);
+        }
+        catch (JsonException)
+        {
+        }
+        if (!response.IsSuccessStatusCode || result?.Ok != true)
+        {
+            throw new InvalidOperationException(
+                string.IsNullOrWhiteSpace(result?.Error) ? "读取自动恢复请求失败。" : result.Error);
+        }
+        return result.Request;
+    }
+
+    public async Task CompleteRuntimeLaunchAsync(
+        string requestId,
+        bool success,
+        string? error = null,
+        CancellationToken cancellationToken = default)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "runtime-launches/complete")
+        {
+            Content = JsonContent.Create(new { requestId, success, error }),
+        };
+        request.Headers.Add(
+            "X-Codex-Feishu-Control-Token",
+            ReadControlToken(BridgeRoot));
+        using var response = await httpClient.SendAsync(request, cancellationToken);
+        RuntimeLaunchCompleteResult? result = null;
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            result = await JsonSerializer.DeserializeAsync<RuntimeLaunchCompleteResult>(
+                stream,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
+                cancellationToken);
+        }
+        catch (JsonException)
+        {
+        }
+        if (!response.IsSuccessStatusCode || result?.Ok != true)
+        {
+            throw new InvalidOperationException(
+                string.IsNullOrWhiteSpace(result?.Error) ? "提交自动恢复结果失败。" : result.Error);
+        }
+    }
+
     public async Task<BridgeSettings> UpdateSettingsAsync(
         BridgeSettings settings,
         CancellationToken cancellationToken = default)
@@ -291,7 +355,9 @@ internal sealed class BridgeClient : IDisposable
         }
 
         var parsedArguments = RuntimeArgumentParser.Parse(runtime, rawArguments);
-        var resumeSessionId = ExtractResumeSessionId(parsedArguments);
+        var resumeSessionId = RuntimeArgumentParser.ExtractResumeSessionId(
+            runtime,
+            parsedArguments);
         var port = await ReserveOpenCodePortAsync(
             fullPath,
             resumeSessionId,
@@ -403,19 +469,6 @@ internal sealed class BridgeClient : IDisposable
             throw new OperationCanceledException("已取消管理员权限确认。", error);
         }
         return terminalId;
-    }
-
-    private static string? ExtractResumeSessionId(IReadOnlyList<string> arguments)
-    {
-        for (var i = 0; i < arguments.Count - 1; i++)
-        {
-            if (arguments[i] is "-s" or "--session"
-                && !string.IsNullOrWhiteSpace(arguments[i + 1]))
-            {
-                return arguments[i + 1];
-            }
-        }
-        return null;
     }
 
     private async Task<int> ReserveOpenCodePortAsync(

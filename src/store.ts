@@ -360,6 +360,16 @@ export class BridgeStore {
       );
   }
 
+  listSessionsWithFeishuGroups(): SessionRecord[] {
+    return Object.values(this.sessions.sessions)
+      .filter(
+        (session) =>
+          session.managedByAssistant === true &&
+          Boolean(session.feishuChatId),
+      )
+      .sort((left, right) => Date.parse(left.lastSeenAt) - Date.parse(right.lastSeenAt));
+  }
+
   async upsertSession(input: {
     sessionId: string;
     alias?: string;
@@ -529,6 +539,43 @@ export class BridgeStore {
         delete session.feishuChatErrorAt;
       }
       await this.writeJson(this.sessionFile, this.sessions);
+      return session;
+    });
+  }
+
+  async clearSessionFeishuChat(
+    sessionId: string,
+    expectedChatId?: string,
+  ): Promise<SessionRecord | undefined> {
+    return this.mutate(async () => {
+      const session = this.sessions.sessions[sessionId];
+      if (
+        !session ||
+        (expectedChatId !== undefined && session.feishuChatId !== expectedChatId)
+      ) {
+        return session;
+      }
+      delete session.feishuChatId;
+      delete session.feishuChatName;
+      delete session.feishuChatCreatedAt;
+      delete session.feishuChatError;
+      delete session.feishuChatErrorAt;
+      await this.writeJson(this.sessionFile, this.sessions);
+      return session;
+    });
+  }
+
+  async touchSessionActivity(
+    sessionId: string,
+    timestamp = new Date().toISOString(),
+  ): Promise<SessionRecord | undefined> {
+    return this.mutate(async () => {
+      const session = this.sessions.sessions[sessionId];
+      if (!session) {
+        return undefined;
+      }
+      session.lastSeenAt = timestamp;
+      this.schedulePersist(this.sessionFile);
       return session;
     });
   }
@@ -805,7 +852,12 @@ export class BridgeStore {
     let changed = false;
     for (const [sessionId, session] of Object.entries(this.sessions.sessions)) {
       const reference = session.endedAt ?? session.lastSeenAt;
-      if (session.status === "ended" && reference && Date.parse(reference) < cutoff) {
+      if (
+        session.status === "ended" &&
+        !session.feishuChatId &&
+        reference &&
+        Date.parse(reference) < cutoff
+      ) {
         delete this.sessions.sessions[sessionId];
         changed = true;
       }

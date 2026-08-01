@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 
 import {
   appendAttachmentsToPrompt,
@@ -106,6 +107,23 @@ interface QueuedRemotePrompt {
   retryAttempt?: number;
 }
 
+interface PendingRuntimeLaunchPrompt extends QueuedRemotePrompt {
+  queueRequested: boolean;
+}
+
+type RuntimeLaunchStatus = "pending" | "claimed" | "launched";
+
+interface RuntimeLaunchRequest {
+  requestId: string;
+  sessionId: string;
+  runtime: RuntimeName;
+  cwd: string;
+  elevated: boolean;
+  createdAt: string;
+  status: RuntimeLaunchStatus;
+  timer: NodeJS.Timeout;
+}
+
 interface StagedAttachments {
   createdAt: number;
   files: SavedAttachment[];
@@ -141,6 +159,8 @@ interface ControllerConfig {
   approvalTimeoutMs: number;
   inputTimeoutMs: number;
   sessionActiveMs: number;
+  sessionGroupInactiveMs?: number;
+  runtimeLaunchTimeoutMs?: number;
   uploadsDirectory: string;
   inboundFileMaxBytes: number;
   inboundAttachmentMaxCount: number;
@@ -180,6 +200,12 @@ export class BridgeController {
   private readonly activityStates = new Map<string, ActivityState>();
   private readonly pendingRemotePrompts = new Map<string, PendingRemotePrompt[]>();
   private readonly managedRetryCounts = new Map<string, number>();
+  private readonly pendingRuntimeLaunchPrompts = new Map<
+    string,
+    PendingRuntimeLaunchPrompt[]
+  >();
+  private readonly runtimeLaunchRequests = new Map<string, RuntimeLaunchRequest>();
+  private readonly runtimeLaunchRequestIds = new Map<string, string>();
   private readonly opencodePortSessions = new Map<number, Set<string>>();
   private readonly opencodeToolParts = new Map<string, Map<string, string>>();
   private readonly sessionGroupCreates = new Map<
@@ -208,12 +234,98 @@ export class BridgeController {
     if (!this.store.getOwnerOpenId()) {
       return;
     }
+    const now = Date.now();
+    const inactiveMs = this.config.sessionGroupInactiveMs ?? 7 * 24 * 60 * 60 * 1000;
     const sessions = this.store
       .listOpenSessions()
-      .filter((session) => session.managedByAssistant === true);
+      .filter(
+        (session) =>
+          session.managedByAssistant === true &&
+          (Boolean(session.feishuChatId) ||
+            now - sessionGroupActivityTime(session) < inactiveMs),
+      );
     for (const session of sessions) {
       await this.ensureSessionGroup(session.sessionId);
     }
+  }
+
+  async cleanupInactiveSessionGroups(
+    now = Date.now(),
+  ): Promise<{ deleted: number; failed: number }> {
+    const inactiveMs = this.config.sessionGroupInactiveMs ?? 7 * 24 * 60 * 60 * 1000;
+    let deleted = 0;
+    let failed = 0;
+    for (const session of this.store.listSessionsWithFeishuGroups()) {
+      const chatId = session.feishuChatId;
+      if (!chatId || now - sessionGroupActivityTime(session) < inactiveMs) {
+        continue;
+      }
+      try {
+        await this.feishu.deleteSessionGroup(chatId);
+        await this.store.clearSessionFeishuChat(session.sessionId, chatId);
+        deleted += 1;
+        console.log(
+          `[feishu] Dissolved inactive session group ${chatId} for #${session.shortId}.`,
+        );
+      } catch (error) {
+        failed += 1;
+        console.warn(
+          `[feishu] Could not dissolve inactive group ${chatId} for #${session.shortId}:`,
+          error,
+        );
+      }
+    }
+    return { deleted, failed };
+  }
+
+  handleRuntimeLaunchClaim(): Record<string, unknown> {
+    const request = [...this.runtimeLaunchRequests.values()]
+      .filter((item) => item.status === "pending")
+      .sort(
+        (left, right) =>
+          left.createdAt.localeCompare(right.createdAt) ||
+          left.requestId.localeCompare(right.requestId),
+      )[0];
+    if (!request) {
+      return { ok: true };
+    }
+    request.status = "claimed";
+    return {
+      ok: true,
+      request: {
+        requestId: request.requestId,
+        sessionId: request.sessionId,
+        runtime: request.runtime,
+        cwd: request.cwd,
+        elevated: request.elevated,
+        createdAt: request.createdAt,
+      },
+    };
+  }
+
+  async handleRuntimeLaunchComplete(
+    value: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const requestId = typeof value.requestId === "string"
+      ? value.requestId.trim()
+      : "";
+    const success = value.success;
+    if (!requestId || typeof success !== "boolean") {
+      return { ok: false, error: "自动恢复结果参数不完整。" };
+    }
+    const request = this.runtimeLaunchRequests.get(requestId);
+    if (!request) {
+      return { ok: true, alreadyResolved: true };
+    }
+    if (success) {
+      request.status = "launched";
+      return { ok: true, sessionId: request.sessionId };
+    }
+    const detail = typeof value.error === "string" && value.error.trim()
+      ? truncate(value.error.trim(), 500)
+      : "桌面助手未能启动对应窗口。";
+    await this.failRuntimeLaunch(request, detail);
+    return { ok: true, sessionId: request.sessionId };
   }
 
   health(): Record<string, unknown> {
@@ -285,12 +397,17 @@ export class BridgeController {
           (total, queue) => total + queue.length,
           0,
         ) +
+        [...this.pendingRuntimeLaunchPrompts.values()].reduce(
+          (total, queue) => total + queue.length,
+          0,
+        ) +
         [...this.managedQueueDepth.values()].reduce(
           (total, depth) => total + depth,
           0,
         ),
       runningResumes: sessions.filter((session) => this.codex.isRunning(session.sessionId))
         .length,
+      pendingRuntimeLaunches: this.runtimeLaunchRequests.size,
       opencodeInstances: this.opencode?.listInstances().length ?? 0,
       activeSessionDefinition: this.activeSessionDefinition(),
       settings: this.store.getSettings(),
@@ -597,7 +714,7 @@ export class BridgeController {
       sessionId,
       cwd,
       model: session.model,
-      status: existing?.status ?? "waiting",
+      status: existing?.status === "ended" ? "waiting" : existing?.status ?? "waiting",
       source: "opencode",
       runtime: "opencode",
       managedByAssistant: true,
@@ -617,6 +734,7 @@ export class BridgeController {
         console.warn("[opencode] Could not create Feishu group:", error);
       });
     }
+    await this.tryDrainRuntimeLaunch(sessionId);
   }
 
   async handleOpenCodeSessionDeleted(sessionId: string): Promise<void> {
@@ -969,6 +1087,7 @@ export class BridgeController {
     if (currentSession.managedByAssistant === true && !currentSession.feishuChatId) {
       void this.ensureSessionGroup(currentSession.sessionId);
     }
+    await this.tryDrainRuntimeLaunch(currentSession.sessionId);
     return {};
   }
 
@@ -1465,6 +1584,9 @@ export class BridgeController {
       );
       return;
     }
+    if (groupSession) {
+      await this.store.touchSessionActivity(groupSession.sessionId);
+    }
 
     const attachmentKey = this.attachmentKey(openId, chatId);
     if (parsedContent.attachments.length > 0) {
@@ -1617,9 +1739,7 @@ export class BridgeController {
     let fileReturnRequested = leadingDirectives.fileReturn;
 
     if (groupSession) {
-      target = this.listActiveSessions().find(
-        (session) => session.sessionId === groupSession.sessionId,
-      );
+      target = this.store.getSession(groupSession.sessionId) ?? groupSession;
       // A session group is already an unambiguous route. Ignore @alias/#id
       // prefixes here so one group can never accidentally steer another session.
       if (explicit) {
@@ -1684,7 +1804,26 @@ export class BridgeController {
       await this.respond(messageId, chatId, codexNotReceived("内容为空。"));
       return;
     }
+    const attachments = this.takeAttachments(attachmentKey);
+    prompt = appendAttachmentsToPrompt(prompt, attachments);
+    if (fileReturnRequested) {
+      prompt = addFileReturnInstruction(prompt);
+    }
     const targetRuntime = runtimeDefinition(target.runtime);
+    if (
+      groupSession &&
+      target.managedByAssistant === true &&
+      !this.isRuntimeAvailable(target)
+    ) {
+      await this.queueRuntimeLaunch(target, {
+        prompt,
+        sourceMessageId: messageId,
+        chatId,
+        requestFileReturn: fileReturnRequested,
+        queueRequested,
+      });
+      return;
+    }
     if (
       !this.managedTerminals.isManaged(target) &&
       targetRuntime.transport !== "http_event_stream"
@@ -1706,11 +1845,6 @@ export class BridgeController {
         notReceivedText(target, "opencode 窗口未连接。"),
       );
       return;
-    }
-    const attachments = this.takeAttachments(attachmentKey);
-    prompt = appendAttachmentsToPrompt(prompt, attachments);
-    if (fileReturnRequested) {
-      prompt = addFileReturnInstruction(prompt);
     }
     await this.resumeSession(
       target,
@@ -1798,6 +1932,136 @@ export class BridgeController {
           : "这条审批已经处理或失效。",
       },
     };
+  }
+
+  private isRuntimeAvailable(session: SessionRecord): boolean {
+    if (session.status === "ended") {
+      return false;
+    }
+    if (runtimeDefinition(session.runtime).transport === "http_event_stream") {
+      return Boolean(this.opencode?.findInstanceBySession(session.sessionId));
+    }
+    return this.managedTerminals.isReady(session);
+  }
+
+  private isRuntimeStarting(session: SessionRecord): boolean {
+    if (runtimeDefinition(session.runtime).transport === "http_event_stream") {
+      return this.opencode?.hasPendingSession(session.sessionId) === true;
+    }
+    const normalizedCwd = normalizeRuntimeCwd(session.cwd);
+    return this.managedTerminals.listOnline().some(
+      (registration) =>
+        normalizeRuntimeCwd(registration.cwd) === normalizedCwd &&
+        registration.runtime === (session.runtime ?? "codex") &&
+        (!registration.sessionId || registration.sessionId === session.sessionId),
+    );
+  }
+
+  private async queueRuntimeLaunch(
+    session: SessionRecord,
+    item: PendingRuntimeLaunchPrompt,
+  ): Promise<void> {
+    const queue = this.pendingRuntimeLaunchPrompts.get(session.sessionId) ?? [];
+    queue.push(item);
+    this.pendingRuntimeLaunchPrompts.set(session.sessionId, queue);
+
+    const existingRequestId = this.runtimeLaunchRequestIds.get(session.sessionId);
+    const existingRequest = existingRequestId
+      ? this.runtimeLaunchRequests.get(existingRequestId)
+      : undefined;
+    if (existingRequest) {
+      await this.respond(
+        item.sourceMessageId,
+        item.chatId,
+        `${runtimeDisplayName(session.runtime)} 会话正在自动恢复；这条消息会在窗口就绪后发送。`,
+      );
+      return;
+    }
+
+    const requestId = randomUUID();
+    const timeoutMs = this.config.runtimeLaunchTimeoutMs ?? 2 * 60 * 1000;
+    const timer = setTimeout(() => {
+      const request = this.runtimeLaunchRequests.get(requestId);
+      if (request) {
+        void this.failRuntimeLaunch(
+          request,
+          "等待桌面助手自动打开窗口超时。请确认面板正在运行，然后在群里重试。",
+        );
+      }
+    }, timeoutMs);
+    timer.unref?.();
+    const request: RuntimeLaunchRequest = {
+      requestId,
+      sessionId: session.sessionId,
+      runtime: session.runtime ?? "codex",
+      cwd: session.cwd,
+      elevated: session.managedTerminalElevated === true,
+      createdAt: new Date().toISOString(),
+      status: this.isRuntimeStarting(session) ? "launched" : "pending",
+      timer,
+    };
+    this.runtimeLaunchRequests.set(requestId, request);
+    this.runtimeLaunchRequestIds.set(session.sessionId, requestId);
+    await this.respond(
+      item.sourceMessageId,
+      item.chatId,
+      request.status === "pending"
+        ? `${runtimeDisplayName(session.runtime)} 窗口已关闭，正在请求电脑端自动恢复；这条消息会在窗口就绪后发送。`
+        : `${runtimeDisplayName(session.runtime)} 窗口正在启动；这条消息会在窗口就绪后发送。`,
+    );
+  }
+
+  private async failRuntimeLaunch(
+    request: RuntimeLaunchRequest,
+    detail: string,
+  ): Promise<void> {
+    clearTimeout(request.timer);
+    this.runtimeLaunchRequests.delete(request.requestId);
+    if (this.runtimeLaunchRequestIds.get(request.sessionId) === request.requestId) {
+      this.runtimeLaunchRequestIds.delete(request.sessionId);
+    }
+    const queue = this.pendingRuntimeLaunchPrompts.get(request.sessionId) ?? [];
+    this.pendingRuntimeLaunchPrompts.delete(request.sessionId);
+    const session = this.store.getSession(request.sessionId);
+    for (const item of queue) {
+      await this.respond(
+        item.sourceMessageId,
+        item.chatId,
+        notReceivedText(session ?? { runtime: request.runtime }, detail),
+      );
+    }
+  }
+
+  private async tryDrainRuntimeLaunch(sessionId: string): Promise<void> {
+    const session = this.store.getSession(sessionId);
+    if (!session || !this.isRuntimeAvailable(session)) {
+      return;
+    }
+    const requestId = this.runtimeLaunchRequestIds.get(sessionId);
+    const request = requestId ? this.runtimeLaunchRequests.get(requestId) : undefined;
+    if (request) {
+      clearTimeout(request.timer);
+      this.runtimeLaunchRequests.delete(request.requestId);
+      this.runtimeLaunchRequestIds.delete(sessionId);
+    }
+    const queue = this.pendingRuntimeLaunchPrompts.get(sessionId);
+    if (!queue?.length) {
+      this.pendingRuntimeLaunchPrompts.delete(sessionId);
+      return;
+    }
+    this.pendingRuntimeLaunchPrompts.delete(sessionId);
+    for (let index = 0; index < queue.length; index += 1) {
+      const item = queue[index]!;
+      const current = this.store.getSession(sessionId) ?? session;
+      await this.resumeSession(
+        current,
+        item.prompt,
+        item.sourceMessageId,
+        item.chatId,
+        item.queueRequested || index > 0,
+        item.requestFileReturn,
+      );
+    }
   }
 
   private async resumeSession(
@@ -3436,4 +3700,21 @@ function approvalText(
     case "timeout":
       return "审批已超时，已转回电脑端。";
   }
+}
+
+function sessionGroupActivityTime(session: SessionRecord): number {
+  return Math.max(
+    parseTimestamp(session.lastSeenAt),
+    parseTimestamp(session.feishuChatCreatedAt),
+  );
+}
+
+function parseTimestamp(value: string | undefined): number {
+  const parsed = value ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeRuntimeCwd(cwd: string): string {
+  const resolved = path.resolve(cwd);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }

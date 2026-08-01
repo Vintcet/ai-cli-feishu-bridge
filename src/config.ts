@@ -29,6 +29,18 @@ export const bridgeConfig = {
     process.env.CODEX_SESSION_ACTIVE_MS,
     24 * 60 * 60 * 1000,
   ),
+  sessionGroupInactiveMs: positiveInteger(
+    process.env.FEISHU_SESSION_GROUP_INACTIVE_MS,
+    7 * 24 * 60 * 60 * 1000,
+  ),
+  sessionGroupCleanupIntervalMs: positiveInteger(
+    process.env.FEISHU_SESSION_GROUP_CLEANUP_INTERVAL_MS,
+    60 * 60 * 1000,
+  ),
+  runtimeLaunchTimeoutMs: positiveInteger(
+    process.env.RUNTIME_AUTO_LAUNCH_TIMEOUT_MS,
+    2 * 60 * 1000,
+  ),
   codexCommand: process.env.CODEX_COMMAND?.trim() || "codex",
   dataDirectory: path.join(projectRoot, "data"),
   uploadsDirectory: path.join(projectRoot, "data", "uploads"),

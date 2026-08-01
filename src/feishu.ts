@@ -71,6 +71,19 @@ export class FeishuGateway {
     }
   }
 
+  async deleteSessionGroup(chatId: string): Promise<void> {
+    const response = await this.client.im.v1.chat.delete({
+      path: { chat_id: chatId },
+    }).catch((error: unknown) => {
+      throw new Error(`Feishu delete group failed: ${feishuRequestError(error)}`);
+    });
+    if (response.code !== 0) {
+      throw new Error(
+        `Feishu delete group failed: ${response.code ?? "unknown"} ${response.msg ?? "unknown error"}`,
+      );
+    }
+  }
+
   async replyText(messageId: string, text: string): Promise<string> {
     const response = await this.client.im.v1.message.reply({
       path: { message_id: messageId },

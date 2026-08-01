@@ -98,6 +98,8 @@ const controller = new BridgeController(store, feishu, codex, managedTerminals, 
   approvalTimeoutMs: bridgeConfig.approvalTimeoutMs,
   inputTimeoutMs: bridgeConfig.inputTimeoutMs,
   sessionActiveMs: bridgeConfig.sessionActiveMs,
+  sessionGroupInactiveMs: bridgeConfig.sessionGroupInactiveMs,
+  runtimeLaunchTimeoutMs: bridgeConfig.runtimeLaunchTimeoutMs,
   uploadsDirectory: bridgeConfig.uploadsDirectory,
   inboundFileMaxBytes: bridgeConfig.inboundFileMaxBytes,
   inboundAttachmentMaxCount: bridgeConfig.inboundAttachmentMaxCount,
@@ -145,7 +147,7 @@ const hookServer = startHookHttpServer(
   {
     health: () => ({
       ...controller.health(),
-      version: "0.15.3",
+      version: "0.16.0",
       processId: process.pid,
       startedAt: serviceStartedAt,
       feishu: wsClient.getConnectionStatus(),
@@ -157,6 +159,8 @@ const hookServer = startHookHttpServer(
     sessionAlias: (payload) => controller.handleSessionAliasUpdate(payload),
     sessionGroupRetry: (payload) => controller.handleSessionGroupRetry(payload),
     sessionHistoryHide: (payload) => controller.handleSessionHistoryHide(payload),
+    runtimeLaunchClaim: () => controller.handleRuntimeLaunchClaim(),
+    runtimeLaunchComplete: (payload) => controller.handleRuntimeLaunchComplete(payload),
     localApproval: (payload) => controller.handleLocalApproval(payload),
     settingsUpdate: (payload) => controller.handleSettingsUpdate(payload),
     sessionStart: (payload) => controller.handleSessionStartHook(payload),
@@ -195,8 +199,17 @@ console.log(
   `Commands: “${bridgeConfig.bindCommand}”, “状态”, “会话”, “别名”, “排队”, “发文件”, “帮助”. Multiple Codex windows are routed by alias or session id.`,
 );
 
-void controller.initializeSessionGroups().catch((error) => {
-  console.warn("[feishu] Could not initialize session groups:", error);
-});
+void controller.initializeSessionGroups()
+  .then(() => controller.cleanupInactiveSessionGroups())
+  .catch((error) => {
+    console.warn("[feishu] Could not initialize or clean up session groups:", error);
+  });
+
+const sessionGroupCleanupTimer = setInterval(() => {
+  void controller.cleanupInactiveSessionGroups().catch((error) => {
+    console.warn("[feishu] Could not clean up inactive session groups:", error);
+  });
+}, bridgeConfig.sessionGroupCleanupIntervalMs);
+sessionGroupCleanupTimer.unref?.();
 
 void wsClient.start({ eventDispatcher });

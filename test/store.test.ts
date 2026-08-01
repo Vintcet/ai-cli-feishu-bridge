@@ -368,6 +368,7 @@ test("prunes ended sessions older than the retention window", async () => {
   try {
     const oldEndedAt = "2025-01-01T00:00:00.000Z";
     const oldId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const groupedOldId = "019faef0-d0bb-7703-af82-17ee9b45397c";
     const freshId = "019fb4e7-d831-7dd3-9745-42f85a8209bb";
     const freshEndedAt = "2026-07-30T00:00:00.000Z";
     await writeFile(
@@ -396,6 +397,20 @@ test("prunes ended sessions older than the retention window", async () => {
             endedAt: freshEndedAt,
             managedByAssistant: true,
           },
+          [groupedOldId]: {
+            sessionId: groupedOldId,
+            shortId: "9b45397c",
+            cwd: directory,
+            projectName: "old-grouped",
+            status: "ended",
+            openedAt: oldEndedAt,
+            lastSeenAt: oldEndedAt,
+            endedAt: oldEndedAt,
+            managedByAssistant: true,
+            feishuChatId: "old-session-chat",
+            feishuChatName: "old group",
+            feishuChatCreatedAt: oldEndedAt,
+          },
         },
       }),
       "utf8",
@@ -406,10 +421,11 @@ test("prunes ended sessions older than the retention window", async () => {
     await store.init();
     assert.equal(store.getSession(oldId), undefined);
     assert.ok(store.getSession(freshId));
+    assert.equal(store.getSession(groupedOldId)?.feishuChatId, "old-session-chat");
     const persisted = JSON.parse(
       await readFile(path.join(directory, "sessions.json"), "utf8"),
     ) as { sessions: Record<string, unknown> };
-    assert.equal(Object.keys(persisted.sessions).length, 1);
+    assert.equal(Object.keys(persisted.sessions).length, 2);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

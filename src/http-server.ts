@@ -29,6 +29,10 @@ export interface HookHttpHandlers {
   sessionHistoryHide: (
     payload: Record<string, unknown>,
   ) => Promise<Record<string, unknown>>;
+  runtimeLaunchClaim: () => Record<string, unknown>;
+  runtimeLaunchComplete: (
+    payload: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>;
   localApproval: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
   settingsUpdate: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
   permission: (payload: PermissionHookPayload) => Promise<Record<string, unknown>>;
@@ -160,6 +164,37 @@ async function routeRequest(
       return;
     }
     const result = await handlers.sessionHistoryHide(body as Record<string, unknown>);
+    sendJson(response, result.ok === true ? 200 : 400, result);
+    return;
+  }
+
+  if (url.pathname === "/runtime-launches/claim") {
+    if (!hasValidControlToken(request, controlToken)) {
+      sendJson(response, 401, { ok: false, error: "本机控制身份验证失败。" });
+      return;
+    }
+    const body = await readJsonBody(request);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      sendJson(response, 400, { ok: false, error: "请求格式不正确。" });
+      return;
+    }
+    sendJson(response, 200, handlers.runtimeLaunchClaim());
+    return;
+  }
+
+  if (url.pathname === "/runtime-launches/complete") {
+    if (!hasValidControlToken(request, controlToken)) {
+      sendJson(response, 401, { ok: false, error: "本机控制身份验证失败。" });
+      return;
+    }
+    const body = await readJsonBody(request);
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      sendJson(response, 400, { ok: false, error: "请求格式不正确。" });
+      return;
+    }
+    const result = await handlers.runtimeLaunchComplete(
+      body as Record<string, unknown>,
+    );
     sendJson(response, result.ok === true ? 200 : 400, result);
     return;
   }

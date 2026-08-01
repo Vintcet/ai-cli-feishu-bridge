@@ -256,6 +256,48 @@ internal sealed class HistoryHideResult
     public string Error { get; set; } = "";
 }
 
+internal sealed class RuntimeLaunchClaimResult
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; set; }
+
+    [JsonPropertyName("request")]
+    public RuntimeLaunchRequest? Request { get; set; }
+
+    [JsonPropertyName("error")]
+    public string Error { get; set; } = "";
+}
+
+internal sealed class RuntimeLaunchRequest
+{
+    [JsonPropertyName("requestId")]
+    public string RequestId { get; set; } = "";
+
+    [JsonPropertyName("sessionId")]
+    public string SessionId { get; set; } = "";
+
+    [JsonPropertyName("runtime")]
+    public string Runtime { get; set; } = "";
+
+    [JsonPropertyName("cwd")]
+    public string Cwd { get; set; } = "";
+
+    [JsonPropertyName("elevated")]
+    public bool Elevated { get; set; }
+
+    [JsonPropertyName("createdAt")]
+    public string CreatedAt { get; set; } = "";
+}
+
+internal sealed class RuntimeLaunchCompleteResult
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; set; }
+
+    [JsonPropertyName("error")]
+    public string Error { get; set; } = "";
+}
+
 internal sealed class OpenCodeLaunchResult
 {
     [JsonPropertyName("ok")]

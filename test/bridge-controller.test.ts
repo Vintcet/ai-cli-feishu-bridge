@@ -9,6 +9,7 @@ import type { CodexExitResult, CodexRunner } from "../src/codex-runner.js";
 import type { SessionRecord } from "../src/domain.js";
 import type { FeishuGateway } from "../src/feishu.js";
 import { ManagedTerminalRouter } from "../src/managed-terminal.js";
+import type { OpenCodeManager } from "../src/opencode-manager.js";
 import { BridgeStore } from "../src/store.js";
 
 class FakeFeishu {
@@ -23,8 +24,10 @@ class FakeFeishu {
     chatId: string;
   }> = [];
   readonly renamedGroups: Array<{ chatId: string; name: string }> = [];
+  readonly deletedGroups: string[] = [];
   private counter = 0;
   createGroupError?: Error;
+  deleteGroupError?: Error;
 
   async replyText(messageId: string, text: string): Promise<string> {
     this.replies.push({ messageId, text });
@@ -51,6 +54,13 @@ class FakeFeishu {
 
   async updateSessionGroupName(chatId: string, name: string): Promise<void> {
     this.renamedGroups.push({ chatId, name });
+  }
+
+  async deleteSessionGroup(chatId: string): Promise<void> {
+    if (this.deleteGroupError) {
+      throw this.deleteGroupError;
+    }
+    this.deletedGroups.push(chatId);
   }
 
   async sendCard(chatId: string, card: Record<string, unknown>): Promise<string> {
@@ -110,28 +120,52 @@ class FakeCodex {
   }
 }
 
+class FakeOpenCodeManager {
+  connected = false;
+  readonly prompts: Array<{ sessionId: string; prompt: string }> = [];
+
+  findInstanceBySession(sessionId: string) {
+    return this.connected && sessionId === "opencode-session-alpha"
+      ? { port: 5100, cwd: "C:/demo" }
+      : undefined;
+  }
+
+  hasPendingSession(): boolean {
+    return false;
+  }
+
+  async sendPrompt(sessionId: string, prompt: string): Promise<void> {
+    this.prompts.push({ sessionId, prompt });
+  }
+}
+
 class FakeManagedTerminals {
   readonly sends: Array<{ prompt: string; submitMode: string }> = [];
+  private online: boolean;
 
   constructor(
     private readonly terminalId: string,
     private readonly cwd: string,
     private readonly sessionId: string,
-  ) {}
+    online = true,
+  ) {
+    this.online = online;
+  }
 
   isManaged(session: SessionRecord): boolean {
     return session.managedTerminalId === this.terminalId;
   }
 
   isOnline(): boolean {
-    return true;
+    return this.online;
   }
 
   isReady(): boolean {
-    return true;
+    return this.online;
   }
 
   claimById() {
+    this.online = true;
     return {
       terminalId: this.terminalId,
       elevated: false,
@@ -140,6 +174,9 @@ class FakeManagedTerminals {
   }
 
   listOnline() {
+    if (!this.online) {
+      return [];
+    }
     const now = Date.now();
     return [{
       terminalId: this.terminalId,
@@ -340,6 +377,214 @@ test("creates one private session group and routes group replies to that session
       terminals.sends.slice(-4).map((item) => item.prompt),
       ["状态", "帮助", "绑定", "解绑"],
     );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("dissolves assistant session groups after one inactive week", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-group-cleanup-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const oldSessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const recentSessionId = "019faef0-d0bb-7703-af82-17ee9b45397c";
+    for (const sessionId of [oldSessionId, recentSessionId]) {
+      await store.upsertSession({
+        sessionId,
+        cwd: directory,
+        status: "ended",
+        runtime: "codex",
+        managedByAssistant: true,
+      });
+    }
+    const now = Date.parse("2026-08-01T12:00:00.000Z");
+    const oldAt = new Date(now - 8 * 24 * 60 * 60 * 1000).toISOString();
+    const recentAt = new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString();
+    await store.setSessionFeishuChat(oldSessionId, {
+      chatId: "old-session-chat",
+      chatName: "old",
+      createdAt: oldAt,
+    });
+    await store.setSessionFeishuChat(recentSessionId, {
+      chatId: "recent-session-chat",
+      chatName: "recent",
+      createdAt: recentAt,
+    });
+    store.getSession(oldSessionId)!.lastSeenAt = oldAt;
+    store.getSession(recentSessionId)!.lastSeenAt = oldAt;
+
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      {
+        ...controllerConfig(directory),
+        sessionGroupInactiveMs: 7 * 24 * 60 * 60 * 1000,
+      },
+    );
+    const result = await controller.cleanupInactiveSessionGroups(now);
+    assert.deepEqual(result, { deleted: 1, failed: 0 });
+    assert.deepEqual(feishu.deletedGroups, ["old-session-chat"]);
+    assert.equal(store.getSession(oldSessionId)?.feishuChatId, undefined);
+    assert.equal(store.getSession(recentSessionId)?.feishuChatId, "recent-session-chat");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a session group message auto-opens and resumes a closed managed session", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-auto-resume-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      { openId: "owner", chatId: "chat-owner", chatType: "p2p", boundAt: new Date().toISOString() },
+      code,
+    );
+    const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const terminalId = "terminal-auto-resume";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "ended",
+      runtime: "codex",
+      managedTerminalId: terminalId,
+      managedByAssistant: true,
+    });
+    await store.setSessionFeishuChat(sessionId, {
+      chatId: "auto-resume-chat",
+      chatName: "auto resume",
+    });
+    const feishu = new FakeFeishu();
+    const terminals = new FakeManagedTerminals(
+      terminalId,
+      directory,
+      sessionId,
+      false,
+    );
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      terminals as unknown as ManagedTerminalRouter,
+      undefined,
+      controllerConfig(directory),
+    );
+
+    await controller.handleFeishuMessage(
+      groupMessageEvent(
+        "auto-resume-message",
+        "owner",
+        "auto-resume-chat",
+        "继续完成剩余工作",
+      ),
+    );
+    assert.match(feishu.replies.at(-1)?.text ?? "", /自动恢复/);
+    const claim = controller.handleRuntimeLaunchClaim() as {
+      ok?: boolean;
+      request?: {
+        requestId: string;
+        sessionId: string;
+        runtime: string;
+        cwd: string;
+      };
+    };
+    assert.equal(claim.ok, true);
+    assert.equal(claim.request?.sessionId, sessionId);
+    assert.equal(claim.request?.runtime, "codex");
+    assert.equal(claim.request?.cwd, directory);
+    assert.ok(claim.request?.requestId);
+    await controller.handleRuntimeLaunchComplete({
+      requestId: claim.request!.requestId,
+      success: true,
+    });
+    await controller.handleSessionStartHook({
+      hook_event_name: "SessionStart",
+      session_id: sessionId,
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      source: "resume",
+      transcript_path: null,
+      runtime: "codex",
+      managed_terminal_id: terminalId,
+      managed_terminal_elevated: false,
+    });
+    assert.deepEqual(terminals.sends, [
+      { prompt: "继续完成剩余工作", submitMode: "steer" },
+    ]);
+    assert.equal(store.getSession(sessionId)?.status, "running");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a closed opencode group prompt waits for the resumed HTTP session", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-auto-resume-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      { openId: "owner", chatId: "chat-owner", chatType: "p2p", boundAt: new Date().toISOString() },
+      code,
+    );
+    const sessionId = "opencode-session-alpha";
+    await store.upsertSession({
+      sessionId,
+      cwd: "C:/demo",
+      status: "ended",
+      source: "opencode",
+      runtime: "opencode",
+      managedByAssistant: true,
+    });
+    await store.setSessionFeishuChat(sessionId, {
+      chatId: "opencode-auto-resume-chat",
+      chatName: "opencode auto resume",
+    });
+    const opencode = new FakeOpenCodeManager();
+    const controller = new BridgeController(
+      store,
+      new FakeFeishu() as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      opencode as unknown as OpenCodeManager,
+      controllerConfig(directory),
+    );
+
+    await controller.handleFeishuMessage(
+      groupMessageEvent(
+        "opencode-auto-resume-message",
+        "owner",
+        "opencode-auto-resume-chat",
+        "从原目录继续处理",
+      ),
+    );
+    const claim = controller.handleRuntimeLaunchClaim() as {
+      request?: { requestId: string; runtime: string; cwd: string };
+    };
+    assert.equal(claim.request?.runtime, "opencode");
+    assert.equal(claim.request?.cwd, "C:/demo");
+    await controller.handleRuntimeLaunchComplete({
+      requestId: claim.request!.requestId,
+      success: true,
+    });
+    opencode.connected = true;
+    await controller.handleOpenCodeSessionCreated({
+      id: sessionId,
+      directory: "C:/demo",
+    });
+    assert.deepEqual(opencode.prompts, [
+      { sessionId, prompt: "从原目录继续处理" },
+    ]);
+    assert.equal(store.getSession(sessionId)?.status, "running");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -7,10 +7,16 @@ internal sealed class NewRuntimeDialog : Form
     private readonly TextBox argumentsBox = new();
     private readonly CheckBox administratorBox = new();
     private readonly Button startButton = new();
+    private readonly Label launchHintLabel = new();
+    private readonly IReadOnlyList<CodexSession> knownSessions;
 
-    public NewRuntimeDialog(RuntimeProfile runtime, string initialDirectory)
+    public NewRuntimeDialog(
+        RuntimeProfile runtime,
+        string initialDirectory,
+        IReadOnlyList<CodexSession>? knownSessions = null)
     {
         this.runtime = runtime;
+        this.knownSessions = knownSessions ?? [];
         Text = $"新建同步 {runtime.DisplayName}";
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -61,19 +67,19 @@ internal sealed class NewRuntimeDialog : Form
         argumentsBox.Size = new Size(562, 28);
         argumentsBox.MaxLength = 4_000;
         argumentsBox.PlaceholderText = runtime.ArgumentsPlaceholder;
+        argumentsBox.TextChanged += (_, _) => TrySelectResumeDirectory();
 
         administratorBox.Text = "以 Windows 管理员身份启动（会弹出 UAC 确认）";
         administratorBox.AutoSize = true;
         administratorBox.Location = new Point(24, 190);
         administratorBox.ForeColor = Color.FromArgb(185, 28, 28);
 
-        var hint = new Label
-        {
-            Text = runtime.LaunchHint,
-            AutoSize = true,
-            ForeColor = Color.FromArgb(100, 116, 139),
-            Location = new Point(43, 215),
-        };
+        launchHintLabel.Text = runtime.LaunchHint;
+        launchHintLabel.AutoSize = false;
+        launchHintLabel.AutoEllipsis = true;
+        launchHintLabel.Size = new Size(543, 38);
+        launchHintLabel.ForeColor = Color.FromArgb(100, 116, 139);
+        launchHintLabel.Location = new Point(43, 215);
 
         var cancelButton = new Button
         {
@@ -109,7 +115,7 @@ internal sealed class NewRuntimeDialog : Form
             argumentsLabel,
             argumentsBox,
             administratorBox,
-            hint,
+            launchHintLabel,
             cancelButton,
             startButton,
         ]);
@@ -137,6 +143,39 @@ internal sealed class NewRuntimeDialog : Form
         {
             directoryBox.Text = dialog.SelectedPath;
         }
+    }
+
+    private void TrySelectResumeDirectory()
+    {
+        string? sessionId;
+        try
+        {
+            sessionId = RuntimeArgumentParser.ExtractResumeSessionId(
+                runtime,
+                argumentsBox.Text);
+        }
+        catch
+        {
+            launchHintLabel.Text = runtime.LaunchHint;
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            launchHintLabel.Text = runtime.LaunchHint;
+            return;
+        }
+        var session = knownSessions.FirstOrDefault(item =>
+            item.SessionId.Equals(sessionId, StringComparison.OrdinalIgnoreCase) &&
+            RuntimeCatalog.FromId(item.Runtime).Id.Equals(
+                runtime.Id,
+                StringComparison.OrdinalIgnoreCase));
+        if (session is null || !Directory.Exists(session.Cwd))
+        {
+            launchHintLabel.Text = $"检测到恢复参数，但本机历史中没有可用的 {runtime.DisplayName} 工作目录。";
+            return;
+        }
+        directoryBox.Text = session.Cwd;
+        launchHintLabel.Text = $"已从会话 #{session.ShortId} 自动识别工作目录：{session.Cwd}";
     }
 
     private void UpdateStartButton() =>

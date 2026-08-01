@@ -14,6 +14,7 @@ internal static class Program
             ("quoted arguments", TestQuotedArguments),
             ("opencode arguments", TestOpenCodeArguments),
             ("claude code arguments", TestClaudeCodeArguments),
+            ("resume session id detection", TestResumeSessionIdDetection),
             ("forwarded terminal host arguments", TestForwardedTerminalHostArguments),
             ("runtime catalog", TestRuntimeCatalog),
             ("shell-looking text stays data", TestShellLookingText),
@@ -132,6 +133,31 @@ internal static class Program
                 "claude --resume 019faef0-d0bb-7703-af82-17ee9b45397b"));
     }
 
+    private static void TestResumeSessionIdDetection()
+    {
+        const string sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+        AssertEqual(
+            sessionId,
+            RuntimeArgumentParser.ExtractResumeSessionId(
+                RuntimeCatalog.Codex,
+                $"--model gpt-5 resume {sessionId}"));
+        AssertEqual(
+            sessionId,
+            RuntimeArgumentParser.ExtractResumeSessionId(
+                RuntimeCatalog.ClaudeCode,
+                $"-r {sessionId}"));
+        AssertEqual(
+            sessionId,
+            RuntimeArgumentParser.ExtractResumeSessionId(
+                RuntimeCatalog.OpenCode,
+                $"--session={sessionId}"));
+        AssertEqual(
+            null,
+            RuntimeArgumentParser.ExtractResumeSessionId(
+                RuntimeCatalog.Codex,
+                "--model gpt-5"));
+    }
+
     private static void TestForwardedTerminalHostArguments()
     {
         AssertSequence(
@@ -234,6 +260,15 @@ internal static class Program
         {
             throw new InvalidOperationException(
                 $"Expected [{string.Join(", ", expected)}], got [{string.Join(", ", actual)}].");
+        }
+    }
+
+    private static void AssertEqual(string? expected, string? actual)
+    {
+        if (!string.Equals(expected, actual, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Expected {expected ?? "<null>"}, got {actual ?? "<null>"}.");
         }
     }
 }

@@ -66,6 +66,60 @@ internal static class RuntimeArgumentParser
         }
     }
 
+    public static string? ExtractResumeSessionId(
+        RuntimeProfile runtime,
+        string? rawArguments) =>
+        ExtractResumeSessionId(runtime, Parse(runtime, rawArguments));
+
+    public static string? ExtractResumeSessionId(
+        RuntimeProfile runtime,
+        IReadOnlyList<string> arguments)
+    {
+        if (runtime.Id.Equals(RuntimeCatalog.Codex.Id, StringComparison.OrdinalIgnoreCase))
+        {
+            for (var index = 0; index < arguments.Count - 1; index++)
+            {
+                if (arguments[index].Equals("resume", StringComparison.OrdinalIgnoreCase))
+                {
+                    return NormalizeSessionId(arguments[index + 1]);
+                }
+            }
+            return null;
+        }
+
+        var flags = runtime.Id.Equals(
+            RuntimeCatalog.ClaudeCode.Id,
+            StringComparison.OrdinalIgnoreCase)
+            ? new[] { "-r", "--resume" }
+            : new[] { "-s", "--session" };
+        for (var index = 0; index < arguments.Count - 1; index++)
+        {
+            if (flags.Any(flag =>
+                arguments[index].Equals(flag, StringComparison.OrdinalIgnoreCase)))
+            {
+                return NormalizeSessionId(arguments[index + 1]);
+            }
+        }
+        foreach (var argument in arguments)
+        {
+            foreach (var flag in flags.Where(item => item.StartsWith("--")))
+            {
+                var prefix = $"{flag}=";
+                if (argument.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return NormalizeSessionId(argument[prefix.Length..]);
+                }
+            }
+        }
+        return null;
+    }
+
+    private static string? NormalizeSessionId(string value)
+    {
+        var normalized = value.Trim();
+        return normalized.Length is > 0 and <= 512 ? normalized : null;
+    }
+
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CommandLineToArgvW(string commandLine, out int argumentCount);
 
