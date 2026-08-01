@@ -18,6 +18,7 @@ import {
   type ActivityCardEvent,
 } from "./cards.js";
 import { readLastClaudeAssistantMessage } from "./claude-code-transcript.js";
+import { readCodexTurnCompletion } from "./codex-transcript.js";
 import type { CodexExitResult } from "./codex-runner.js";
 import { CodexRunner } from "./codex-runner.js";
 import {
@@ -1237,10 +1238,18 @@ export class BridgeController {
 
     let assistantMessage = payload.last_assistant_message;
     let turnId = payload.turn_id;
+    let structuredCodexError: string | undefined;
+    let structuredCodexErrorCode: string | undefined;
     if (payload.runtime === "claudecode" && payload.transcript_path) {
       const transcriptMessage = await readLastClaudeAssistantMessage(payload.transcript_path);
       assistantMessage ||= transcriptMessage?.text ?? null;
       turnId = transcriptMessage?.turnId ?? turnId;
+    } else if (payload.transcript_path) {
+      const completion = await readCodexTurnCompletion(payload.transcript_path, turnId);
+      assistantMessage ||= completion?.assistantMessage ?? null;
+      structuredCodexError = completion?.error;
+      structuredCodexErrorCode = completion?.errorCode;
+      turnId = completion?.turnId ?? turnId;
     }
 
     const session = await this.store.upsertSession({
@@ -1258,7 +1267,7 @@ export class BridgeController {
         ? { managedTerminalElevated: payload.managed_terminal_elevated }
         : {}),
     });
-    const codexError = codexErrorFromMessage(assistantMessage);
+    const codexError = structuredCodexError ?? codexErrorFromMessage(assistantMessage);
     await this.finishActivity(
       payload.session_id,
       codexError ? "本轮发生错误" : "本轮处理完成",
@@ -1274,6 +1283,7 @@ export class BridgeController {
       const canRetry =
         retrySettings.autoRetryErrors &&
         retryCount < retrySettings.retryMaxAttempts &&
+        isRetryableCodexError(codexError, structuredCodexErrorCode) &&
         this.managedTerminals.isReady(session);
       const detail = canRetry
         ? `${codexError}\n\n助手将在 ${Math.ceil(retryDelay / 1_000)} 秒后自动重试（第 ${retryCount + 1}/${retrySettings.retryMaxAttempts} 次）。`
@@ -3249,7 +3259,13 @@ function notReceivedText(
   return `${runtimeDisplayName(session?.runtime)} 未接收：${reason}`;
 }
 
-function isRetryableCodexError(value: string): boolean {
+function isRetryableCodexError(value: string, errorCode?: string): boolean {
+  if (
+    errorCode &&
+    /(?:internal.server|server.error|rate.limit|overload|high.demand|temporar|timeout)/i.test(errorCode)
+  ) {
+    return true;
+  }
   return /(?:\b(?:400|408|409|429|500|502|503|504)\b|too many requests|rate.?limit|busy|overload|temporar(?:y|ily)|service unavailable|timeout|timed out|连接超时|服务繁忙|请求过多|暂时不可用)/i.test(
     value,
   );

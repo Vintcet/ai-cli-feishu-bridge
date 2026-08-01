@@ -1221,6 +1221,19 @@ test("a managed temporary error is notified and retried when enabled", async () 
     });
     const feishu = new FakeFeishu();
     const terminals = new FakeManagedTerminals(terminalId, directory, sessionId);
+    const transcriptPath = path.join(directory, "rollout.jsonl");
+    await writeFile(transcriptPath, JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "turn-retry-1",
+        last_agent_message: null,
+        error: {
+          message: "We're currently experiencing high demand, which may cause temporary errors.",
+          codex_error_info: "internal_server_error",
+        },
+      },
+    }));
     const controller = new BridgeController(
       store,
       feishu as unknown as FeishuGateway,
@@ -1236,9 +1249,9 @@ test("a managed temporary error is notified and retried when enabled", async () 
       cwd: directory,
       model: "gpt-5",
       permission_mode: "default",
-      last_assistant_message: "Error 503: service unavailable, request failed.",
+      last_assistant_message: null,
       stop_hook_active: true,
-      transcript_path: null,
+      transcript_path: transcriptPath,
     });
     assert.equal(feishu.cards.length, 1);
     assert.match(JSON.stringify(feishu.cards[0]?.card), /Codex 运行错误/);
@@ -1247,6 +1260,75 @@ test("a managed temporary error is notified and retried when enabled", async () 
     }
     assert.equal(terminals.sends.length, 1);
     assert.match(terminals.sends[0]!.prompt, /重试上一项任务/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a structured permanent Codex error is notified without automatic retry", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-permanent-error-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    await store.updateSettings({ autoRetryErrors: true });
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const terminalId = "terminal-permanent-error";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "running",
+      source: "startup",
+      managedTerminalId: terminalId,
+    });
+    const transcriptPath = path.join(directory, "rollout.jsonl");
+    await writeFile(transcriptPath, JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "turn-permanent-error",
+        last_agent_message: null,
+        error: {
+          message: "Authentication failed. Please sign in again.",
+          codex_error_info: "authentication_error",
+        },
+      },
+    }));
+    const feishu = new FakeFeishu();
+    const terminals = new FakeManagedTerminals(terminalId, directory, sessionId);
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      terminals as unknown as ManagedTerminalRouter,
+      undefined,
+      controllerConfig(directory),
+    );
+
+    await controller.handleStopHook({
+      hook_event_name: "Stop",
+      session_id: sessionId,
+      turn_id: "turn-permanent-error",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      last_assistant_message: null,
+      stop_hook_active: true,
+      transcript_path: transcriptPath,
+    });
+
+    assert.equal(feishu.cards.length, 1);
+    assert.match(JSON.stringify(feishu.cards[0]?.card), /Authentication failed/);
+    assert.equal(store.getSession(sessionId)?.status, "error");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(terminals.sends.length, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
