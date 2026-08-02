@@ -8,6 +8,7 @@ import { startHookHttpServer } from "./http-server.js";
 import { ManagedTerminalRouter } from "./managed-terminal.js";
 import { OpenCodeManager } from "./opencode-manager.js";
 import { BridgeStore } from "./store.js";
+import { bridgeVersion } from "./version.js";
 
 type FeishuEvent = Record<string, any>;
 
@@ -137,6 +138,7 @@ const controller = new BridgeController(store, feishu, codex, managedTerminals, 
   inboundAttachmentMaxCount: bridgeConfig.inboundAttachmentMaxCount,
   uploadTtlMs: bridgeConfig.uploadTtlMs,
   outboundFileMaxBytes: bridgeConfig.outboundFileMaxBytes,
+  transcriptPollIntervalMs: bridgeConfig.transcriptPollIntervalMs,
 });
 
 opencode.startAutoDiscovery();
@@ -179,7 +181,7 @@ const hookServer = startHookHttpServer(
   {
     health: () => ({
       ...controller.health(),
-      version: "0.17.1",
+      version: bridgeVersion,
       processId: process.pid,
       startedAt: serviceStartedAt,
       feishu: wsClient.getConnectionStatus(),
@@ -212,26 +214,12 @@ process.on("unhandledRejection", (error) => {
   console.error("Unhandled rejection:", error);
 });
 
-process.on("SIGINT", () => {
-  wsClient.close({ force: true });
-  hookServer.close(() => {
-    void store.flushPending().finally(() => process.exit(0));
-  });
-});
-
-process.on("SIGTERM", () => {
-  wsClient.close({ force: true });
-  hookServer.close(() => {
-    void store.flushPending().finally(() => process.exit(0));
-  });
-});
-
 console.log(`Starting Feishu long connection for app ${bridgeConfig.appId.slice(0, 8)}...`);
 console.log(
   `Commands: “${bridgeConfig.bindCommand}”, “新建 codex 项目名”, “工作区”, “状态”, “会话”, “别名”, “排队”, “发文件”, “帮助”. Multiple assistant windows are routed by alias or session id.`,
 );
 
-void controller.initializeSessionGroups()
+void controller.initialize()
   .then(() => controller.cleanupInactiveSessionGroups())
   .catch((error) => {
     console.warn("[feishu] Could not initialize or clean up session groups:", error);
@@ -243,5 +231,21 @@ const sessionGroupCleanupTimer = setInterval(() => {
   });
 }, bridgeConfig.sessionGroupCleanupIntervalMs);
 sessionGroupCleanupTimer.unref?.();
+
+let shuttingDown = false;
+const shutdown = (): void => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  wsClient.close({ force: true });
+  opencode.stopAutoDiscovery();
+  clearInterval(sessionGroupCleanupTimer);
+  hookServer.close(() => {
+    void Promise.allSettled([controller.close(), store.close()])
+      .finally(() => process.exit(0));
+  });
+};
+
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);
 
 void wsClient.start({ eventDispatcher });

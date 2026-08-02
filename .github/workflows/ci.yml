@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install Node.js dependencies
+        run: npm ci
+
+      - name: Lint TypeScript
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Run Node.js tests
+        run: npm test
+
+      - name: Build Node.js service
+        run: npm run build
+
+      - name: Run desktop tests
+        run: dotnet test .\desktop-control\tests\CodexFeishuTerminalHost.Tests.csproj -c Release
+
+      - name: Build desktop application
+        run: dotnet build .\desktop-control\CodexFeishuControl.csproj -c Release

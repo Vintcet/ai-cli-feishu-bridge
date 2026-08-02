@@ -81,6 +81,8 @@ export class BridgeStore {
   private flushTimer: ReturnType<typeof setTimeout> | undefined;
   private safetyTimer: ReturnType<typeof setInterval> | undefined;
   private flushChain: Promise<void> | undefined;
+  private closePromise: Promise<void> | undefined;
+  private closed = false;
 
   constructor(
     private readonly dataDirectory: string,
@@ -183,6 +185,14 @@ export class BridgeStore {
       }
       if (session.managedTerminalId && session.managedByAssistant !== true) {
         session.managedByAssistant = true;
+        sessionsChanged = true;
+      }
+      if (
+        session.historyHiddenAt &&
+        session.managedByAssistant === true &&
+        session.status !== "ended"
+      ) {
+        delete session.historyHiddenAt;
         sessionsChanged = true;
       }
     }
@@ -402,6 +412,7 @@ export class BridgeStore {
     managedTerminalId?: string | null;
     managedTerminalElevated?: boolean | null;
     managedByAssistant?: boolean;
+    transcriptPath?: string | null;
     openedAt?: string;
     feishuChatId?: string;
     feishuChatName?: string;
@@ -428,6 +439,10 @@ export class BridgeStore {
         input,
         "managedTerminalElevated",
       );
+      const hasTranscriptPath = Object.prototype.hasOwnProperty.call(
+        input,
+        "transcriptPath",
+      );
       const hasFeishuChatError = Object.prototype.hasOwnProperty.call(
         input,
         "feishuChatError",
@@ -436,6 +451,10 @@ export class BridgeStore {
         input,
         "feishuChatErrorAt",
       );
+      const managedByAssistant =
+        input.managedByAssistant ??
+        current?.managedByAssistant ??
+        Boolean(input.managedTerminalId);
       const next: SessionRecord = {
         sessionId: input.sessionId,
         shortId: shortSessionId(input.sessionId),
@@ -472,11 +491,14 @@ export class BridgeStore {
         managedTerminalElevated: hasManagedTerminalElevated
           ? input.managedTerminalElevated ?? undefined
           : current?.managedTerminalElevated,
-        managedByAssistant:
-          input.managedByAssistant ??
-          current?.managedByAssistant ??
-          Boolean(input.managedTerminalId),
-        historyHiddenAt: current?.historyHiddenAt,
+        managedByAssistant,
+        transcriptPath: hasTranscriptPath
+          ? input.transcriptPath ?? undefined
+          : current?.transcriptPath,
+        historyHiddenAt:
+          input.status !== "ended" && managedByAssistant
+            ? undefined
+            : current?.historyHiddenAt,
         feishuChatId: input.feishuChatId ?? current?.feishuChatId,
         feishuChatName: input.feishuChatName ?? current?.feishuChatName,
         feishuChatCreatedAt:
@@ -627,6 +649,7 @@ export class BridgeStore {
       if (sourceSession && targetSession) {
         targetSession.alias ??= sourceSession.alias;
         targetSession.managedByAssistant ??= sourceSession.managedByAssistant;
+        targetSession.transcriptPath ??= sourceSession.transcriptPath;
         targetSession.feishuChatId ??= sourceSession.feishuChatId;
         targetSession.feishuChatName ??= sourceSession.feishuChatName;
         targetSession.feishuChatCreatedAt ??= sourceSession.feishuChatCreatedAt;
@@ -808,19 +831,28 @@ export class BridgeStore {
   }
 
   private schedulePersist(filePath: string): void {
+    if (this.closed) {
+      throw new Error("BridgeStore is closed.");
+    }
     this.dirtyFiles.add(filePath);
     if (this.flushTimer) {
       return;
     }
     this.flushTimer = setTimeout(() => {
       this.flushTimer = undefined;
-      void this.flushPending();
+      void this.flushPending().catch((error) => {
+        console.error("[store] Background flush failed:", error);
+      });
     }, this.persistDebounceMs);
     this.flushTimer.unref?.();
   }
 
   /** 立即把待写文件全部落盘。适用于进程退出前的收尾和测试。 */
   async flushPending(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = undefined;
+    }
     if (this.flushChain) {
       return this.flushChain;
     }
@@ -841,6 +873,27 @@ export class BridgeStore {
       this.flushChain = undefined;
     });
     return this.flushChain;
+  }
+
+  /** 停止后台定时器并确保所有排队写入已经落盘。 */
+  async close(): Promise<void> {
+    if (this.closePromise) {
+      return this.closePromise;
+    }
+    this.closePromise = (async () => {
+      if (this.safetyTimer) {
+        clearInterval(this.safetyTimer);
+        this.safetyTimer = undefined;
+      }
+      if (this.flushTimer) {
+        clearTimeout(this.flushTimer);
+        this.flushTimer = undefined;
+      }
+      await this.mutationQueue;
+      await this.flushPending();
+      this.closed = true;
+    })();
+    return this.closePromise;
   }
 
   private inMemoryState(filePath: string): unknown {
@@ -882,14 +935,16 @@ export class BridgeStore {
   }
 
   private startSafetyFlush(): void {
-    if (this.safetyTimer) {
+    if (this.safetyTimer || this.closed) {
       return;
     }
     this.safetyTimer = setInterval(() => {
       if (this.pruneEndedSessions(Date.now())) {
         this.schedulePersist(this.sessionFile);
       }
-      void this.flushPending();
+      void this.flushPending().catch((error) => {
+        console.error("[store] Safety flush failed:", error);
+      });
     }, 5_000);
     this.safetyTimer.unref?.();
   }

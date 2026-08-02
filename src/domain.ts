@@ -107,6 +107,7 @@ export interface SessionRecord {
   managedTerminalId?: string;
   managedTerminalElevated?: boolean;
   managedByAssistant?: boolean;
+  transcriptPath?: string;
   historyHiddenAt?: string;
   feishuChatId?: string;
   feishuChatName?: string;
@@ -254,6 +255,7 @@ export interface ActivityHookPayload {
   tool_preview?: string;
   tool_response_preview?: string;
   runtime?: RuntimeName;
+  transcript_path?: string | null;
   managed_terminal_id?: string;
   managed_terminal_elevated?: boolean;
 }

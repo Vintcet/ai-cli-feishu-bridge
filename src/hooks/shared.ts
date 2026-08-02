@@ -188,7 +188,10 @@ export async function postHook(
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
-    return {};
+    const detail = await response.text().catch(() => "");
+    throw new Error(
+      `Bridge hook ${pathname} returned HTTP ${response.status}${detail ? `: ${detail.slice(0, 300)}` : ""}`,
+    );
   }
   const value: unknown = await response.json();
   return value && typeof value === "object" && !Array.isArray(value)
@@ -223,6 +226,7 @@ export function compactActivityPayload(value: unknown): unknown {
         item.summary,
     ),
     runtime: item.runtime,
+    transcript_path: item.transcript_path,
     managed_terminal_id: item.managed_terminal_id,
     managed_terminal_elevated: item.managed_terminal_elevated,
   };

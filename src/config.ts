@@ -29,6 +29,10 @@ export const bridgeConfig = {
     process.env.CODEX_SESSION_ACTIVE_MS,
     24 * 60 * 60 * 1000,
   ),
+  transcriptPollIntervalMs: positiveInteger(
+    process.env.CODEX_TRANSCRIPT_POLL_INTERVAL_MS,
+    750,
+  ),
   sessionGroupInactiveMs: positiveInteger(
     process.env.FEISHU_SESSION_GROUP_INACTIVE_MS,
     7 * 24 * 60 * 60 * 1000,

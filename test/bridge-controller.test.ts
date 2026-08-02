@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -219,6 +219,7 @@ function controllerConfig(directory: string) {
     uploadTtlMs: 60_000,
     outboundFileMaxBytes: 1024 * 1024,
     retryBaseDelayMs: 10,
+    transcriptPollIntervalMs: 10,
     liveClientProcessIds: (clients: Array<{ processId: number }>) =>
       new Set(
         clients
@@ -1687,6 +1688,77 @@ test("PC prompts can be synchronized to the managed session group without remote
     }
     assert.equal(feishu.cards.filter((item) => JSON.stringify(item.card).includes("电脑端已提交消息")).length, 1);
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a transcript task error is notified even when Codex skips the Stop hook", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-transcript-error-"));
+  const transcriptPath = path.join(directory, "rollout.jsonl");
+  let store: BridgeStore | undefined;
+  let controller: BridgeController | undefined;
+  try {
+    store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    await writeFile(transcriptPath, "", "utf8");
+    const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const terminalId = "terminal-transcript-error";
+    const feishu = new FakeFeishu();
+    const terminals = new FakeManagedTerminals(terminalId, directory, sessionId);
+    controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      terminals as unknown as ManagedTerminalRouter,
+      undefined,
+      controllerConfig(directory),
+    );
+    await controller.handleSessionStartHook({
+      hook_event_name: "SessionStart",
+      session_id: sessionId,
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      source: "startup",
+      transcript_path: transcriptPath,
+      managed_terminal_id: terminalId,
+    });
+
+    await appendFile(transcriptPath, `${JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "turn-transcript-error",
+        last_agent_message: null,
+        error: {
+          message: "We're currently experiencing high demand, which may cause temporary errors.",
+          codex_error_info: "internal_server_error",
+        },
+      },
+    })}\n`, "utf8");
+
+    for (let attempt = 0; attempt < 100 && feishu.cards.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(feishu.cards.length, 1);
+    assert.match(JSON.stringify(feishu.cards[0]?.card), /Codex 运行错误/);
+    assert.match(JSON.stringify(feishu.cards[0]?.card), /high demand/);
+    assert.equal(store.getSession(sessionId)?.status, "error");
+    assert.equal(
+      store.getSession(sessionId)?.lastNotificationTurnId,
+      "turn-transcript-error",
+    );
+  } finally {
+    await controller?.close();
+    await store?.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

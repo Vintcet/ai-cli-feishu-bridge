@@ -25,9 +25,9 @@ Main features:
 - Answer Codex `request_user_input`, Claude Code `AskUserQuestion`, and OpenCode questions from Feishu.
 - Optionally show a live progress card and mirror prompts entered on the computer.
 - Split long prompts, final responses, and errors across multiple cards instead of truncating them.
-- Detect temporary 400/408/409/429/5xx, busy-service, timeout, and similar errors and optionally retry with configurable delay and jitter.
+- Detect temporary 400/408/409/429/5xx, high-demand, busy-service, timeout, and similar errors, including failures that skip the Codex `Stop` hook, and optionally retry with configurable delay and jitter.
 - Receive Feishu images/files into the project bridge directory and explicitly send generated project files back to Feishu.
-- Keep real CLI sessions in local history and resume them in their original working directory.
+- Keep real CLI sessions in local history and resume them in their original working directory; reopening a previously hidden session returns it to the normal history lifecycle.
 - Automatically reopen a closed Codex, Claude Code, or OpenCode conversation when a message arrives in its Feishu session group, as long as the desktop control panel is still running in the tray.
 - Automatically disband bridge-created session groups after seven days without session activity; the CLI conversation and project files are not deleted.
 - Recover the original working directory when a known `resume`, `--resume`, or `--session` ID is entered manually.
@@ -196,7 +196,7 @@ If you want a desktop entry, manually create a shortcut named `Codex飞书助手
 
 Closing or minimizing the window hides it in the system tray. Double-click the tray icon to restore it; only Exit from the tray menu terminates the panel process. Starting the EXE again brings the existing panel to the foreground. Exiting the panel still does not automatically stop an already running background bridge service.
 
-Temporary-error retry handles recognizable 400/408/409/429/5xx, busy-service, and timeout failures that are safe to replay. Configure 1–20 retries, a 1–600 second base delay, and 0–120 seconds of random jitter. Managed windows ask the same session to retry its previous task. Automatic approval is high risk and disabled by default; enabling it requires an additional local confirmation and suppresses the local approval window.
+Temporary-error retry handles recognizable 400/408/409/429/5xx, high-demand, busy-service, and timeout failures that are safe to replay. Configure 1–20 retries, a 1–600 second base delay, and 0–120 seconds of random jitter. Managed windows ask the same session to retry its previous task. Codex sampling failures may write `task_complete.error` without running the `Stop` hook, so the bridge polls each active transcript from its current end and processes only newly appended errors. Automatic approval is high risk and disabled by default; enabling it requires an additional local confirmation and suppresses the local approval window.
 
 ## Launch a synchronized Codex window
 
@@ -208,7 +208,7 @@ Temporary-error retry handles recognizable 400/408/409/429/5xx, busy-service, an
 
 Every launch creates an independent terminal. The managed host uses a local named pipe restricted to the current Windows user, so Feishu input is written into the same visible Codex window. Administrator elevation affects only that window and its children.
 
-When the window closes, the session moves from Active Sessions to History. Resume reuses the saved directory and administrator mode and safely passes `resume <session-id>`. Online sessions do not also appear in History. Codex/Claude Code sessions opened manually in another terminal are excluded; the current conversation of an OpenCode instance connected through a local port is recoverable and enters History after disconnecting.
+When the window closes, the session moves from Active Sessions to History. Resume reuses the saved directory and administrator mode and safely passes `resume <session-id>`. Online sessions do not also appear in History. Codex/Claude Code sessions opened manually in another terminal are excluded; the current conversation of an OpenCode instance connected through a local port is recoverable and enters History after disconnecting. If Delete History was used, that ended record stays hidden until the conversation is reopened. Reopening clears the hidden marker, so the next close returns it to History; bridge startup also repairs legacy records that are active but still hidden.
 
 The argument field is parsed only as Codex CLI arguments; it is never executed as a PowerShell command. A manually launched external Codex session can still be discovered by hooks for notifications and structured approvals, but ordinary Feishu text is not injected and no temporary second process is started.
 
@@ -280,6 +280,7 @@ FEISHU_BIND_COMMAND=绑定
 BRIDGE_HTTP_PORT=8765
 CODEX_APPROVAL_TIMEOUT_MS=1200000
 CODEX_SESSION_ACTIVE_MS=86400000
+CODEX_TRANSCRIPT_POLL_INTERVAL_MS=750
 FEISHU_SESSION_GROUP_INACTIVE_MS=604800000
 FEISHU_SESSION_GROUP_CLEANUP_INTERVAL_MS=3600000
 RUNTIME_AUTO_LAUNCH_TIMEOUT_MS=120000
@@ -312,6 +313,19 @@ Development mode:
 npm run dev
 ```
 
+Before submitting changes, run the full local validation:
+
+```powershell
+npm run lint
+npm run format:check
+npm test
+npm run build
+dotnet test .\desktop-control\tests\CodexFeishuTerminalHost.Tests.csproj -c Release
+dotnet build .\desktop-control\CodexFeishuControl.csproj -c Release
+```
+
+`npm run format:check` is a zero-dependency text hygiene check for trailing whitespace and final newlines. The Windows CI workflow runs the same Node.js and .NET validation.
+
 The bridge starts a Feishu WebSocket connection, a hook HTTP server bound only to `127.0.0.1`, and a health endpoint at `http://127.0.0.1:8765/health` by default.
 
 ## Codex hooks
@@ -319,6 +333,8 @@ The bridge starts a Feishu WebSocket connection, a hook HTTP server bound only t
 The user-level Codex hook file is `%USERPROFILE%\.codex\hooks.json`. Connect runs `scripts/install-hooks.ps1`, removes only older entries installed by this bridge, and preserves unrelated hooks.
 
 Installed hook events include `SessionStart`, `SessionEnd`, `PermissionRequest`, `Stop`, `PreToolUse` including `request_user_input`, `PostToolUse`, `PreCompact`, `PostCompact`, and `UserPromptSubmit`.
+
+`Stop` covers normal completion and follow-up notifications, but Codex does not run it for every sampling failure. For newly appended `task_complete.error` records, the bridge polls active JSONL transcripts and reuses the same Feishu error-card, deduplication, and optional retry path. Polling starts at the current end of each transcript to avoid replaying old failures and defaults to `CODEX_TRANSCRIPT_POLL_INTERVAL_MS=750`.
 
 On the first new Codex window, Codex may ask you to review and trust the hook. Verify its path and content and approve normally; do not use unsafe flags to bypass hook trust. After hook configuration or compiled hook output changes, reconnect/restart the bridge and open a new Codex window.
 
@@ -405,12 +421,14 @@ When a complete known session ID is entered in a New-window argument field, the 
 
 - No Feishu notifications: confirm that the bridge process is running and open `/health`.
 - Codex hooks do not fire: open a new Codex window and complete the hook trust review.
+- Codex shows a high-demand error but Feishu receives nothing: update and restart the bridge, keep the managed session active, and verify the bridge is running. Transcript monitoring reports these failures without relying on `Stop`.
 - Claude Code hooks do not fire: click Connect to merge `%USERPROFILE%\.claude\settings.json`, run `claude doctor`, close the old window, and open a new one.
 - Card buttons do nothing: confirm `card.action.trigger` is configured and the newest app version is published.
 - Wrong-session risk with several windows: send `会话`, then quote the correct notification or use an alias/short ID; prefix with `排队` for the next turn.
 - A reply immediately fails: verify `codex --version`, `claude --version`, or `opencode --version` in the same PowerShell environment.
 - A managed window says it is closed: reopen it with the corresponding New button or resume it from History.
 - A group message does not reopen a closed session: keep the desktop panel running or in the tray and confirm that the bridge and desktop versions match.
+- A resumed session disappears again after closing: restart the updated bridge to migrate legacy records. New versions clear the hidden-history marker whenever a managed session becomes active again.
 - A Feishu `新建` command does not open a window: send `工作区`, verify the default directory, keep the panel running, and use a one-folder project name without path separators.
 - Inactive groups are not disbanded: publish `im:chat:delete` and `im:chat:operate_as_owner`; the bridge checks about once per hour by default.
 - OpenCode waits for registration: confirm that `opencode` is installed and keep the new window open while the reserved port health check retries.

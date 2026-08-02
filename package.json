@@ -16,8 +16,10 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test test/**/*.test.ts",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "format:check": "node scripts/check-format.mjs",
+    "check": "npm run lint && npm run format:check",
+    "test": "tsx --test --test-concurrency=1 test/**/*.test.ts",
     "start": "node dist/index.js"
   },
   "engines": {

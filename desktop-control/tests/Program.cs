@@ -1,84 +1,20 @@
 using System.Text.Json;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace CodexFeishuControl;
 
-internal static class Program
+[TestClass]
+public sealed class RuntimeAndTerminalTests
 {
-    private static int Main()
-    {
-        var tests = new (string Name, Action Run)[]
-        {
-            ("empty arguments", TestEmptyArguments),
-            ("resume arguments", TestResumeArguments),
-            ("full codex command", TestFullCodexCommand),
-            ("quoted arguments", TestQuotedArguments),
-            ("opencode arguments", TestOpenCodeArguments),
-            ("claude code arguments", TestClaudeCodeArguments),
-            ("resume session id detection", TestResumeSessionIdDetection),
-            ("forwarded terminal host arguments", TestForwardedTerminalHostArguments),
-            ("runtime catalog", TestRuntimeCatalog),
-            ("shell-looking text stays data", TestShellLookingText),
-            ("terminal input defaults to steer", TestTerminalInputDefaultsToSteer),
-            ("terminal input supports queue", TestTerminalInputSupportsQueue),
-            ("terminal input rejects invalid mode", TestTerminalInputRejectsInvalidMode),
-            ("health accepts fractional Feishu timestamps", TestFractionalFeishuTimestamps),
-        };
-
-        var failures = 0;
-        foreach (var test in tests)
-        {
-            try
-            {
-                test.Run();
-                Console.WriteLine($"PASS {test.Name}");
-            }
-            catch (Exception error)
-            {
-                failures += 1;
-                Console.Error.WriteLine($"FAIL {test.Name}: {error.Message}");
-            }
-        }
-
-        Console.WriteLine($"{tests.Length - failures}/{tests.Length} tests passed.");
-        return failures == 0 ? 0 : 1;
-    }
-
-    private static void TestEmptyArguments()
+    [TestMethod]
+    public void EmptyArguments()
     {
         AssertSequence([], RuntimeArgumentParser.Parse(RuntimeCatalog.Codex, null));
         AssertSequence([], RuntimeArgumentParser.Parse(RuntimeCatalog.Codex, "   "));
     }
 
-    private static void TestFractionalFeishuTimestamps()
-    {
-        const string json = """
-            {
-              "ok": true,
-              "activeSessions": 2,
-              "feishu": {
-                "state": "connected",
-                "lastConnectTime": 1785510447081,
-                "nextConnectTime": 1785510446683.327,
-                "reconnectAttempts": 0
-              },
-              "sessions": [],
-              "historySessions": [],
-              "approvals": [],
-              "settings": {}
-            }
-            """;
-        var status = JsonSerializer.Deserialize<BridgeStatus>(json);
-        if (status is null || status.ActiveSessions != 2)
-        {
-            throw new InvalidOperationException("health response was not parsed");
-        }
-        if (status.Feishu.NextConnectTime != 1785510446683.327)
-        {
-            throw new InvalidOperationException("fractional reconnect timestamp was lost");
-        }
-    }
-
-    private static void TestResumeArguments()
+    [TestMethod]
+    public void ResumeArguments()
     {
         AssertSequence(
             ["resume", "019faef0-d0bb-7703-af82-17ee9b45397b"],
@@ -87,7 +23,8 @@ internal static class Program
                 "resume 019faef0-d0bb-7703-af82-17ee9b45397b"));
     }
 
-    private static void TestFullCodexCommand()
+    [TestMethod]
+    public void FullCodexCommand()
     {
         AssertSequence(
             ["resume", "019faef0-d0bb-7703-af82-17ee9b45397b"],
@@ -96,7 +33,8 @@ internal static class Program
                 "codex resume 019faef0-d0bb-7703-af82-17ee9b45397b"));
     }
 
-    private static void TestQuotedArguments()
+    [TestMethod]
+    public void QuotedArguments()
     {
         AssertSequence(
             ["resume", "session with spaces", "--model", "gpt 5"],
@@ -105,7 +43,8 @@ internal static class Program
                 "resume \"session with spaces\" --model \"gpt 5\""));
     }
 
-    private static void TestOpenCodeArguments()
+    [TestMethod]
+    public void OpenCodeArguments()
     {
         AssertSequence(
             ["-s", "019faef0-d0bb-7703-af82-17ee9b45397b"],
@@ -119,7 +58,8 @@ internal static class Program
                 "opencode --port 5100 -s 019faef0-d0bb-7703-af82-17ee9b45397b"));
     }
 
-    private static void TestClaudeCodeArguments()
+    [TestMethod]
+    public void ClaudeCodeArguments()
     {
         AssertSequence(
             ["--resume", "019faef0-d0bb-7703-af82-17ee9b45397b"],
@@ -133,32 +73,33 @@ internal static class Program
                 "claude --resume 019faef0-d0bb-7703-af82-17ee9b45397b"));
     }
 
-    private static void TestResumeSessionIdDetection()
+    [TestMethod]
+    public void ResumeSessionIdDetection()
     {
         const string sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
-        AssertEqual(
+        Assert.AreEqual(
             sessionId,
             RuntimeArgumentParser.ExtractResumeSessionId(
                 RuntimeCatalog.Codex,
                 $"--model gpt-5 resume {sessionId}"));
-        AssertEqual(
+        Assert.AreEqual(
             sessionId,
             RuntimeArgumentParser.ExtractResumeSessionId(
                 RuntimeCatalog.ClaudeCode,
                 $"-r {sessionId}"));
-        AssertEqual(
+        Assert.AreEqual(
             sessionId,
             RuntimeArgumentParser.ExtractResumeSessionId(
                 RuntimeCatalog.OpenCode,
                 $"--session={sessionId}"));
-        AssertEqual(
-            null,
+        Assert.IsNull(
             RuntimeArgumentParser.ExtractResumeSessionId(
                 RuntimeCatalog.Codex,
                 "--model gpt-5"));
     }
 
-    private static void TestForwardedTerminalHostArguments()
+    [TestMethod]
+    public void ForwardedTerminalHostArguments()
     {
         AssertSequence(
             ["--port", "5103", "-s", "session with spaces", "$(Get-Date)"],
@@ -181,28 +122,25 @@ internal static class Program
             "--tool-arg"));
     }
 
-    private static void TestRuntimeCatalog()
+    [TestMethod]
+    public void RuntimeCatalogValues()
     {
-        if (RuntimeCatalog.FromId(null) != RuntimeCatalog.Codex ||
-            RuntimeCatalog.FromId("claudecode") != RuntimeCatalog.ClaudeCode ||
-            RuntimeCatalog.FromId("opencode") != RuntimeCatalog.OpenCode)
-        {
-            throw new InvalidOperationException("runtime ids were not resolved consistently");
-        }
-        if (!RuntimeCatalog.Codex.UsesManagedTerminal ||
-            !RuntimeCatalog.ClaudeCode.UsesManagedTerminal ||
-            RuntimeCatalog.OpenCode.UsesManagedTerminal)
-        {
-            throw new InvalidOperationException("runtime transports are incorrect");
-        }
-        if (RuntimeCatalog.ClaudeCode.BuildResumeArguments("session-1") != "--resume session-1" ||
-            RuntimeCatalog.OpenCode.BuildResumeArguments("session-1") != "-s session-1")
-        {
-            throw new InvalidOperationException("runtime resume arguments are incorrect");
-        }
+        Assert.AreSame(RuntimeCatalog.Codex, RuntimeCatalog.FromId(null));
+        Assert.AreSame(RuntimeCatalog.ClaudeCode, RuntimeCatalog.FromId("claudecode"));
+        Assert.AreSame(RuntimeCatalog.OpenCode, RuntimeCatalog.FromId("opencode"));
+        Assert.IsTrue(RuntimeCatalog.Codex.UsesManagedTerminal);
+        Assert.IsTrue(RuntimeCatalog.ClaudeCode.UsesManagedTerminal);
+        Assert.IsFalse(RuntimeCatalog.OpenCode.UsesManagedTerminal);
+        Assert.AreEqual(
+            "--resume session-1",
+            RuntimeCatalog.ClaudeCode.BuildResumeArguments("session-1"));
+        Assert.AreEqual(
+            "-s session-1",
+            RuntimeCatalog.OpenCode.BuildResumeArguments("session-1"));
     }
 
-    private static void TestShellLookingText()
+    [TestMethod]
+    public void ShellLookingTextStaysData()
     {
         var sentinel = Path.Combine(
             Path.GetTempPath(),
@@ -212,63 +150,64 @@ internal static class Program
             RuntimeArgumentParser.Parse(
                 RuntimeCatalog.Codex,
                 $"resume abc12345 $(Get-Date) ; New-Item \"{sentinel}\""));
-        if (File.Exists(sentinel))
-        {
-            throw new InvalidOperationException("Parser unexpectedly executed shell text.");
-        }
+        Assert.IsFalse(File.Exists(sentinel), "Parser unexpectedly executed shell text.");
     }
 
-    private static void TestTerminalInputDefaultsToSteer()
+    [TestMethod]
+    public void TerminalInputDefaultsToSteer()
     {
         var request = TerminalInputParser.Parse(
             "{\"type\":\"prompt\",\"prompt\":\"hello\"}");
-        if (request.Prompt != "hello" || request.SubmitMode != TerminalSubmitMode.Steer)
-        {
-            throw new InvalidOperationException("Default submit mode was not steer.");
-        }
+        Assert.AreEqual("hello", request.Prompt);
+        Assert.AreEqual(TerminalSubmitMode.Steer, request.SubmitMode);
     }
 
-    private static void TestTerminalInputSupportsQueue()
+    [TestMethod]
+    public void TerminalInputSupportsQueue()
     {
         var request = TerminalInputParser.Parse(
             "{\"type\":\"prompt\",\"prompt\":\"next turn\",\"submitMode\":\"queue\"}");
-        if (request.Prompt != "next turn" || request.SubmitMode != TerminalSubmitMode.Queue)
-        {
-            throw new InvalidOperationException("Queue submit mode was not parsed.");
-        }
+        Assert.AreEqual("next turn", request.Prompt);
+        Assert.AreEqual(TerminalSubmitMode.Queue, request.SubmitMode);
     }
 
-    private static void TestTerminalInputRejectsInvalidMode()
+    [TestMethod]
+    public void TerminalInputRejectsInvalidMode()
     {
-        try
-        {
+        Assert.ThrowsException<InvalidOperationException>(() =>
             TerminalInputParser.Parse(
-                "{\"type\":\"prompt\",\"prompt\":\"hello\",\"submitMode\":\"shell\"}");
-        }
-        catch (InvalidOperationException)
-        {
-            return;
-        }
-        throw new InvalidOperationException("Invalid submit mode was accepted.");
+                "{\"type\":\"prompt\",\"prompt\":\"hello\",\"submitMode\":\"shell\"}"));
+    }
+
+    [TestMethod]
+    public void HealthAcceptsFractionalFeishuTimestamps()
+    {
+        const string json = """
+            {
+              "ok": true,
+              "activeSessions": 2,
+              "feishu": {
+                "state": "connected",
+                "lastConnectTime": 1785510447081,
+                "nextConnectTime": 1785510446683.327,
+                "reconnectAttempts": 0
+              },
+              "sessions": [],
+              "historySessions": [],
+              "approvals": [],
+              "settings": {}
+            }
+            """;
+        var status = JsonSerializer.Deserialize<BridgeStatus>(json);
+        Assert.IsNotNull(status);
+        Assert.AreEqual(2, status.ActiveSessions);
+        Assert.AreEqual(1785510446683.327, status.Feishu.NextConnectTime);
     }
 
     private static void AssertSequence(
         IReadOnlyList<string> expected,
         IReadOnlyList<string> actual)
     {
-        if (!expected.SequenceEqual(actual, StringComparer.Ordinal))
-        {
-            throw new InvalidOperationException(
-                $"Expected [{string.Join(", ", expected)}], got [{string.Join(", ", actual)}].");
-        }
-    }
-
-    private static void AssertEqual(string? expected, string? actual)
-    {
-        if (!string.Equals(expected, actual, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException(
-                $"Expected {expected ?? "<null>"}, got {actual ?? "<null>"}.");
-        }
+        CollectionAssert.AreEqual(expected.ToArray(), actual.ToArray());
     }
 }

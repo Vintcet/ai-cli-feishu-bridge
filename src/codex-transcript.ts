@@ -16,33 +16,41 @@ export function extractCodexTurnCompletion(
 ): CodexTurnCompletion | null {
   const lines = content.split(/\r?\n/u).reverse();
   for (const line of lines) {
-    if (!line.trim()) continue;
-    let entry: Record<string, unknown>;
-    try {
-      const parsed: unknown = JSON.parse(line);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-      entry = parsed as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-
-    const payload = objectValue(entry.payload);
-    const event = entry.type === "event_msg" && payload ? payload : entry;
-    if (event.type !== "task_complete") continue;
-
-    const turnId = stringValue(event.turn_id);
-    if (expectedTurnId && turnId !== expectedTurnId) continue;
-
-    const assistantMessage = stringValue(event.last_agent_message);
-    const structuredError = completionError(event.error);
-    return {
-      ...(turnId ? { turnId } : {}),
-      ...(assistantMessage ? { assistantMessage } : {}),
-      ...(structuredError?.message ? { error: structuredError.message } : {}),
-      ...(structuredError?.code ? { errorCode: structuredError.code } : {}),
-    };
+    const completion = parseCodexTurnCompletionLine(line, expectedTurnId);
+    if (completion) return completion;
   }
   return null;
+}
+
+export function parseCodexTurnCompletionLine(
+  line: string,
+  expectedTurnId?: string,
+): CodexTurnCompletion | null {
+  if (!line.trim()) return null;
+  let entry: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(line);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    entry = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+
+  const payload = objectValue(entry.payload);
+  const event = entry.type === "event_msg" && payload ? payload : entry;
+  if (event.type !== "task_complete") return null;
+
+  const turnId = stringValue(event.turn_id);
+  if (expectedTurnId && turnId !== expectedTurnId) return null;
+
+  const assistantMessage = stringValue(event.last_agent_message);
+  const structuredError = completionError(event.error);
+  return {
+    ...(turnId ? { turnId } : {}),
+    ...(assistantMessage ? { assistantMessage } : {}),
+    ...(structuredError?.message ? { error: structuredError.message } : {}),
+    ...(structuredError?.code ? { errorCode: structuredError.code } : {}),
+  };
 }
 
 export async function readCodexTurnCompletion(

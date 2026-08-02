@@ -21,6 +21,10 @@ import {
 } from "./cards.js";
 import { readLastClaudeAssistantMessage } from "./claude-code-transcript.js";
 import { readCodexTurnCompletion } from "./codex-transcript.js";
+import {
+  CodexTranscriptMonitor,
+  type CodexTranscriptErrorEvent,
+} from "./codex-transcript-monitor.js";
 import type { CodexExitResult } from "./codex-runner.js";
 import { CodexRunner } from "./codex-runner.js";
 import {
@@ -83,6 +87,11 @@ import {
   validateBridgeFile,
 } from "./file-transfer.js";
 import { BridgeStore } from "./store.js";
+import {
+  codexErrorFromMessage,
+  isRetryableCodexError,
+  retryDelayMs,
+} from "./runtime-errors.js";
 
 type FeishuEvent = Record<string, any>;
 
@@ -180,6 +189,7 @@ interface ControllerConfig {
   uploadTtlMs: number;
   outboundFileMaxBytes: number;
   retryBaseDelayMs?: number;
+  transcriptPollIntervalMs?: number;
   liveClientProcessIds?: (clients: ClientProcessMetadata[]) => ReadonlySet<number>;
 }
 
@@ -234,6 +244,7 @@ export class BridgeController {
     Promise<SessionRecord | undefined>
   >();
   private readonly attachmentStore: LocalAttachmentStore;
+  private readonly transcriptMonitor: CodexTranscriptMonitor;
 
   constructor(
     private readonly store: BridgeStore,
@@ -249,6 +260,37 @@ export class BridgeController {
       config.inboundAttachmentMaxCount,
       config.uploadTtlMs,
     );
+    this.transcriptMonitor = new CodexTranscriptMonitor(
+      (event) => this.handleCodexTranscriptError(event),
+      config.transcriptPollIntervalMs,
+    );
+  }
+
+  async initialize(): Promise<void> {
+    await this.initializeCodexTranscriptMonitors();
+    await this.initializeSessionGroups();
+  }
+
+  async close(): Promise<void> {
+    await this.transcriptMonitor.close();
+    for (const waiter of this.approvalWaiters.values()) {
+      clearTimeout(waiter.timer);
+    }
+    for (const waiter of this.inputWaiters.values()) {
+      clearTimeout(waiter.timer);
+    }
+    for (const request of this.runtimeLaunchRequests.values()) {
+      clearTimeout(request.timer);
+    }
+    for (const activity of this.activityStates.values()) {
+      if (activity.timer) clearTimeout(activity.timer);
+    }
+  }
+
+  private async initializeCodexTranscriptMonitors(): Promise<void> {
+    for (const session of this.store.listOpenSessions()) {
+      await this.watchCodexTranscript(session);
+    }
   }
 
   async initializeSessionGroups(): Promise<void> {
@@ -469,6 +511,7 @@ export class BridgeController {
       this.remoteInputLocks.delete(managedTerminalSessionId(terminalId));
     }
     if (session) {
+      await this.transcriptMonitor.unwatch(session.sessionId);
       this.remoteInputLocks.delete(session.sessionId);
       this.runtimeQueues.delete(session.sessionId);
       this.managedQueueDepth.delete(session.sessionId);
@@ -1295,6 +1338,7 @@ export class BridgeController {
       managedTerminalId,
       managedTerminalElevated,
       managedByAssistant: managedTerminalId ? true : undefined,
+      transcriptPath: payload.transcript_path,
       openedAt,
     });
     if (
@@ -1328,6 +1372,7 @@ export class BridgeController {
       await this.store.replaceSessionReferences(placeholder.sessionId, session.sessionId);
     }
     const currentSession = this.store.getSession(session.sessionId) ?? session;
+    await this.watchCodexTranscript(currentSession);
     console.log(
       `[session] ${payload.source} registered session #${currentSession.shortId}.`,
     );
@@ -1343,11 +1388,13 @@ export class BridgeController {
   ): Promise<Record<string, unknown>> {
     await this.resolveInputsForSession(payload.session_id, "local");
     await this.resolveApprovalsForSession(payload.session_id);
+    await this.transcriptMonitor.unwatch(payload.session_id);
     const session = await this.store.upsertSession({
       sessionId: payload.session_id,
       cwd: payload.cwd,
       status: "ended",
       runtime: payload.runtime,
+      transcriptPath: payload.transcript_path,
       ...(payload.managed_terminal_id !== undefined
         ? { managedTerminalId: payload.managed_terminal_id }
         : {}),
@@ -1376,6 +1423,7 @@ export class BridgeController {
       turnId: payload.turn_id,
       status: "pending_approval",
       runtime: payload.runtime,
+      transcriptPath: payload.transcript_path,
       ...(payload.managed_terminal_id !== undefined
         ? { managedTerminalId: payload.managed_terminal_id }
         : {}),
@@ -1397,6 +1445,7 @@ export class BridgeController {
       status: "pending",
       messageIds: [],
     };
+    await this.watchCodexTranscript(session);
     await this.store.createApproval(approval);
 
     const recipients = await this.notificationRecipients(session);
@@ -1479,6 +1528,9 @@ export class BridgeController {
       turnId: payload.turn_id,
       status: "pending_input",
       runtime: payload.runtime,
+      ...(payload.transcript_path !== undefined
+        ? { transcriptPath: payload.transcript_path }
+        : {}),
       ...(payload.managed_terminal_id !== undefined
         ? { managedTerminalId: payload.managed_terminal_id }
         : {}),
@@ -1486,6 +1538,7 @@ export class BridgeController {
         ? { managedTerminalElevated: payload.managed_terminal_elevated }
         : {}),
     });
+    await this.watchCodexTranscript(session);
     const recipients = await this.notificationRecipients(session);
     if (recipients.length === 0) {
       return {};
@@ -1642,6 +1695,7 @@ export class BridgeController {
       status: "waiting",
       assistantMessage,
       runtime: payload.runtime,
+      transcriptPath: payload.transcript_path,
       ...(payload.managed_terminal_id !== undefined
         ? { managedTerminalId: payload.managed_terminal_id }
         : {}),
@@ -1650,72 +1704,19 @@ export class BridgeController {
         : {}),
     });
     const codexError = structuredCodexError ?? codexErrorFromMessage(assistantMessage);
-    await this.finishActivity(
-      payload.session_id,
-      codexError ? "本轮发生错误" : "本轮处理完成",
-    );
-
-    if (previous?.lastNotificationTurnId === turnId) {
+    if (turnId && previous?.lastNotificationTurnId === turnId) {
       return {};
     }
     if (codexError) {
-      const retryCount = this.managedRetryCounts.get(payload.session_id) ?? 0;
-      const retrySettings = this.store.getSettings();
-      const retryDelay = retryDelayMs(retrySettings, this.config.retryBaseDelayMs);
-      const canRetry =
-        retrySettings.autoRetryErrors &&
-        retryCount < retrySettings.retryMaxAttempts &&
-        isRetryableCodexError(codexError, structuredCodexErrorCode) &&
-        this.managedTerminals.isReady(session);
-      const detail = canRetry
-        ? `${codexError}\n\n助手将在 ${Math.ceil(retryDelay / 1_000)} 秒后自动重试（第 ${retryCount + 1}/${retrySettings.retryMaxAttempts} 次）。`
-        : codexError;
-      const failedSession = await this.store.upsertSession({
-        sessionId: session.sessionId,
-        cwd: session.cwd,
-        model: session.model,
-        status: "error",
-        error: codexError,
-      });
-      for (const recipient of await this.notificationRecipients(failedSession)) {
-        try {
-          for (const card of buildErrorCards(failedSession, detail)) {
-            const messageId = await this.feishu.sendCard(recipient.chatId, card);
-            await this.addRoute(messageId, payload.session_id, recipient.chatId, "error");
-          }
-        } catch (error) {
-          console.error("[stop] Failed to send a Codex error card:", error);
-        }
-      }
-      await this.store.markStopNotified(payload.session_id, turnId);
-      if (canRetry) {
-        this.managedRetryCounts.set(payload.session_id, retryCount + 1);
-        setTimeout(() => {
-          const current = this.store.getSession(payload.session_id);
-          const currentSettings = this.store.getSettings();
-          if (
-            !currentSettings.autoRetryErrors ||
-            retryCount >= currentSettings.retryMaxAttempts ||
-            !current ||
-            !this.managedTerminals.isReady(current)
-          ) {
-            return;
-          }
-          const retryPrompt =
-            "刚才的请求因临时服务错误失败。请重试上一项任务，并继续从中断处执行。";
-          this.rememberRemotePrompt(payload.session_id, retryPrompt);
-          void this.managedTerminals.send(
-            current,
-            retryPrompt,
-            "steer",
-          ).catch((error) => {
-            this.forgetRemotePrompt(payload.session_id, retryPrompt);
-            console.error("[retry] Managed retry failed:", error);
-          });
-        }, retryDelay);
-      }
+      await this.notifyCodexTurnError(
+        session,
+        turnId,
+        codexError,
+        structuredCodexErrorCode,
+      );
       return {};
     }
+    await this.finishActivity(payload.session_id, "本轮处理完成");
     this.managedRetryCounts.delete(payload.session_id);
     const fileReturnRequest = this.advanceFileReturnRequests(payload.session_id);
     this.decrementManagedQueueDepth(payload.session_id);
@@ -1752,6 +1753,114 @@ export class BridgeController {
     }
     void this.tryDrainExternalQueue(payload.session_id);
     return {};
+  }
+
+  private async handleCodexTranscriptError(
+    event: CodexTranscriptErrorEvent,
+  ): Promise<void> {
+    const current = this.store.getSession(event.sessionId);
+    if (
+      !current ||
+      current.status === "ended" ||
+      (current.runtime !== undefined && current.runtime !== "codex") ||
+      current.lastNotificationTurnId === event.turnId
+    ) {
+      return;
+    }
+    const session = await this.store.upsertSession({
+      sessionId: current.sessionId,
+      cwd: current.cwd,
+      model: current.model,
+      turnId: event.turnId,
+      status: "error",
+      error: event.error,
+      runtime: "codex",
+      transcriptPath: event.transcriptPath,
+    });
+    await this.notifyCodexTurnError(
+      session,
+      event.turnId,
+      event.error,
+      event.errorCode,
+    );
+  }
+
+  private async notifyCodexTurnError(
+    session: SessionRecord,
+    turnId: string,
+    errorMessage: string,
+    errorCode?: string,
+  ): Promise<void> {
+    if (this.store.getSession(session.sessionId)?.lastNotificationTurnId === turnId) {
+      return;
+    }
+    await this.finishActivity(session.sessionId, "本轮发生错误");
+    const retryCount = this.managedRetryCounts.get(session.sessionId) ?? 0;
+    const retrySettings = this.store.getSettings();
+    const retryDelay = retryDelayMs(retrySettings, this.config.retryBaseDelayMs);
+    const canRetry =
+      retrySettings.autoRetryErrors &&
+      retryCount < retrySettings.retryMaxAttempts &&
+      isRetryableCodexError(errorMessage, errorCode) &&
+      this.managedTerminals.isReady(session);
+    const detail = canRetry
+      ? `${errorMessage}\n\n助手将在 ${Math.ceil(retryDelay / 1_000)} 秒后自动重试（第 ${retryCount + 1}/${retrySettings.retryMaxAttempts} 次）。`
+      : errorMessage;
+    const failedSession = await this.store.upsertSession({
+      sessionId: session.sessionId,
+      cwd: session.cwd,
+      model: session.model,
+      turnId,
+      status: "error",
+      error: errorMessage,
+      runtime: session.runtime,
+    });
+    for (const recipient of await this.notificationRecipients(failedSession)) {
+      try {
+        for (const card of buildErrorCards(failedSession, detail)) {
+          const messageId = await this.feishu.sendCard(recipient.chatId, card);
+          await this.addRoute(messageId, session.sessionId, recipient.chatId, "error");
+        }
+      } catch (error) {
+        console.error("[error] Failed to send a Codex error card:", error);
+      }
+    }
+    await this.store.markStopNotified(session.sessionId, turnId);
+    if (!canRetry) {
+      return;
+    }
+    this.managedRetryCounts.set(session.sessionId, retryCount + 1);
+    const retryTimer = setTimeout(() => {
+      const current = this.store.getSession(session.sessionId);
+      const currentSettings = this.store.getSettings();
+      if (
+        !currentSettings.autoRetryErrors ||
+        retryCount >= currentSettings.retryMaxAttempts ||
+        !current ||
+        !this.managedTerminals.isReady(current)
+      ) {
+        return;
+      }
+      const retryPrompt =
+        "刚才的请求因临时服务错误失败。请重试上一项任务，并继续从中断处执行。";
+      this.rememberRemotePrompt(session.sessionId, retryPrompt);
+      void this.managedTerminals.send(current, retryPrompt, "steer").catch((error) => {
+        this.forgetRemotePrompt(session.sessionId, retryPrompt);
+        console.error("[retry] Managed retry failed:", error);
+      });
+    }, retryDelay);
+    retryTimer.unref?.();
+  }
+
+  private async watchCodexTranscript(session: SessionRecord): Promise<void> {
+    if (
+      session.status === "ended" ||
+      (session.runtime !== undefined && session.runtime !== "codex") ||
+      !session.transcriptPath
+    ) {
+      return;
+    }
+    await this.transcriptMonitor.watch(session.sessionId, session.transcriptPath);
   }
 
   async handleFeishuMessage(data: FeishuEvent): Promise<void> {
@@ -3137,6 +3246,9 @@ export class BridgeController {
           turnId: payload.turn_id,
           status: "running",
           runtime: payload.runtime,
+          ...(payload.transcript_path !== undefined
+            ? { transcriptPath: payload.transcript_path }
+            : {}),
           ...(payload.managed_terminal_id !== undefined
             ? { managedTerminalId: payload.managed_terminal_id }
             : {}),
@@ -3145,6 +3257,7 @@ export class BridgeController {
             : {}),
         })
       : current;
+    await this.watchCodexTranscript(session);
     let state = this.activityStates.get(payload.session_id);
     if (state && payload.turn_id && state.turnId && state.turnId !== payload.turn_id) {
       await this.finishActivity(payload.session_id, "上一轮已结束");
@@ -4201,67 +4314,6 @@ function notReceivedText(
   reason: string,
 ): string {
   return `${runtimeDisplayName(session?.runtime)} 未接收：${reason}`;
-}
-
-function isRetryableCodexError(value: string, errorCode?: string): boolean {
-  if (
-    errorCode &&
-    /(?:internal.server|server.error|rate.limit|overload|high.demand|temporar|timeout)/i.test(errorCode)
-  ) {
-    return true;
-  }
-  return /(?:\b(?:400|408|409|429|500|502|503|504)\b|too many requests|rate.?limit|busy|overload|temporar(?:y|ily)|service unavailable|timeout|timed out|连接超时|服务繁忙|请求过多|暂时不可用)/i.test(
-    value,
-  );
-}
-
-function codexErrorFromMessage(value: string | null | undefined): string | undefined {
-  const message = value?.trim();
-  if (!message) {
-    return undefined;
-  }
-
-  // Stop currently exposes only the last assistant text, not Codex's
-  // structured task_complete error. A normal answer may legitimately discuss
-  // “400”, “错误” or “失败”, so never scan an entire prose response for a pair
-  // of loose keywords. Only accept an explicitly error-shaped first line.
-  const firstLine = message
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .find(Boolean);
-  if (!firstLine || Array.from(firstLine).length > 500) {
-    return undefined;
-  }
-
-  const startsLikeError = /^(?:error\b|failed\b|failure\b|exception\b|unable\b|request failed\b|unexpected status\b|exceeded retry limit\b|(?:错误|失败|异常|服务繁忙|请求过多|连接超时|暂时不可用)(?:\s*[:：]|\s|$))/iu.test(
-    firstLine,
-  );
-  const startsWithRetryableStatus = /^(?:http\s*)?(?:400|408|409|429|500|502|503|504)(?:\s*[:：-]\s*|\s+(?:bad\b|too many\b|internal\b|service\b|request\b|gateway\b|error\b|错误|失败|异常))/iu.test(
-    firstLine,
-  );
-  const knownServiceFailure = /^(?:we(?:'re| are) currently experiencing high demand\b|too many requests\b|service unavailable\b|rate.?limit(?:ed| exceeded)?\b|request timed out\b|timed out\b)/iu.test(
-    firstLine,
-  );
-  if (
-    !(startsLikeError || startsWithRetryableStatus || knownServiceFailure) ||
-    !isRetryableCodexError(firstLine)
-  ) {
-    return undefined;
-  }
-  return message;
-}
-
-function retryDelayMs(
-  settings: BridgeSettings,
-  testDelayMs: number | undefined,
-): number {
-  if (testDelayMs !== undefined) {
-    return Math.max(1, testDelayMs);
-  }
-  const jitter = settings.retryJitterSeconds > 0
-    ? Math.floor(Math.random() * (settings.retryJitterSeconds + 1))
-    : 0;
-  return (settings.retryIntervalSeconds + jitter) * 1_000;
 }
 
 function humanizeToolName(toolName: string | undefined): string {

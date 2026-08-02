@@ -261,9 +261,11 @@ test("reopening an ended session records a new openedAt", async () => {
 
 test("hides assistant history persistently without deleting the session", async () => {
   const directory = await temporaryDirectory();
+  let store: BridgeStore | undefined;
+  let reopened: BridgeStore | undefined;
   try {
     const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
-    const store = new BridgeStore(directory);
+    store = new BridgeStore(directory);
     await store.init();
     await store.upsertSession({
       sessionId,
@@ -284,7 +286,7 @@ test("hides assistant history persistently without deleting the session", async 
     assert.equal(store.getSession(sessionId)?.sessionId, sessionId);
     assert.equal(await store.hideSessionFromHistory("external-session"), undefined);
 
-    const reopened = new BridgeStore(directory);
+    reopened = new BridgeStore(directory);
     await reopened.init();
     assert.equal(reopened.listAssistantManagedSessions().length, 0);
     assert.ok(reopened.getSession(sessionId)?.historyHiddenAt);
@@ -293,9 +295,71 @@ test("hides assistant history persistently without deleting the session", async 
       cwd: directory,
       status: "running",
     });
-    assert.equal(reopened.listAssistantManagedSessions().length, 0);
-    assert.ok(reopened.getSession(sessionId)?.historyHiddenAt);
+    assert.equal(reopened.listAssistantManagedSessions().length, 1);
+    assert.equal(reopened.getSession(sessionId)?.historyHiddenAt, undefined);
+    await reopened.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "ended",
+    });
+    assert.equal(reopened.listAssistantManagedSessions().length, 1);
   } finally {
+    await Promise.allSettled([store?.close(), reopened?.close()]);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("init repairs legacy hidden sessions that are already active", async () => {
+  const directory = await temporaryDirectory();
+  const store = new BridgeStore(directory);
+  try {
+    const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    await writeFile(
+      path.join(directory, "sessions.json"),
+      JSON.stringify({
+        sessions: {
+          [sessionId]: {
+            sessionId,
+            shortId: "9b45397b",
+            cwd: directory,
+            projectName: "project",
+            status: "waiting",
+            openedAt: "2026-08-01T00:00:00.000Z",
+            lastSeenAt: "2026-08-01T00:01:00.000Z",
+            managedByAssistant: true,
+            historyHiddenAt: "2026-07-31T00:00:00.000Z",
+          },
+        },
+      }),
+      "utf8",
+    );
+    await store.init();
+    assert.equal(store.getSession(sessionId)?.historyHiddenAt, undefined);
+    assert.equal(store.listAssistantManagedSessions().length, 1);
+  } finally {
+    await store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("close flushes debounced writes and cancels background timers", async () => {
+  const directory = await temporaryDirectory();
+  const store = new BridgeStore(directory, { persistDebounceMs: 10_000 });
+  try {
+    await store.init();
+    await store.upsertSession({
+      sessionId: "close-flush-session",
+      cwd: directory,
+      status: "waiting",
+      managedByAssistant: true,
+    });
+    await store.close();
+    const persisted = JSON.parse(
+      await readFile(path.join(directory, "sessions.json"), "utf8"),
+    ) as { sessions: Record<string, unknown> };
+    assert.ok(persisted.sessions["close-flush-session"]);
+  } finally {
+    await store.close();
     await rm(directory, { recursive: true, force: true });
   }
 });
