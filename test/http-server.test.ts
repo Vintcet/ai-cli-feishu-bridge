@@ -88,7 +88,7 @@ test("settings endpoint requires the persistent control token", async () => {
     const unauthorized = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ autoApprove: true }),
+      body: JSON.stringify({ autoApprove: true, notifyAutoApprovals: true }),
     });
     assert.equal(unauthorized.status, 401);
     const authorized = await fetch(url, {
@@ -97,11 +97,14 @@ test("settings endpoint requires the persistent control token", async () => {
         "content-type": "application/json",
         "x-codex-feishu-control-token": token,
       },
-      body: JSON.stringify({ autoApprove: true }),
+      body: JSON.stringify({ autoApprove: true, notifyAutoApprovals: true }),
     });
     assert.equal(authorized.status, 200);
-    const body = await authorized.json() as { settings?: { autoApprove?: boolean } };
+    const body = await authorized.json() as {
+      settings?: { autoApprove?: boolean; notifyAutoApprovals?: boolean };
+    };
     assert.equal(body.settings?.autoApprove, true);
+    assert.equal(body.settings?.notifyAutoApprovals, true);
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());

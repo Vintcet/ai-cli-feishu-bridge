@@ -1135,7 +1135,7 @@ internal sealed partial class MainForm : Form
             SetHeaderStatus("飞书未连接", Danger);
         }
 
-        if (status.PendingApprovals > 0 && !status.Settings.AutoApprove)
+        if (status.PendingApprovals > 0)
         {
             operationLabel.Text =
                 $"有 {status.PendingApprovals} 个操作等待审批，可在本机或飞书处理";
@@ -1169,7 +1169,7 @@ internal sealed partial class MainForm : Form
         newClaudeCodeButton.Enabled = !operating;
         newOpenCodeButton.Enabled = !operating;
         approvalButton.Enabled =
-            !operating && !status.Settings.AutoApprove && status.PendingApprovals > 0;
+            !operating && status.PendingApprovals > 0;
         refreshButton.Enabled = !operating;
         settingsButton.Enabled = !operating;
 
@@ -1310,8 +1310,8 @@ internal sealed partial class MainForm : Form
         newOpenCodeButton.Enabled = !value;
         approvalButton.Enabled =
             !value &&
-            lastStatus?.Settings.AutoApprove != true &&
-            (lastStatus?.Approvals.Count(item => item.Status == "pending") ?? 0) > 0;
+            (lastStatus?.Approvals.Count(
+                item => item.Status == "pending" && item.RequiresManualApproval) ?? 0) > 0;
         UpdateSessionActionState();
         refreshButton.Enabled = !value;
         settingsButton.Enabled = !value;
@@ -1362,21 +1362,8 @@ internal sealed partial class MainForm : Form
 
     private void SyncApprovalDialog(BridgeStatus status)
     {
-        if (status.Settings.AutoApprove)
-        {
-            approvalButton.Text = "本机审批";
-            approvalButton.Enabled = false;
-            dismissedApprovalIds.Clear();
-            if (approvalDialog is not null)
-            {
-                var dialog = approvalDialog;
-                approvalDialog = null;
-                dialog.MarkResolved();
-            }
-            return;
-        }
         var pending = status.Approvals
-            .Where(item => item.Status == "pending")
+            .Where(item => item.Status == "pending" && item.RequiresManualApproval)
             .OrderBy(item => ParseTime(item.CreatedAt))
             .ToList();
         approvalButton.Text = pending.Count > 0

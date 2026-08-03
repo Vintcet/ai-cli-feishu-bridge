@@ -122,6 +122,48 @@ test("question and permission APIs use OpenCode 1.18 with legacy fallback", asyn
   }
 });
 
+test("OpenCode V2 permission APIs normalize wrapped requests and use the V2 reply route", async () => {
+  const fake = new FakeOpenCodeServer();
+  fake.v2PermissionListStatus = 200;
+  fake.v2PermissionReplyStatus = 204;
+  fake.permissions = [{
+    id: "per_v2_pending",
+    sessionID: "session-alpha",
+    action: "shell",
+    resources: ["git status", "git diff"],
+    save: ["git *"],
+    metadata: { command: "git status" },
+    source: { type: "tool", messageID: "msg-1", callID: "call-1" },
+  }];
+  const port = await fake.listen();
+  try {
+    const client = new OpenCodeClient(`http://127.0.0.1:${port}`, "C:/demo");
+    const permission = (await client.listPermissions())[0];
+    assert.equal(permission?.id, "per_v2_pending");
+    assert.equal(permission?.sessionID, "session-alpha");
+    assert.equal(permission?.action, "shell");
+    assert.deepEqual(permission?.resources, ["git status", "git diff"]);
+    assert.deepEqual(permission?.save, ["git *"]);
+    assert.equal(permission?.tool?.callID, "call-1");
+
+    await client.replyPermission("session-alpha", "per_v2_pending", "once");
+    assert.equal(fake.permissionReplyResponses.per_v2_pending, "once");
+    assert.ok(
+      fake.requests.some(
+        (request) =>
+          request.method === "POST" &&
+          request.url === "/api/session/session-alpha/permission/per_v2_pending/reply",
+      ),
+    );
+    assert.equal(
+      fake.requests.some((request) => request.url.includes("/permission/per_v2_pending/reply?")),
+      false,
+    );
+  } finally {
+    await fake.close();
+  }
+});
+
 test("missing legacy pending-interaction endpoints are treated as empty", async () => {
   const fake = new FakeOpenCodeServer();
   fake.permissionListStatus = 404;
@@ -171,6 +213,7 @@ test("subscribe decodes OpenCode 1.18 SSE events and routes them", async () => {
     const events: string[] = [];
     const idleSessions: string[] = [];
     const permissions: string[] = [];
+    const permissionDetails: string[] = [];
     const permissionReplies: string[] = [];
     const questions: string[] = [];
     const questionReplies: string[] = [];
@@ -183,7 +226,12 @@ test("subscribe decodes OpenCode 1.18 SSE events and routes them", async () => {
     const subscription = client.subscribe({
       onEvent: (event) => events.push(event.type),
       onSessionIdle: (sessionId) => idleSessions.push(sessionId),
-      onPermissionAsked: (permission) => permissions.push(permission.id),
+      onPermissionAsked: (permission) => {
+        permissions.push(permission.id);
+        permissionDetails.push(
+          `${permission.id}:${permission.action ?? permission.permission}:${permission.resources?.join(",") ?? ""}`,
+        );
+      },
       onPermissionReplied: (reply) =>
         permissionReplies.push(`${reply.requestID}:${reply.reply}`),
       onQuestionAsked: (request) => questions.push(request.id),
@@ -228,6 +276,20 @@ test("subscribe decodes OpenCode 1.18 SSE events and routes them", async () => {
       requestID: "per_2",
       reply: "once",
     });
+    fake.sendSse("permission.v2.asked", {
+      id: "per_v2_event",
+      sessionID: "session-alpha",
+      action: "shell",
+      resources: ["npm test"],
+      save: [],
+      metadata: {},
+      source: { type: "tool", messageID: "msg-v2", callID: "call-v2" },
+    });
+    fake.sendSse("permission.v2.replied", {
+      sessionID: "session-alpha",
+      requestID: "per_v2_event",
+      reply: "reject",
+    });
     fake.sendSse("question.asked", {
       id: "que_2",
       sessionID: "session-alpha",
@@ -269,8 +331,9 @@ test("subscribe decodes OpenCode 1.18 SSE events and routes them", async () => {
     assert.deepEqual(idleSessions, ["session-alpha"]);
     assert.deepEqual(statuses, ["session-alpha:busy"]);
     assert.deepEqual(errors, ["session-alpha:boom"]);
-    assert.deepEqual(permissions, ["per_2"]);
-    assert.deepEqual(permissionReplies, ["per_2:once"]);
+    assert.deepEqual(permissions, ["per_2", "per_v2_event"]);
+    assert.deepEqual(permissionDetails, ["per_2:bash:", "per_v2_event:shell:npm test"]);
+    assert.deepEqual(permissionReplies, ["per_2:once", "per_v2_event:reject"]);
     assert.deepEqual(questions, ["que_2"]);
     assert.deepEqual(questionReplies, ["que_2:A"]);
     assert.deepEqual(questionRejections, ["que_3"]);

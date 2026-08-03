@@ -52,6 +52,9 @@ export interface OpenCodeMessage {
 export interface OpenCodePermission {
   id: string;
   sessionID?: string;
+  action?: string;
+  resources?: string[];
+  save?: string[];
   type?: string;
   description?: string;
   input?: unknown;
@@ -65,6 +68,11 @@ export interface OpenCodePermission {
   metadata?: Record<string, unknown>;
   always?: string[];
   tool?: {
+    messageID?: string;
+    callID?: string;
+  };
+  source?: {
+    type?: string;
     messageID?: string;
     callID?: string;
   };
@@ -158,10 +166,83 @@ export function asOpenCodeSession(value: unknown): OpenCodeSession | undefined {
 }
 
 export function asOpenCodePermission(value: unknown): OpenCodePermission | undefined {
-  if (!isObject(value) || typeof value.id !== "string") {
+  if (!isObject(value)) {
     return undefined;
   }
-  return value as unknown as OpenCodePermission;
+  const candidate = isObject(value.data) ? value.data : value;
+  if (!isObject(candidate) || typeof candidate.id !== "string") {
+    return undefined;
+  }
+  const sessionID = [candidate.sessionID, candidate.sessionId, candidate.session_id]
+    .find((item): item is string => typeof item === "string" && item.length > 0);
+  const strings = (input: unknown): string[] | undefined =>
+    Array.isArray(input)
+      ? input.filter((item): item is string => typeof item === "string")
+      : undefined;
+  const resources = strings(candidate.resources);
+  const save = strings(candidate.save);
+  const patterns = strings(candidate.patterns);
+  const always = strings(candidate.always);
+  const source = isObject(candidate.source)
+    ? {
+        ...(typeof candidate.source.type === "string"
+          ? { type: candidate.source.type }
+          : {}),
+        ...(typeof candidate.source.messageID === "string"
+          ? { messageID: candidate.source.messageID }
+          : {}),
+        ...(typeof candidate.source.callID === "string"
+          ? { callID: candidate.source.callID }
+          : {}),
+      }
+    : undefined;
+  const tool = isObject(candidate.tool)
+    ? {
+        ...(typeof candidate.tool.messageID === "string"
+          ? { messageID: candidate.tool.messageID }
+          : {}),
+        ...(typeof candidate.tool.callID === "string"
+          ? { callID: candidate.tool.callID }
+          : {}),
+      }
+    : source
+      ? {
+          ...(source.messageID ? { messageID: source.messageID } : {}),
+          ...(source.callID ? { callID: source.callID } : {}),
+        }
+      : undefined;
+  return {
+    id: candidate.id,
+    ...(sessionID ? { sessionID } : {}),
+    ...(typeof candidate.action === "string" ? { action: candidate.action } : {}),
+    ...(resources ? { resources } : {}),
+    ...(save ? { save } : {}),
+    ...(typeof candidate.type === "string" ? { type: candidate.type } : {}),
+    ...(typeof candidate.description === "string"
+      ? { description: candidate.description }
+      : {}),
+    ...(candidate.input !== undefined ? { input: candidate.input } : {}),
+    ...(typeof candidate.permission === "string" || isObject(candidate.permission)
+      ? { permission: candidate.permission as OpenCodePermission["permission"] }
+      : {}),
+    ...(patterns ? { patterns } : {}),
+    ...(isObject(candidate.metadata) ? { metadata: candidate.metadata } : {}),
+    ...(always ? { always } : {}),
+    ...(tool ? { tool } : {}),
+    ...(source ? { source } : {}),
+    ...(isObject(candidate.time) ? { time: candidate.time } : {}),
+  };
+}
+
+function openCodePermissionList(value: unknown): OpenCodePermission[] {
+  const items = Array.isArray(value)
+    ? value
+    : isObject(value) && Array.isArray(value.data)
+      ? value.data
+      : [];
+  return items
+    .map(asOpenCodePermission)
+    .filter((item): item is OpenCodePermission => Boolean(item));
 }
 
 export function asOpenCodeQuestionRequest(
@@ -246,18 +327,19 @@ function asOpenCodeQuestionRejected(
 function asOpenCodePermissionReplied(
   value: unknown,
 ): OpenCodePermissionReplied | undefined {
+  const candidate = isObject(value) && isObject(value.data) ? value.data : value;
   if (
-    !isObject(value) ||
-    typeof value.sessionID !== "string" ||
-    typeof value.requestID !== "string" ||
-    !["once", "always", "reject"].includes(String(value.reply))
+    !isObject(candidate) ||
+    typeof candidate.sessionID !== "string" ||
+    typeof candidate.requestID !== "string" ||
+    !["once", "always", "reject"].includes(String(candidate.reply))
   ) {
     return undefined;
   }
   return {
-    sessionID: value.sessionID,
-    requestID: value.requestID,
-    reply: value.reply as OpenCodePermissionResponse,
+    sessionID: candidate.sessionID,
+    requestID: candidate.requestID,
+    reply: candidate.reply as OpenCodePermissionResponse,
   };
 }
 
@@ -347,6 +429,16 @@ export class OpenCodeClient {
     }
     const separator = path.includes("?") ? "&" : "?";
     return `${path}${separator}directory=${encodeURIComponent(directory)}`;
+  }
+
+  private v2LocationPath(path: string): string {
+    if (!this.defaultDirectory) {
+      return path;
+    }
+    const separator = path.includes("?") ? "&" : "?";
+    return `${path}${separator}location%5Bdirectory%5D=${encodeURIComponent(
+      this.defaultDirectory,
+    )}`;
   }
 
   private async getJson(
@@ -528,6 +620,23 @@ export class OpenCodeClient {
     permissionId: string,
     response: OpenCodePermissionResponse,
   ): Promise<void> {
+    const v2 = await fetch(
+      this.url(
+        `/api/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(permissionId)}/reply`,
+      ),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reply: response }),
+        signal: AbortSignal.timeout(10000),
+      },
+    );
+    if (v2.ok) {
+      return;
+    }
+    if (v2.status !== 404 && v2.status !== 405) {
+      throw new Error(responseErrorMessage(v2, "回复权限"));
+    }
     const modern = await fetch(
       this.url(this.scopedPath(`/permission/${encodeURIComponent(permissionId)}/reply`)),
       {
@@ -560,16 +669,21 @@ export class OpenCodeClient {
   }
 
   async listPermissions(): Promise<OpenCodePermission[]> {
-    const { response, body } = await this.getJson(this.scopedPath("/permission"), 10000);
-    if (response.status === 404 || response.status === 405) {
+    const v2 = await this.getJson(this.v2LocationPath("/api/permission/request"), 10000);
+    if (v2.response.ok) {
+      return openCodePermissionList(v2.body);
+    }
+    if (v2.response.status !== 404 && v2.response.status !== 405) {
+      throw new Error(responseErrorMessage(v2.response, "读取待处理权限"));
+    }
+    const legacy = await this.getJson(this.scopedPath("/permission"), 10000);
+    if (legacy.response.status === 404 || legacy.response.status === 405) {
       return [];
     }
-    if (!response.ok) {
-      throw new Error(responseErrorMessage(response, "读取待处理权限"));
+    if (!legacy.response.ok) {
+      throw new Error(responseErrorMessage(legacy.response, "读取待处理权限"));
     }
-    return Array.isArray(body)
-      ? body.map(asOpenCodePermission).filter((item): item is OpenCodePermission => Boolean(item))
-      : [];
+    return openCodePermissionList(legacy.body);
   }
 
   async listQuestions(): Promise<OpenCodeQuestionRequest[]> {
@@ -795,7 +909,8 @@ export class OpenCodeClient {
     handlers.onEvent?.({ type: eventType, properties });
 
     switch (eventType) {
-      case "permission.asked": {
+      case "permission.asked":
+      case "permission.v2.asked": {
         const permission = asOpenCodePermission(properties);
         if (permission) {
           handlers.onPermissionAsked?.(permission);
@@ -809,7 +924,8 @@ export class OpenCodeClient {
         }
         break;
       }
-      case "permission.replied": {
+      case "permission.replied":
+      case "permission.v2.replied": {
         const permission = asOpenCodePermissionReplied(properties);
         if (permission) {
           handlers.onPermissionReplied?.(permission);

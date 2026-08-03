@@ -118,6 +118,7 @@ test("persists notification and automation settings", async () => {
       retryIntervalSeconds: 5,
       retryJitterSeconds: 3,
       autoApprove: false,
+      notifyAutoApprovals: false,
     });
     await store.updateSettings({
       workspaceRoot: directory,
@@ -128,6 +129,7 @@ test("persists notification and automation settings", async () => {
       retryIntervalSeconds: 12,
       retryJitterSeconds: 4,
       autoApprove: true,
+      notifyAutoApprovals: true,
     });
     const reopened = new BridgeStore(directory);
     await reopened.init();
@@ -140,6 +142,7 @@ test("persists notification and automation settings", async () => {
       retryIntervalSeconds: 12,
       retryJitterSeconds: 4,
       autoApprove: true,
+      notifyAutoApprovals: true,
     });
   } finally {
     await rm(directory, { recursive: true, force: true });

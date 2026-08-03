@@ -6,6 +6,7 @@ internal sealed class SettingsDialog : Form
     private readonly CheckBox notifyUserPromptsBox = new();
     private readonly CheckBox autoRetryBox = new();
     private readonly CheckBox autoApproveBox = new();
+    private readonly CheckBox notifyAutoApprovalsBox = new();
     private readonly GroupBox retryOptionsGroup = new();
     private readonly NumericUpDown retryMaxAttemptsInput = new();
     private readonly NumericUpDown retryIntervalInput = new();
@@ -22,7 +23,7 @@ internal sealed class SettingsDialog : Form
         MaximizeBox = false;
         MinimizeBox = false;
         ShowInTaskbar = false;
-        ClientSize = new Size(620, 640);
+        ClientSize = new Size(620, 714);
         Font = new Font("Microsoft YaHei UI", 9F);
 
         var title = new Label
@@ -34,7 +35,7 @@ internal sealed class SettingsDialog : Form
         };
         var hint = new Label
         {
-            Text = "完成、补充信息、审批和错误始终通知；以下开关控制额外行为。",
+            Text = "完成、补充信息和错误始终通知；以下开关控制额外行为。",
             ForeColor = Color.FromArgb(100, 116, 139),
             AutoSize = true,
             Location = new Point(25, 52),
@@ -87,26 +88,35 @@ internal sealed class SettingsDialog : Form
         ConfigureCheckBox(
             autoApproveBox,
             "审批请求自动允许",
-            "高风险：助手请求权限时不再等待人工确认，并在飞书留下记录。",
+            "高风险：助手请求权限时不再等待人工确认；默认不发送审批提醒。",
             483,
             settings.AutoApprove);
+        ConfigureCheckBox(
+            notifyAutoApprovalsBox,
+            "自动审批后发送处理留痕",
+            "只发送已处理信息卡，不发送带按钮的待审批卡。",
+            545,
+            settings.NotifyAutoApprovals);
         autoRetryBox.CheckedChanged += (_, _) =>
             retryOptionsGroup.Enabled = autoRetryBox.Checked;
         retryOptionsGroup.Enabled = autoRetryBox.Checked;
+        autoApproveBox.CheckedChanged += (_, _) =>
+            notifyAutoApprovalsBox.Enabled = autoApproveBox.Checked;
+        notifyAutoApprovalsBox.Enabled = autoApproveBox.Checked;
 
         var cancelButton = new Button
         {
             Text = "取消",
             DialogResult = DialogResult.Cancel,
             Size = new Size(90, 36),
-            Location = new Point(406, 584),
+            Location = new Point(406, 650),
         };
         var saveButton = new Button
         {
             Text = "保存",
             DialogResult = DialogResult.OK,
             Size = new Size(90, 36),
-            Location = new Point(506, 584),
+            Location = new Point(506, 650),
             BackColor = Color.FromArgb(37, 99, 235),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
@@ -116,7 +126,7 @@ internal sealed class SettingsDialog : Form
         Controls.AddRange([
             title, hint, workspaceLabel, workspaceRootBox, workspaceBrowseButton,
             workspaceHint, notifyActivityBox, notifyUserPromptsBox, autoRetryBox,
-            retryOptionsGroup, autoApproveBox,
+            retryOptionsGroup, autoApproveBox, notifyAutoApprovalsBox,
             cancelButton, saveButton,
         ]);
         AcceptButton = saveButton;
@@ -169,6 +179,7 @@ internal sealed class SettingsDialog : Form
         RetryIntervalSeconds = (int)retryIntervalInput.Value,
         RetryJitterSeconds = (int)retryJitterInput.Value,
         AutoApprove = autoApproveBox.Checked,
+        NotifyAutoApprovals = notifyAutoApprovalsBox.Checked,
     };
 
     private void ConfigureRetryOptions(BridgeSettings settings)

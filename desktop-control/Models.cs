@@ -121,6 +121,9 @@ internal sealed class BridgeSettings
 
     [JsonPropertyName("autoApprove")]
     public bool AutoApprove { get; set; }
+
+    [JsonPropertyName("notifyAutoApprovals")]
+    public bool NotifyAutoApprovals { get; set; }
 }
 
 internal sealed class SettingsUpdateResult
@@ -353,6 +356,9 @@ internal sealed class BridgeApproval
 
     [JsonPropertyName("status")]
     public string Status { get; set; } = "";
+
+    [JsonPropertyName("requiresManualApproval")]
+    public bool RequiresManualApproval { get; set; } = true;
 
     [JsonPropertyName("resolution")]
     public string Resolution { get; set; } = "";

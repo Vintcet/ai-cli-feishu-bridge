@@ -87,6 +87,22 @@ test("normalizes AskUserQuestion for the bridge input workflow", () => {
   );
 });
 
+test("normalizes Claude Code permission requests for the shared approval bridge", () => {
+  const payload = normalizeClaudeCodePayload({
+    hook_event_name: "PermissionRequest",
+    session_id: "claude-session-approval",
+    cwd: "C:/demo",
+    tool_use_id: "tool-approval-1",
+    tool_name: "Bash",
+    tool_input: { command: "npm test" },
+  }) as Record<string, unknown>;
+  assert.equal(payload.runtime, "claudecode");
+  assert.equal(payload.model, "claude-code");
+  assert.match(String(payload.turn_id), /tool-approval-1/);
+  assert.equal(payload.tool_name, "Bash");
+  assert.deepEqual(payload.tool_input, { command: "npm test" });
+});
+
 test("compacts Claude Code failure and compaction activity payloads", () => {
   const failure = compactActivityPayload(normalizeClaudeCodePayload({
     hook_event_name: "PostToolUseFailure",

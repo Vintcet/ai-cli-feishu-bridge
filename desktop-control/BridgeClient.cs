@@ -286,6 +286,7 @@ internal sealed class BridgeClient : IDisposable
                 retryIntervalSeconds = settings.RetryIntervalSeconds,
                 retryJitterSeconds = settings.RetryJitterSeconds,
                 autoApprove = settings.AutoApprove,
+                notifyAutoApprovals = settings.NotifyAutoApprovals,
             }),
         };
         request.Headers.Add(

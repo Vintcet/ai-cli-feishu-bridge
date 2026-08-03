@@ -320,6 +320,90 @@ test("an opencode permission is sent to Feishu and allow forwards once", async (
   }
 });
 
+test("automatic OpenCode V2 approval is silent and uses the shared bridge settings", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-auto-"));
+  const ctx = await setup(directory);
+  try {
+    await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
+    await waitFor(() => ctx.fakeOpenCode.activeSseClients === 1);
+    await ctx.store.updateSettings({ autoApprove: true });
+    ctx.fakeOpenCode.v2PermissionReplyStatus = 204;
+    const cardsBefore = ctx.feishu.cards.length;
+
+    ctx.fakeOpenCode.sendSse("permission.v2.asked", {
+      id: "per_v2_auto",
+      sessionID: "session-alpha",
+      action: "shell",
+      resources: ["npm test"],
+      save: [],
+      metadata: { command: "npm test" },
+      source: { type: "tool", messageID: "msg-v2-auto", callID: "call-v2-auto" },
+    });
+
+    await waitFor(() => ctx.fakeOpenCode.permissionReplyResponses.per_v2_auto === "once");
+    const approval = ctx.store
+      .listApprovals()
+      .find((item) => item.opencodePermissionId === "per_v2_auto");
+    assert.equal(approval?.status, "resolved");
+    assert.equal(approval?.resolution, "allow");
+    assert.equal(approval?.toolName, "shell");
+    assert.match(approval?.toolPreview ?? "", /npm test/);
+    assert.equal(ctx.feishu.cards.length, cardsBefore);
+    assert.equal(ctx.controller.health().pendingApprovals, 0);
+  } finally {
+    await ctx.opencode.unregister(ctx.port);
+    await ctx.fakeOpenCode.close();
+    await ctx.store.flushPending();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("failed automatic OpenCode approval falls back to a manual card and can retry", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-fallback-"));
+  const ctx = await setup(directory);
+  try {
+    await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
+    await ctx.store.updateSettings({ autoApprove: true });
+    ctx.fakeOpenCode.v2PermissionReplyStatus = 500;
+    const cardsBefore = ctx.feishu.cards.length;
+    const permission = {
+      id: "per_auto_retry",
+      sessionID: "session-alpha",
+      action: "shell",
+      resources: ["npm test"],
+      save: [],
+      metadata: { command: "npm test" },
+    };
+
+    await ctx.controller.handleOpenCodePermissionUpdated(permission);
+    const pending = ctx.store
+      .listApprovals()
+      .find((item) => item.opencodePermissionId === permission.id);
+    assert.equal(pending?.status, "pending");
+    assert.equal(pending?.requiresManualApproval, true);
+    assert.equal(ctx.controller.health().pendingApprovals, 1);
+    assert.equal(ctx.feishu.cards.length, cardsBefore + 1);
+    assert.match(JSON.stringify(ctx.feishu.cards.at(-1)?.card), /批准一次/);
+
+    ctx.fakeOpenCode.v2PermissionReplyStatus = 204;
+    await ctx.controller.handleOpenCodePermissionUpdated(permission);
+    assert.equal(ctx.fakeOpenCode.permissionReplyResponses.per_auto_retry, "once");
+    assert.equal(ctx.store.getApproval(pending!.requestId)?.resolution, "allow");
+    await waitFor(
+      () => ctx.feishu.patchedCards.some(
+        (item) => item.messageId === ctx.feishu.cards.at(-1)?.messageId,
+      ),
+    );
+    assert.equal(ctx.feishu.cards.length, cardsBefore + 1);
+    assert.equal(ctx.controller.health().pendingApprovals, 0);
+  } finally {
+    await ctx.opencode.unregister(ctx.port);
+    await ctx.fakeOpenCode.close();
+    await ctx.store.flushPending();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("duplicate OpenCode interaction events create only one Feishu card", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
   const ctx = await setup(directory);

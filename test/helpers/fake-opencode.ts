@@ -29,6 +29,8 @@ export class FakeOpenCodeServer {
   permissions: Array<Record<string, unknown>> = [];
   questions: Array<Record<string, unknown>> = [];
   modernPermissionEndpoint = true;
+  v2PermissionListStatus = 404;
+  v2PermissionReplyStatus = 404;
   permissionListStatus = 200;
   questionListStatus = 200;
   healthOk = true;
@@ -131,6 +133,19 @@ export class FakeOpenCodeServer {
       });
       return;
     }
+    if (method === "GET" && url.pathname === "/api/permission/request") {
+      this.sendJson(
+        response,
+        this.v2PermissionListStatus,
+        this.v2PermissionListStatus === 200
+          ? {
+              location: { directory: this.currentDirectory },
+              data: this.permissions,
+            }
+          : { error: "permission_v2_unavailable" },
+      );
+      return;
+    }
     if (method === "GET" && url.pathname === "/permission") {
       this.sendJson(
         response,
@@ -170,6 +185,27 @@ export class FakeOpenCodeServer {
     }
     if (method === "POST" && /^\/session\/[^/]+\/prompt_async$/.test(url.pathname)) {
       response.writeHead(204).end();
+      return;
+    }
+    const v2PermissionMatch = url.pathname.match(
+      /^\/api\/session\/([^/]+)\/permission\/([^/]+)\/reply$/,
+    );
+    if (method === "POST" && v2PermissionMatch) {
+      if (this.v2PermissionReplyStatus !== 200 && this.v2PermissionReplyStatus !== 204) {
+        this.sendJson(response, this.v2PermissionReplyStatus, { error: "permission_v2_reply_failed" });
+        return;
+      }
+      const permissionId = v2PermissionMatch[2];
+      const reply =
+        typeof body === "object" && body && "reply" in body
+          ? String((body as { reply?: string }).reply)
+          : "";
+      this.permissionReplyResponses[permissionId] = reply;
+      if (this.v2PermissionReplyStatus === 204) {
+        response.writeHead(204).end();
+      } else {
+        this.sendJson(response, 200, true);
+      }
       return;
     }
     const permissionMatch = url.pathname.match(/^\/session\/([^/]+)\/permissions\/([^/]+)$/);

@@ -192,11 +192,13 @@ If you want a desktop entry, manually create a shortcut named `Codex飞书助手
 - One-click or double-click resume in the original directory and administrator mode.
 - Automatic recovery requests claimed when a message is sent to a closed session's Feishu group.
 - Alias management and Open Directory for the selected session.
-- Settings for the default workspace, routine progress messages, mirroring local prompts, temporary-error retries, and automatic approval.
+- Settings for the default workspace, routine progress messages, mirroring local prompts, temporary-error retries, automatic approval, and optional automatic-approval audit cards.
 
 Closing or minimizing the window hides it in the system tray. Double-click the tray icon to restore it; only Exit from the tray menu terminates the panel process. Starting the EXE again brings the existing panel to the foreground. Exiting the panel still does not automatically stop an already running background bridge service.
 
-Temporary-error retry handles recognizable 400/408/409/429/5xx, high-demand, busy-service, and timeout failures that are safe to replay. Configure 1–20 retries, a 1–600 second base delay, and 0–120 seconds of random jitter. Managed windows ask the same session to retry its previous task. Codex sampling failures may write `task_complete.error` without running the `Stop` hook, so the bridge polls each active transcript from its current end and processes only newly appended errors. Automatic approval is high risk and disabled by default; enabling it requires an additional local confirmation and suppresses the local approval window.
+Temporary-error retry handles recognizable 400/408/409/429/5xx, high-demand, busy-service, and timeout failures that are safe to replay. Configure 1–20 retries, a 1–600 second base delay, and 0–120 seconds of random jitter. Managed windows ask the same session to retry its previous task. Codex sampling failures may write `task_complete.error` without running the `Stop` hook, so the bridge polls each active transcript from its current end and processes only newly appended errors.
+
+Automatic approval uses the same semantics for Codex, Claude Code, and OpenCode permission requests delivered to the bridge. It is high risk and disabled by default; enabling it requires an additional local confirmation. A successful automatic approval is silent by default: no pending card, resolved card, or local dialog is shown. Enable the separate audit-card setting to send one resolved information card without action buttons. If automatic processing fails, the request remains pending and falls back to both an actionable Feishu card and the local approval dialog.
 
 ## Launch a synchronized Codex window
 
@@ -242,7 +244,7 @@ About every 20 seconds, the bridge scans loopback listening ports and checks `/g
 
 A plain OpenCode TUI started without `--port` does not expose the local HTTP API and cannot be discovered or injected. Use the desktop launcher or start it with `--port`. Set `OPENCODE_AUTO_DISCOVER=0` to disable discovery.
 
-Each OpenCode port registers only its currently open conversation. Other historical conversations returned by the same instance are not counted as active. The current conversation receives completion, error, compaction, tool, permission, question, and two-way input synchronization. Feishu “Allow” maps to `once`, “Reject” maps to `reject`, and the current card does not expose `always`. OpenCode questions support buttons, numbered quoted replies, comma-separated multiple choices, and semicolon-separated answers for multiple questions.
+Each OpenCode port registers only its currently open conversation. Other historical conversations returned by the same instance are not counted as active. The current conversation receives completion, error, compaction, tool, permission, question, and two-way input synchronization. Permission bridging supports `permission.v2.asked/replied`, `/api/permission/request`, the V2 session reply route, and the legacy events and endpoints. Feishu “Allow” maps to `once`, “Reject” maps to `reject`, and the current card does not expose `always`. OpenCode questions support buttons, numbered quoted replies, comma-separated multiple choices, and semicolon-separated answers for multiple questions.
 
 The bridge communicates only with OpenCode HTTP services on the local loopback interface. It does not use a headless `opencode serve` workflow because that would not provide a visible synchronized window.
 

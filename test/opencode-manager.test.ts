@@ -221,6 +221,29 @@ test("sendPrompt and replyPermission route to the correct instance", async () =>
   }
 });
 
+test("permission replies recover a missing session mapping on a single instance", async () => {
+  const fake = new FakeOpenCodeServer();
+  fake.sessions = [];
+  fake.activeSessionIds = [];
+  fake.v2PermissionReplyStatus = 204;
+  const port = await fake.listen();
+  const manager = new OpenCodeManager({
+    onInstanceConnected: () => {},
+    onInstanceDisconnected: () => {},
+    eventHandlers: {},
+  });
+  try {
+    await manager.register(port, "C:/demo");
+    assert.equal(manager.findInstanceBySession("session-from-permission"), undefined);
+    await manager.replyPermission("session-from-permission", "permission-recovered", "once");
+    assert.equal(fake.permissionReplyResponses["permission-recovered"], "once");
+    assert.equal(manager.findInstanceBySession("session-from-permission")?.port, port);
+  } finally {
+    await manager.unregister(port);
+    await fake.close();
+  }
+});
+
 test("unregister closes the subscription and forgets its sessions", async () => {
   const fake = new FakeOpenCodeServer();
   const port = await fake.listen();
@@ -318,13 +341,14 @@ test("port allocation skips system listeners and pending ports", async () => {
 
 test("register seeds pending OpenCode questions and permissions", async () => {
   const fake = new FakeOpenCodeServer();
+  fake.v2PermissionListStatus = 200;
   fake.permissions = [{
     id: "per_seed",
     sessionID: "session-alpha",
-    permission: "bash",
-    patterns: ["git status"],
+    action: "shell",
+    resources: ["git status"],
+    save: [],
     metadata: {},
-    always: [],
   }];
   fake.questions = [{
     id: "que_seed",

@@ -31,6 +31,7 @@ const defaultSettings = (workspaceRoot = ""): BridgeSettings => ({
   retryIntervalSeconds: 5,
   retryJitterSeconds: 3,
   autoApprove: false,
+  notifyAutoApprovals: false,
 });
 
 function integerInRange(
@@ -151,6 +152,7 @@ export class BridgeStore {
         3,
       ),
       autoApprove: loadedSettings.autoApprove === true,
+      notifyAutoApprovals: loadedSettings.notifyAutoApprovals === true,
     };
 
     const now = Date.now();
@@ -270,6 +272,10 @@ export class BridgeStore {
           typeof value.autoApprove === "boolean"
             ? value.autoApprove
             : this.settings.autoApprove,
+        notifyAutoApprovals:
+          typeof value.notifyAutoApprovals === "boolean"
+            ? value.notifyAutoApprovals
+            : this.settings.notifyAutoApprovals,
       };
       await this.writeJson(this.settingsFile, this.settings);
       return { ...this.settings };
@@ -751,6 +757,21 @@ export class BridgeStore {
         return;
       }
       approval.messageIds.push(messageId);
+      await this.writeJson(this.approvalFile, this.approvals);
+    });
+  }
+
+  async requireManualApproval(requestId: string): Promise<void> {
+    await this.mutate(async () => {
+      const approval = this.approvals.requests[requestId];
+      if (
+        !approval ||
+        approval.status !== "pending" ||
+        approval.requiresManualApproval === true
+      ) {
+        return;
+      }
+      approval.requiresManualApproval = true;
       await this.writeJson(this.approvalFile, this.approvals);
     });
   }

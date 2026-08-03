@@ -458,7 +458,11 @@ export class BridgeController {
         ? `${this.config.bindCommand} ${pairingCode}`
         : "",
       activeSessions: sessions.length,
-      pendingApprovals: approvals.filter((approval) => approval.status === "pending").length,
+      pendingApprovals: approvals.filter(
+        (approval) =>
+          approval.status === "pending" &&
+          approval.requiresManualApproval === true,
+      ).length,
       approvals,
       pendingInputs: this.inputWaiters.size,
       queuedPrompts:
@@ -673,6 +677,7 @@ export class BridgeController {
       "notifyUserPrompts",
       "autoRetryErrors",
       "autoApprove",
+      "notifyAutoApprovals",
     ] as const;
     const update: Record<string, boolean | number | string> = {};
     if (value.workspaceRoot !== undefined) {
@@ -978,18 +983,17 @@ export class BridgeController {
     }
     this.opencodePermissionClaims.add(claimKey);
     try {
-      const duplicate = this.store.listApprovals().some(
+      const existing = this.store.listApprovals().find(
         (approval) =>
           approval.sessionId === sessionId &&
-          approval.opencodePermissionId === permission.id &&
-          approval.status === "pending",
+          approval.opencodePermissionId === permission.id,
       );
-      if (duplicate) {
+      if (existing && existing.status !== "pending") {
         return;
       }
       const current = this.store.getSession(sessionId);
       const instance = this.opencode?.findInstanceBySession(sessionId);
-      const cwd = current?.cwd || instance?.cwd || "";
+      const cwd = current?.cwd || existing?.cwd || instance?.cwd || "";
       const session = await this.store.upsertSession({
         sessionId,
         cwd,
@@ -998,6 +1002,17 @@ export class BridgeController {
         runtime: "opencode",
         managedByAssistant: true,
       });
+      if (existing) {
+        const automaticallyHandled = await this.tryAutomaticApproval(
+          session,
+          existing,
+          "opencode",
+        );
+        if (!automaticallyHandled && existing.messageIds.length === 0) {
+          await this.sendApprovalCards(session, existing, "pending", "opencode");
+        }
+        return;
+      }
       const now = Date.now();
       const approval: ApprovalRecord = {
         requestId: randomUUID(),
@@ -1005,10 +1020,15 @@ export class BridgeController {
         turnId: current?.lastTurnId ?? `opencode-${now}`,
         cwd,
         toolName:
-          typeof permission.permission === "string"
+          permission.action ??
+          (typeof permission.permission === "string"
             ? permission.permission
-            : permission.type ?? "permission",
+            : permission.type ?? "permission"),
         toolPreview: previewJson({
+          action: permission.action,
+          resources: permission.resources,
+          save: permission.save,
+          source: permission.source,
           permission: permission.permission ?? permission.type,
           patterns: permission.patterns,
           input: permission.input,
@@ -1019,6 +1039,7 @@ export class BridgeController {
         expiresAt: new Date(now + this.config.approvalTimeoutMs).toISOString(),
         status: "pending",
         messageIds: [],
+        requiresManualApproval: !this.store.getSettings().autoApprove,
         opencodePermissionId: permission.id,
       };
       await this.store.createApproval(approval);
@@ -1027,29 +1048,16 @@ export class BridgeController {
       }, this.config.approvalTimeoutMs);
       timeoutTimer.unref?.();
 
-      for (const recipient of await this.notificationRecipients(session)) {
-        try {
-          const messageId = await this.feishu.sendCard(
-            recipient.chatId,
-            buildApprovalCard(session, approval),
-          );
-          await this.store.addApprovalMessage(approval.requestId, messageId);
-          await this.addRoute(messageId, sessionId, recipient.chatId, "approval", approval.requestId);
-        } catch (error) {
-          console.error("[opencode] Failed to send an approval card:", error);
-        }
+      const automaticallyHandled = await this.tryAutomaticApproval(
+        session,
+        approval,
+        "opencode",
+      );
+      if (!automaticallyHandled) {
+        await this.sendApprovalCards(session, approval, "pending", "opencode");
       }
-      if (this.store.getSettings().autoApprove) {
-        const completed = await this.completeApproval(approval.requestId, "allow");
-        if (completed) {
-          console.log(`[opencode] Auto-approved permission for #${session.shortId}.`);
-        } else {
-          console.warn(`[opencode] Could not auto-approve permission for #${session.shortId}.`);
-        }
-      }
-    } catch (error) {
+    } finally {
       this.opencodePermissionClaims.delete(claimKey);
-      throw error;
     }
   }
 
@@ -1444,11 +1452,11 @@ export class BridgeController {
       expiresAt: new Date(now + this.config.approvalTimeoutMs).toISOString(),
       status: "pending",
       messageIds: [],
+      requiresManualApproval: !this.store.getSettings().autoApprove,
     };
     await this.watchCodexTranscript(session);
     await this.store.createApproval(approval);
 
-    const recipients = await this.notificationRecipients(session);
     const resultPromise = new Promise<ApprovalResolution>((resolve) => {
       const timer = setTimeout(() => {
         void this.completeApproval(approval.requestId, "timeout");
@@ -1456,34 +1464,18 @@ export class BridgeController {
       this.approvalWaiters.set(approval.requestId, { timer, resolve });
     });
 
-    let sentCount = 0;
-    for (const recipient of recipients) {
-      try {
-        const messageId = await this.feishu.sendCard(
-          recipient.chatId,
-          buildApprovalCard(session, approval),
-        );
-        sentCount += 1;
-        await this.store.addApprovalMessage(approval.requestId, messageId);
-        await this.addRoute(
-          messageId,
-          payload.session_id,
-          recipient.chatId,
-          "approval",
-          approval.requestId,
-        );
-      } catch (error) {
-        console.error("[approval] Failed to send a Feishu approval card:", error);
-      }
-    }
-
-    const autoApprove = this.store.getSettings().autoApprove;
-    if (autoApprove) {
-      await this.completeApproval(approval.requestId, "allow");
-      console.log(`[approval] Auto-approved for session #${session.shortId}.`);
-    }
-
-    if (!autoApprove) {
+    const automaticallyHandled = await this.tryAutomaticApproval(
+      session,
+      approval,
+      payload.runtime ?? "codex",
+    );
+    if (!automaticallyHandled) {
+      const sentCount = await this.sendApprovalCards(
+        session,
+        approval,
+        "pending",
+        "approval",
+      );
       if (sentCount > 0) {
         console.log(
           `[approval] Waiting for desktop or Feishu decision for session #${session.shortId}.`,
@@ -3540,6 +3532,93 @@ export class BridgeController {
     }
   }
 
+  private async tryAutomaticApproval(
+    session: SessionRecord,
+    approval: ApprovalRecord,
+    logPrefix: string,
+  ): Promise<boolean> {
+    const settings = this.store.getSettings();
+    if (!settings.autoApprove) {
+      return false;
+    }
+    const completed = await this.completeApproval(approval.requestId, "allow");
+    if (completed) {
+      console.log(`[${logPrefix}] Auto-approved for session #${session.shortId}.`);
+      const resolved = this.store.getApproval(approval.requestId);
+      if (
+        settings.notifyAutoApprovals &&
+        resolved?.status === "resolved" &&
+        resolved.messageIds.length === 0
+      ) {
+        await this.sendApprovalCards(session, resolved, "resolved", logPrefix);
+      }
+      return true;
+    }
+    if (this.store.getApproval(approval.requestId)?.status !== "pending") {
+      return true;
+    }
+    console.warn(
+      `[${logPrefix}] Automatic approval failed for session #${session.shortId}; falling back to manual approval.`,
+    );
+    return false;
+  }
+
+  private async sendApprovalCards(
+    session: SessionRecord,
+    approval: ApprovalRecord,
+    state: "pending" | "resolved",
+    logPrefix: string,
+  ): Promise<number> {
+    if (
+      state === "pending" &&
+      this.store.getApproval(approval.requestId)?.status !== "pending"
+    ) {
+      return 0;
+    }
+    if (state === "pending") {
+      await this.store.requireManualApproval(approval.requestId);
+    }
+    let recipients: Array<{ chatId: string; binding?: Binding }>;
+    try {
+      recipients = await this.notificationRecipients(session);
+    } catch (error) {
+      console.error(`[${logPrefix}] Failed to resolve approval recipients:`, error);
+      return 0;
+    }
+    let sentCount = 0;
+    for (const recipient of recipients) {
+      try {
+        const card = state === "pending"
+          ? buildApprovalCard(session, approval)
+          : buildResolvedApprovalCard(session, approval, "allow");
+        const messageId = await this.feishu.sendCard(recipient.chatId, card);
+        sentCount += 1;
+        await this.store.addApprovalMessage(approval.requestId, messageId);
+        await this.addRoute(
+          messageId,
+          approval.sessionId,
+          recipient.chatId,
+          "approval",
+          approval.requestId,
+        );
+        const latest = this.store.getApproval(approval.requestId);
+        if (
+          state === "pending" &&
+          latest?.status === "resolved" &&
+          latest.resolution
+        ) {
+          await this.feishu.patchCard(
+            messageId,
+            buildResolvedApprovalCard(session, latest, latest.resolution),
+          );
+        }
+      } catch (error) {
+        console.error(`[${logPrefix}] Failed to send an approval card:`, error);
+      }
+    }
+    return sentCount;
+  }
+
   private async completeApproval(
     requestId: string,
     resolution: ApprovalResolution,
@@ -3638,6 +3717,7 @@ export class BridgeController {
           createdAt: approval.createdAt,
           expiresAt: approval.expiresAt,
           status: approval.status,
+          requiresManualApproval: approval.requiresManualApproval !== false,
           resolution: approval.resolution ?? "",
           resolvedAt: approval.resolvedAt ?? "",
         };

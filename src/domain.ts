@@ -70,6 +70,7 @@ export interface BridgeSettings {
   retryIntervalSeconds: number;
   retryJitterSeconds: number;
   autoApprove: boolean;
+  notifyAutoApprovals: boolean;
 }
 
 export interface Binding {
@@ -158,6 +159,7 @@ export interface ApprovalRecord {
   resolution?: ApprovalResolution;
   resolvedAt?: string;
   messageIds: string[];
+  requiresManualApproval?: boolean;
   opencodePermissionId?: string;
 }
 

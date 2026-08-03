@@ -874,6 +874,7 @@ test("retry settings accept bounded integers and reject invalid values", async (
       retryIntervalSeconds: 600,
       retryJitterSeconds: 120,
       autoApprove: false,
+      notifyAutoApprovals: false,
     });
 
     for (const invalid of [
@@ -1226,7 +1227,7 @@ test("an approval completed in Feishu is visible as resolved to the desktop", as
   }
 });
 
-test("automatic approval allows the hook and resolves the Feishu card", async () => {
+test("automatic Codex approval is silent by default", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-auto-approval-"));
   try {
     const store = new BridgeStore(directory);
@@ -1267,8 +1268,89 @@ test("automatic approval allows the hook and resolves the Feishu card", async ()
     };
     assert.equal(health.pendingApprovals, 0);
     assert.equal(health.approvals[0]?.resolution, "allow");
+    assert.equal(feishu.cards.length, 0);
+    assert.equal(feishu.patchedCards.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("automatic Claude Code approval uses the same silent bridge flow", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-claude-auto-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    await store.updateSettings({ autoApprove: true });
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+    const result = await controller.handlePermissionHook({
+      hook_event_name: "PermissionRequest",
+      session_id: "claude-session-auto",
+      turn_id: "claude-turn-auto",
+      cwd: directory,
+      model: "claude-sonnet-4-5",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      transcript_path: null,
+      runtime: "claudecode",
+    });
+    assert.match(JSON.stringify(result), /"behavior":"allow"/);
+    assert.equal(store.listApprovals()[0]?.resolution, "allow");
+    assert.equal(feishu.cards.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("automatic approval can send only a resolved audit card", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-auto-audit-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    await store.updateSettings({
+      autoApprove: true,
+      notifyAutoApprovals: true,
+    });
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+    await controller.handlePermissionHook({
+      hook_event_name: "PermissionRequest",
+      session_id: "codex-session-auto-audit",
+      turn_id: "turn-auto-audit",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      transcript_path: null,
+    });
     assert.equal(feishu.cards.length, 1);
-    assert.equal(feishu.patchedCards.length, 1);
+    assert.match(JSON.stringify(feishu.cards[0]?.card), /审批已处理/);
+    assert.doesNotMatch(JSON.stringify(feishu.cards[0]?.card), /批准一次/);
+    assert.equal(feishu.patchedCards.length, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

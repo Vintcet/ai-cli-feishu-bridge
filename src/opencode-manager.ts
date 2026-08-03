@@ -284,7 +284,6 @@ export class OpenCodeManager {
         });
       },
     };
-    const { close: closeSubscription } = client.subscribe(wrappedHandlers);
     const previous = this.instances.get(port);
     const launchedByAssistant = this.assistantLaunchPorts.has(port);
     const pendingSessionId = this.pendingSessionIds.get(port);
@@ -295,9 +294,11 @@ export class OpenCodeManager {
       connectedAt: new Date().toISOString(),
       allowHistoricalFallback:
         previous?.allowHistoricalFallback ?? !launchedByAssistant,
-      closeSubscription,
+      closeSubscription: () => {},
     };
     this.instances.set(port, instance);
+    const { close: closeSubscription } = client.subscribe(wrappedHandlers);
+    instance.closeSubscription = closeSubscription;
     previous?.closeSubscription();
     this.pendingPorts.delete(port);
     this.pendingSessionIds.delete(port);
@@ -490,11 +491,36 @@ export class OpenCodeManager {
     permissionId: string,
     response: OpenCodePermissionResponse,
   ): Promise<void> {
-    const instance = this.findInstanceBySession(sessionId);
+    const instance = await this.resolvePermissionInstance(sessionId);
     if (!instance) {
       throw new Error("找不到对应的 opencode 实例");
     }
     await instance.client.replyPermission(sessionId, permissionId, response);
+  }
+
+  private async resolvePermissionInstance(
+    sessionId: string,
+  ): Promise<OpenCodeInstance | undefined> {
+    const mapped = this.findInstanceBySession(sessionId);
+    if (mapped) {
+      return mapped;
+    }
+    for (const instance of this.instances.values()) {
+      if (await instance.client.getSession(sessionId)) {
+        this.rememberSession(instance.port, sessionId);
+        return instance;
+      }
+    }
+    if (this.instances.size === 1) {
+      const instance = this.instances.values().next().value as
+        | OpenCodeInstance
+        | undefined;
+      if (instance) {
+        this.rememberSession(instance.port, sessionId);
+      }
+      return instance;
+    }
+    return undefined;
   }
 
   async replyQuestion(
