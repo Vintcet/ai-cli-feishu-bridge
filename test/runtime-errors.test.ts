@@ -3,15 +3,15 @@ import test from "node:test";
 
 import {
   codexErrorFromMessage,
-  isRetryableCodexError,
+  isRetryableRuntimeError,
 } from "../src/runtime-errors.js";
 
 test("recognizes high-demand errors as explicit retryable failures", () => {
   const message =
     "We're currently experiencing high demand, which may cause temporary errors.";
   assert.equal(codexErrorFromMessage(message), message);
-  assert.equal(isRetryableCodexError(message), true);
-  assert.equal(isRetryableCodexError("provider failed", "internal_server_error"), true);
+  assert.equal(isRetryableRuntimeError(message), true);
+  assert.equal(isRetryableRuntimeError("provider failed", "internal_server_error"), true);
 });
 
 test("does not classify explanatory prose as a runtime error", () => {

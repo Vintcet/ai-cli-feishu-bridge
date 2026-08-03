@@ -89,7 +89,7 @@ import {
 import { BridgeStore } from "./store.js";
 import {
   codexErrorFromMessage,
-  isRetryableCodexError,
+  isRetryableRuntimeError,
   retryDelayMs,
 } from "./runtime-errors.js";
 
@@ -228,7 +228,8 @@ export class BridgeController {
   private readonly fileReturnRequests = new Map<string, FileReturnRequest[]>();
   private readonly activityStates = new Map<string, ActivityState>();
   private readonly pendingRemotePrompts = new Map<string, PendingRemotePrompt[]>();
-  private readonly managedRetryCounts = new Map<string, number>();
+  private readonly runtimeRetryCounts = new Map<string, number>();
+  private readonly runtimeRetryTimers = new Map<string, NodeJS.Timeout>();
   private readonly pendingRuntimeLaunchPrompts = new Map<
     string,
     PendingRuntimeLaunchPrompt[]
@@ -285,6 +286,11 @@ export class BridgeController {
     for (const activity of this.activityStates.values()) {
       if (activity.timer) clearTimeout(activity.timer);
     }
+    for (const timer of this.runtimeRetryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.runtimeRetryTimers.clear();
+    this.runtimeRetryCounts.clear();
   }
 
   private async initializeCodexTranscriptMonitors(): Promise<void> {
@@ -521,6 +527,7 @@ export class BridgeController {
       this.managedQueueDepth.delete(session.sessionId);
       this.pendingRemotePrompts.delete(session.sessionId);
       this.fileReturnRequests.delete(session.sessionId);
+      this.resetRuntimeRetryState(session.sessionId);
       await this.resolveInputsForSession(session.sessionId, "local");
       await this.resolveApprovalsForSession(session.sessionId);
       void this.finishActivity(session.sessionId, "窗口已关闭");
@@ -871,9 +878,9 @@ export class BridgeController {
   }
 
   async handleOpenCodeSessionIdle(sessionId: string): Promise<void> {
-    this.remoteInputLocks.delete(sessionId);
     const current = this.store.getSession(sessionId);
     if (!current || current.runtime !== "opencode" || current.status === "ended") {
+      this.remoteInputLocks.delete(sessionId);
       return;
     }
     if (
@@ -885,6 +892,28 @@ export class BridgeController {
     const result = await this.opencode?.lastAssistantText(sessionId);
     const assistantMessage = result?.text || undefined;
     const hasError = result?.hasError === true;
+    if (hasError) {
+      const detail = assistantMessage || current.lastError || "opencode 本轮发生错误。";
+      if (current.status === "error") {
+        if (!this.runtimeRetryTimers.has(sessionId)) {
+          this.remoteInputLocks.delete(sessionId);
+          void this.tryDrainOpenCodeQueue(sessionId);
+        }
+        return;
+      }
+      const retrying = await this.notifyRuntimeTurnError(
+        current,
+        `opencode-error-${randomUUID()}`,
+        detail,
+      );
+      if (!retrying) {
+        this.remoteInputLocks.delete(sessionId);
+        void this.tryDrainOpenCodeQueue(sessionId);
+      }
+      return;
+    }
+    this.remoteInputLocks.delete(sessionId);
+    this.resetRuntimeRetryState(sessionId);
     const session = await this.store.upsertSession({
       sessionId,
       cwd: current.cwd,
@@ -895,22 +924,19 @@ export class BridgeController {
       runtime: "opencode",
       managedByAssistant: true,
     });
-    await this.finishActivity(sessionId, hasError ? "本轮发生错误" : "本轮处理完成");
+    await this.finishActivity(sessionId, "本轮处理完成");
 
     const fileDirectives = extractBridgeFileDirectives(
       assistantMessage?.trim() || "opencode 已结束本轮处理。",
     );
     const message =
       fileDirectives.displayMessage ||
-      (hasError ? assistantMessage || "opencode 本轮发生错误。" : assistantMessage || "opencode 已结束本轮处理。");
+      assistantMessage || "opencode 已结束本轮处理。";
     for (const recipient of await this.notificationRecipients(session)) {
       try {
-        const cards = hasError
-          ? buildErrorCards(session, message)
-          : buildStopCards(session, message);
-        for (const card of cards) {
+        for (const card of buildStopCards(session, message)) {
           const messageId = await this.feishu.sendCard(recipient.chatId, card);
-          await this.addRoute(messageId, sessionId, recipient.chatId, hasError ? "error" : "stop");
+          await this.addRoute(messageId, sessionId, recipient.chatId, "stop");
         }
       } catch (error) {
         console.error("[opencode] Failed to send a completion card:", error);
@@ -940,25 +966,17 @@ export class BridgeController {
       return;
     }
     const detail = truncate(error || "opencode 发生未知错误。", 500);
-    const session = await this.store.upsertSession({
-      sessionId,
-      cwd: current.cwd,
-      model: current.model,
-      status: "error",
-      error: detail,
-      runtime: "opencode",
-      managedByAssistant: true,
-    });
-    await this.finishActivity(sessionId, "本轮发生错误");
-    for (const recipient of await this.notificationRecipients(session)) {
-      try {
-        for (const card of buildErrorCards(session, detail)) {
-          const messageId = await this.feishu.sendCard(recipient.chatId, card);
-          await this.addRoute(messageId, sessionId, recipient.chatId, "error");
-        }
-      } catch (sendError) {
-        console.error("[opencode] Failed to send an error card:", sendError);
-      }
+    if (current.status === "error") {
+      return;
+    }
+    const retrying = await this.notifyRuntimeTurnError(
+      current,
+      `opencode-error-${randomUUID()}`,
+      detail,
+    );
+    if (!retrying) {
+      this.remoteInputLocks.delete(sessionId);
+      void this.tryDrainOpenCodeQueue(sessionId);
     }
   }
 
@@ -1415,6 +1433,7 @@ export class BridgeController {
     this.managedQueueDepth.delete(payload.session_id);
     this.pendingRemotePrompts.delete(payload.session_id);
     this.fileReturnRequests.delete(payload.session_id);
+    this.resetRuntimeRetryState(payload.session_id);
     void this.finishActivity(payload.session_id, "会话已结束");
     this.managedTerminals.release(payload.session_id);
     console.log(`[session] Ended session #${session.shortId}.`);
@@ -1696,11 +1715,14 @@ export class BridgeController {
         : {}),
     });
     const codexError = structuredCodexError ?? codexErrorFromMessage(assistantMessage);
+    if (!codexError) {
+      this.resetRuntimeRetryState(payload.session_id);
+    }
     if (turnId && previous?.lastNotificationTurnId === turnId) {
       return {};
     }
     if (codexError) {
-      await this.notifyCodexTurnError(
+      await this.notifyRuntimeTurnError(
         session,
         turnId,
         codexError,
@@ -1709,7 +1731,6 @@ export class BridgeController {
       return {};
     }
     await this.finishActivity(payload.session_id, "本轮处理完成");
-    this.managedRetryCounts.delete(payload.session_id);
     const fileReturnRequest = this.advanceFileReturnRequests(payload.session_id);
     this.decrementManagedQueueDepth(payload.session_id);
 
@@ -1769,7 +1790,7 @@ export class BridgeController {
       runtime: "codex",
       transcriptPath: event.transcriptPath,
     });
-    await this.notifyCodexTurnError(
+    await this.notifyRuntimeTurnError(
       session,
       event.turnId,
       event.error,
@@ -1777,24 +1798,24 @@ export class BridgeController {
     );
   }
 
-  private async notifyCodexTurnError(
+  private async notifyRuntimeTurnError(
     session: SessionRecord,
     turnId: string,
     errorMessage: string,
     errorCode?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (this.store.getSession(session.sessionId)?.lastNotificationTurnId === turnId) {
-      return;
+      return false;
     }
     await this.finishActivity(session.sessionId, "本轮发生错误");
-    const retryCount = this.managedRetryCounts.get(session.sessionId) ?? 0;
+    const retryCount = this.runtimeRetryCounts.get(session.sessionId) ?? 0;
     const retrySettings = this.store.getSettings();
     const retryDelay = retryDelayMs(retrySettings, this.config.retryBaseDelayMs);
     const canRetry =
       retrySettings.autoRetryErrors &&
       retryCount < retrySettings.retryMaxAttempts &&
-      isRetryableCodexError(errorMessage, errorCode) &&
-      this.managedTerminals.isReady(session);
+      isRetryableRuntimeError(errorMessage, errorCode) &&
+      this.isRuntimeReadyForRetry(session);
     const detail = canRetry
       ? `${errorMessage}\n\n助手将在 ${Math.ceil(retryDelay / 1_000)} 秒后自动重试（第 ${retryCount + 1}/${retrySettings.retryMaxAttempts} 次）。`
       : errorMessage;
@@ -1814,34 +1835,94 @@ export class BridgeController {
           await this.addRoute(messageId, session.sessionId, recipient.chatId, "error");
         }
       } catch (error) {
-        console.error("[error] Failed to send a Codex error card:", error);
+        console.error("[error] Failed to send a runtime error card:", error);
       }
     }
     await this.store.markStopNotified(session.sessionId, turnId);
     if (!canRetry) {
-      return;
+      return false;
     }
-    this.managedRetryCounts.set(session.sessionId, retryCount + 1);
+    const retryAttempt = retryCount + 1;
+    this.runtimeRetryCounts.set(session.sessionId, retryAttempt);
+    const previousTimer = this.runtimeRetryTimers.get(session.sessionId);
+    if (previousTimer) {
+      clearTimeout(previousTimer);
+    }
     const retryTimer = setTimeout(() => {
+      if (this.runtimeRetryTimers.get(session.sessionId) !== retryTimer) {
+        return;
+      }
+      this.runtimeRetryTimers.delete(session.sessionId);
       const current = this.store.getSession(session.sessionId);
       const currentSettings = this.store.getSettings();
       if (
         !currentSettings.autoRetryErrors ||
         retryCount >= currentSettings.retryMaxAttempts ||
+        this.runtimeRetryCounts.get(session.sessionId) !== retryAttempt ||
         !current ||
-        !this.managedTerminals.isReady(current)
+        !this.isRuntimeReadyForRetry(current)
       ) {
         return;
       }
       const retryPrompt =
         "刚才的请求因临时服务错误失败。请重试上一项任务，并继续从中断处执行。";
-      this.rememberRemotePrompt(session.sessionId, retryPrompt);
-      void this.managedTerminals.send(current, retryPrompt, "steer").catch((error) => {
-        this.forgetRemotePrompt(session.sessionId, retryPrompt);
-        console.error("[retry] Managed retry failed:", error);
+      void this.sendRuntimeRetry(current, retryPrompt).catch((error) => {
+        console.error("[retry] Runtime retry failed:", error);
       });
     }, retryDelay);
+    this.runtimeRetryTimers.set(session.sessionId, retryTimer);
     retryTimer.unref?.();
+    return true;
+  }
+
+  private resetRuntimeRetryState(sessionId: string): void {
+    this.runtimeRetryCounts.delete(sessionId);
+    const timer = this.runtimeRetryTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      this.runtimeRetryTimers.delete(sessionId);
+    }
+  }
+
+  private isRuntimeReadyForRetry(session: SessionRecord): boolean {
+    if (runtimeDefinition(session.runtime).transport === "http_event_stream") {
+      return Boolean(this.opencode?.findActiveInstanceBySession(session.sessionId));
+    }
+    return this.managedTerminals.isReady(session);
+  }
+
+  private async sendRuntimeRetry(
+    session: SessionRecord,
+    retryPrompt: string,
+  ): Promise<void> {
+    const runningSession = await this.store.upsertSession({
+      sessionId: session.sessionId,
+      alias: session.alias,
+      cwd: session.cwd,
+      model: session.model,
+      status: "running",
+      source: session.source,
+      runtime: session.runtime,
+      managedTerminalId: session.managedTerminalId,
+      managedTerminalElevated: session.managedTerminalElevated,
+      managedByAssistant: session.managedByAssistant,
+    });
+    this.remoteInputLocks.add(session.sessionId);
+    this.rememberRemotePrompt(session.sessionId, retryPrompt);
+    try {
+      if (runtimeDefinition(runningSession.runtime).transport === "http_event_stream") {
+        if (!this.opencode) {
+          throw new Error("opencode 支持未启用。");
+        }
+        await this.opencode.sendPrompt(runningSession.sessionId, retryPrompt);
+      } else {
+        await this.managedTerminals.send(runningSession, retryPrompt, "steer");
+      }
+    } catch (error) {
+      this.remoteInputLocks.delete(session.sessionId);
+      this.forgetRemotePrompt(session.sessionId, retryPrompt);
+      throw error;
+    }
   }
 
   private async watchCodexTranscript(session: SessionRecord): Promise<void> {
@@ -2935,7 +3016,7 @@ export class BridgeController {
     this.runtimeQueues.delete(sessionId);
     this.pendingRemotePrompts.delete(sessionId);
     this.fileReturnRequests.delete(sessionId);
-    this.managedRetryCounts.delete(sessionId);
+    this.resetRuntimeRetryState(sessionId);
     this.opencodeToolParts.delete(sessionId);
     this.clearOpenCodeInteractionClaims(sessionId);
     if (session) {
@@ -3006,7 +3087,7 @@ export class BridgeController {
     const retryDelay = retryDelayMs(retrySettings, this.config.retryBaseDelayMs);
     const retrying =
       retrySettings.autoRetryErrors &&
-      isRetryableCodexError(reason) &&
+      isRetryableRuntimeError(reason) &&
       attempt < retrySettings.retryMaxAttempts;
     const detail = retrying
       ? `${reason}\n\n助手将在 ${Math.ceil(retryDelay / 1_000)} 秒后自动重试（第 ${attempt + 1}/${retrySettings.retryMaxAttempts} 次）。`

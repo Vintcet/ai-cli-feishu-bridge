@@ -1,6 +1,6 @@
 import type { BridgeSettings } from "./domain.js";
 
-export function isRetryableCodexError(value: string, errorCode?: string): boolean {
+export function isRetryableRuntimeError(value: string, errorCode?: string): boolean {
   if (
     errorCode &&
     /(?:internal.server|server.error|rate.limit|overload|high.demand|temporar|timeout)/i.test(
@@ -13,6 +13,8 @@ export function isRetryableCodexError(value: string, errorCode?: string): boolea
     value,
   );
 }
+
+export const isRetryableCodexError = isRetryableRuntimeError;
 
 export function codexErrorFromMessage(
   value: string | null | undefined,
@@ -43,7 +45,7 @@ export function codexErrorFromMessage(
   );
   if (
     !(startsLikeError || startsWithRetryableStatus || knownServiceFailure) ||
-    !isRetryableCodexError(firstLine)
+    !isRetryableRuntimeError(firstLine)
   ) {
     return undefined;
   }

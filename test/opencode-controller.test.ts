@@ -120,6 +120,7 @@ function controllerConfig(directory: string) {
     inboundAttachmentMaxCount: 4,
     uploadTtlMs: 60_000,
     outboundFileMaxBytes: 1024 * 1024,
+    retryBaseDelayMs: 10,
   };
 }
 
@@ -240,6 +241,45 @@ test("opencode idle marks the session waiting and notifies the group", async () 
     assert.equal(session.status, "waiting");
     assert.match(session.lastAssistantMessage ?? "", /完成/);
     assert.ok(ctx.feishu.cards.some((entry) => entry.chatId === session.feishuChatId));
+  } finally {
+    await ctx.opencode.unregister(ctx.port);
+    await ctx.fakeOpenCode.close();
+    await ctx.store.flushPending();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("opencode retry attempts reset after a successful idle event", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-retry-"));
+  const ctx = await setup(directory);
+  try {
+    await ctx.store.updateSettings({
+      autoRetryErrors: true,
+      retryMaxAttempts: 1,
+      retryJitterSeconds: 0,
+    });
+    await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
+    const temporaryError =
+      "We're currently experiencing high demand, which may cause temporary errors.";
+    const retryRequests = () =>
+      ctx.fakeOpenCode.requests.filter(
+        (request) =>
+          request.method === "POST" && request.url.includes("/prompt_async"),
+      );
+
+    await ctx.controller.handleOpenCodeSessionError("session-alpha", temporaryError);
+    await waitFor(() => retryRequests().length === 1);
+    assert.match(JSON.stringify(retryRequests()[0]?.body), /重试上一项任务/);
+
+    await ctx.controller.handleOpenCodeSessionIdle("session-alpha");
+    assert.equal(ctx.store.getSession("session-alpha")?.status, "waiting");
+
+    await ctx.controller.handleOpenCodeSessionError("session-alpha", temporaryError);
+    await waitFor(() => retryRequests().length === 2);
+    const firstAttemptCards = ctx.feishu.cards.filter((entry) =>
+      JSON.stringify(entry.card).includes("第 1/1 次")
+    );
+    assert.equal(firstAttemptCards.length, 2);
   } finally {
     await ctx.opencode.unregister(ctx.port);
     await ctx.fakeOpenCode.close();

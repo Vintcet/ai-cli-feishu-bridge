@@ -1914,6 +1914,108 @@ test("a managed temporary error is notified and retried when enabled", async () 
   }
 });
 
+for (const runtime of ["codex", "claudecode"] as const) {
+  test(`${runtime} retry attempts reset after a successful turn`, async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), `codex-feishu-${runtime}-reset-`));
+    let controller: BridgeController | undefined;
+    let store: BridgeStore | undefined;
+    try {
+      store = new BridgeStore(directory);
+      await store.init();
+      await store.updateSettings({
+        autoRetryErrors: true,
+        retryMaxAttempts: 1,
+        retryJitterSeconds: 0,
+      });
+      const code = store.getPairingCode();
+      assert.ok(code);
+      await store.bindOwner({
+        openId: "owner",
+        chatId: "chat-owner",
+        chatType: "p2p",
+        boundAt: new Date().toISOString(),
+      }, code);
+      const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+      const terminalId = `terminal-${runtime}-retry-reset`;
+      await store.upsertSession({
+        sessionId,
+        cwd: directory,
+        status: "running",
+        source: "startup",
+        runtime,
+        managedTerminalId: terminalId,
+      });
+      const feishu = new FakeFeishu();
+      const terminals = new FakeManagedTerminals(terminalId, directory, sessionId);
+      controller = new BridgeController(
+        store,
+        feishu as unknown as FeishuGateway,
+        new FakeCodex() as unknown as CodexRunner,
+        terminals as unknown as ManagedTerminalRouter,
+        undefined,
+        controllerConfig(directory),
+      );
+      const temporaryError =
+        "We're currently experiencing high demand, which may cause temporary errors.";
+
+      await controller.handleStopHook({
+        hook_event_name: "Stop",
+        session_id: sessionId,
+        turn_id: "turn-retry-batch-1",
+        cwd: directory,
+        model: "test-model",
+        permission_mode: "default",
+        last_assistant_message: temporaryError,
+        stop_hook_active: true,
+        transcript_path: null,
+        runtime,
+      });
+      for (let attempt = 0; attempt < 20 && terminals.sends.length < 1; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(terminals.sends.length, 1);
+
+      await controller.handleStopHook({
+        hook_event_name: "Stop",
+        session_id: sessionId,
+        turn_id: "turn-retry-batch-1",
+        cwd: directory,
+        model: "test-model",
+        permission_mode: "default",
+        last_assistant_message: "本轮重试已成功完成。",
+        stop_hook_active: true,
+        transcript_path: null,
+        runtime,
+      });
+      await controller.handleStopHook({
+        hook_event_name: "Stop",
+        session_id: sessionId,
+        turn_id: "turn-retry-batch-2",
+        cwd: directory,
+        model: "test-model",
+        permission_mode: "default",
+        last_assistant_message: temporaryError,
+        stop_hook_active: true,
+        transcript_path: null,
+        runtime,
+      });
+      for (let attempt = 0; attempt < 20 && terminals.sends.length < 2; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      assert.equal(terminals.sends.length, 2);
+      const retryCards = feishu.cards.filter((entry) =>
+        JSON.stringify(entry.card).includes("第 1/1 次")
+      );
+      assert.equal(retryCards.length, 2);
+    } finally {
+      await controller?.close();
+      await store?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
 test("a structured permanent Codex error is notified without automatic retry", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-permanent-error-"));
   try {

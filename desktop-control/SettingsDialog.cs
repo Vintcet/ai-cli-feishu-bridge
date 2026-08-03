@@ -190,7 +190,7 @@ internal sealed class SettingsDialog : Form
 
         ConfigureNumericInput(
             retryMaxAttemptsInput,
-            "最大重试次数",
+            "连续失败上限",
             settings.RetryMaxAttempts,
             1,
             20,
@@ -212,7 +212,7 @@ internal sealed class SettingsDialog : Form
 
         var explanation = new Label
         {
-            Text = "实际等待 = 基础间隔 + 0～随机增加秒\r\n例如 5 + 0～3 秒，每次会随机等待 5～8 秒。",
+            Text = "实际等待 = 基础间隔 + 0～随机增加秒\r\n成功一次即清零；下次失败从第 1 次开始。",
             ForeColor = Color.FromArgb(100, 116, 139),
             AutoSize = false,
             Location = new Point(270, 28),

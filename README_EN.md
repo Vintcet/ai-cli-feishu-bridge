@@ -24,8 +24,8 @@ Main features:
 - Interrupt a running managed session from Feishu, or explicitly queue a message for the next turn.
 - Answer Codex `request_user_input`, Claude Code `AskUserQuestion`, and OpenCode questions from Feishu.
 - Optionally show a live progress card and mirror prompts entered on the computer.
-- Split long prompts, final responses, and errors across multiple cards instead of truncating them.
-- Detect temporary 400/408/409/429/5xx, high-demand, busy-service, timeout, and similar errors, including failures that skip the Codex `Stop` hook, and optionally retry with configurable delay and jitter.
+- Split long prompts, final responses, and errors across multiple cards instead of truncating them, and convert Markdown tables into native Feishu tables.
+- Detect temporary 400/408/409/429/5xx, high-demand, busy-service, timeout, and similar errors, use one consecutive-failure retry policy for Codex, Claude Code, and OpenCode, and include failures that skip the Codex `Stop` hook.
 - Receive Feishu images/files into the project bridge directory and explicitly send generated project files back to Feishu.
 - Keep real CLI sessions in local history and resume them in their original working directory; reopening a previously hidden session returns it to the normal history lifecycle.
 - Automatically reopen a closed Codex, Claude Code, or OpenCode conversation when a message arrives in its Feishu session group, as long as the desktop control panel is still running in the tray.
@@ -196,7 +196,7 @@ If you want a desktop entry, manually create a shortcut named `Codex飞书助手
 
 Closing or minimizing the window hides it in the system tray. Double-click the tray icon to restore it; only Exit from the tray menu terminates the panel process. Starting the EXE again brings the existing panel to the foreground. Exiting the panel still does not automatically stop an already running background bridge service.
 
-Temporary-error retry handles recognizable 400/408/409/429/5xx, high-demand, busy-service, and timeout failures that are safe to replay. Configure 1–20 retries, a 1–600 second base delay, and 0–120 seconds of random jitter. Managed windows ask the same session to retry its previous task. Codex sampling failures may write `task_complete.error` without running the `Stop` hook, so the bridge polls each active transcript from its current end and processes only newly appended errors.
+Temporary-error retry handles recognizable 400/408/409/429/5xx, high-demand, busy-service, and timeout failures that are safe to replay. Configure 1–20 retries per consecutive failure batch, a 1–600 second base delay, and 0–120 seconds of random jitter. Codex, Claude Code, and OpenCode ask the same session to retry its previous task. Any successful completion immediately resets the batch, so a later failure starts again at attempt 1 even when it happens moments later. Codex sampling failures may write `task_complete.error` without running the `Stop` hook, so the bridge polls each active transcript from its current end and processes only newly appended errors.
 
 Automatic approval uses the same semantics for Codex, Claude Code, and OpenCode permission requests delivered to the bridge. It is high risk and disabled by default; enabling it requires an additional local confirmation. A successful automatic approval is silent by default: no pending card, resolved card, or local dialog is shown. Enable the separate audit-card setting to send one resolved information card without action buttons. If automatic processing fails, the request remains pending and falls back to both an actionable Feishu card and the local approval dialog.
 

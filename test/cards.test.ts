@@ -47,13 +47,62 @@ test("completion cards convert Markdown blocks into Feishu card elements", () =>
   assert.match(rendered, /\*\*处理结果\*\*/);
   assert.match(rendered, /• 第一项/);
   assert.match(rendered, /• ☑ 第二项/);
-  assert.match(rendered, /文件　｜　状态/);
+  assert.match(rendered, /\"tag\":\"table\"/);
+  assert.match(rendered, /\"display_name\":\"文件\"/);
+  assert.match(rendered, /\"display_name\":\"状态\"/);
+  assert.match(rendered, /\"column_1\":\"app.ts\"/);
+  assert.match(rendered, /\"column_2\":\"完成\"/);
+  assert.doesNotMatch(rendered, /文件　｜　状态/);
   assert.match(rendered, /代码 · ts\\nconst ready = true;/);
   assert.match(rendered, /请在发布前检查/);
   assert.match(rendered, /本机报告（K:\/projects\/demo\/report.md:12）/);
   assert.doesNotMatch(rendered, /\[本机报告].*K:\/projects/);
   assert.doesNotMatch(rendered, /引用回复/);
   assert.match(rendered, /下一轮请直接发送消息/);
+});
+
+test("Markdown tables use native Feishu table elements and normalize cells", () => {
+  const card = buildStopCard(
+    session,
+    [
+      "| **名称** | 说明 | 地址 |",
+      "| --- | --- | --- |",
+      "| `bridge` | 支持\\|分隔符 | [文档](https://example.com/docs) |",
+      "| worker | 第二行 | |",
+    ].join("\n"),
+  );
+  const elements = card.elements as Array<Record<string, unknown>>;
+  const table = elements.find((element) => element.tag === "table");
+
+  assert.ok(table);
+  assert.equal(table.row_height, "high");
+  assert.deepEqual(table.columns, [
+    { name: "column_1", display_name: "名称", data_type: "text", width: "auto" },
+    { name: "column_2", display_name: "说明", data_type: "text", width: "auto" },
+    { name: "column_3", display_name: "地址", data_type: "text", width: "auto" },
+  ]);
+  assert.deepEqual(table.rows, [
+    {
+      column_1: "bridge",
+      column_2: "支持|分隔符",
+      column_3: "文档（https://example.com/docs）",
+    },
+    { column_1: "worker", column_2: "第二行", column_3: "" },
+  ]);
+});
+
+test("a card never exceeds Feishu's five native table limit", () => {
+  const source = Array.from(
+    { length: 6 },
+    (_, index) =>
+      `| 表 ${index + 1} | 状态 |\n| --- | --- |\n| 内容 ${index + 1} | 完成 |`,
+  ).join("\n\n");
+  const card = buildStopCard(session, source);
+  const elements = card.elements as Array<Record<string, unknown>>;
+
+  assert.equal(elements.filter((element) => element.tag === "table").length, 5);
+  assert.match(JSON.stringify(card), /表 6/);
+  assert.match(JSON.stringify(card), /内容 6/);
 });
 
 test("external completion cards do not suggest Feishu replies", () => {

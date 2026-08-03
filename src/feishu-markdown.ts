@@ -22,6 +22,8 @@ const orderedListPattern = /^\s*(\d+)[.)]\s+(.+)$/;
 const quotePattern = /^\s*>\s?(.*)$/;
 const fencePattern = /^\s{0,3}(`{3,}|~{3,})\s*([^\s]*)?.*$/;
 const dividerPattern = /^\s*(?:(?:-\s*){3,}|(?:_\s*){3,}|(?:\*\s*){3,})$/;
+const maxTableColumns = 50;
+const maxTableElements = 5;
 
 export function markdownToFeishuCardElements(
   value: string,
@@ -39,7 +41,7 @@ export function markdownToFeishuCardElements(
   const source = inputTruncated
     ? `${normalized.slice(0, maxCharacters).trimEnd()}\n\n…`
     : normalized;
-  const elements = parseMarkdownBlocks(source).flatMap(blockToElements);
+  const elements = blocksToElements(parseMarkdownBlocks(source));
   const needsElementTruncation = shouldTruncate && elements.length > maxElements;
   if (!inputTruncated && !needsElementTruncation) {
     return elements;
@@ -215,15 +217,105 @@ function blockToElements(block: MarkdownBlock): CardElement[] {
       );
     }
     case "table": {
-      const rows = block.rows.map((row, rowIndex) => {
-        const content = row.map(normalizeInline).join("　｜　");
-        return rowIndex === 0 ? `**${content}**` : content;
-      });
-      return splitLongText(rows.join("\n")).map(markdownDiv);
+      return tableElements(block.rows);
     }
     case "divider":
       return [{ tag: "hr" }];
   }
+}
+
+function blocksToElements(blocks: MarkdownBlock[]): CardElement[] {
+  const elements: CardElement[] = [];
+  let tableCount = 0;
+  for (const block of blocks) {
+    if (block.kind !== "table") {
+      elements.push(...blockToElements(block));
+      continue;
+    }
+    const remainingTables = maxTableElements - tableCount;
+    if (remainingTables <= 0) {
+      elements.push(...tableFallbackElements(block.rows));
+      continue;
+    }
+    const tables = tableElements(block.rows).slice(0, remainingTables);
+    tableCount += tables.length;
+    elements.push(...tables);
+  }
+  return elements;
+}
+
+function tableElements(rows: string[][]): CardElement[] {
+  const columnCount = rows.reduce(
+    (maximum, row) => Math.max(maximum, row.length),
+    0,
+  );
+  if (columnCount === 0) {
+    return [];
+  }
+
+  const header = rows[0] ?? [];
+  const bodyRows = rows.slice(1);
+  const elements: CardElement[] = [];
+  for (
+    let columnStart = 0;
+    columnStart < columnCount && elements.length < maxTableElements;
+    columnStart += maxTableColumns
+  ) {
+    const columnEnd = Math.min(columnStart + maxTableColumns, columnCount);
+    const columns = Array.from(
+      { length: columnEnd - columnStart },
+      (_, offset) => {
+        const columnIndex = columnStart + offset;
+        return {
+          name: `column_${columnIndex + 1}`,
+          display_name:
+            toPlainText(header[columnIndex] ?? "") || `第 ${columnIndex + 1} 列`,
+          data_type: "text",
+          width: "auto",
+        };
+      },
+    );
+    elements.push({
+      tag: "table",
+      page_size: Math.min(10, Math.max(1, bodyRows.length)),
+      row_height: "high",
+      header_style: {
+        text_align: "left",
+        text_size: "normal",
+        background_style: "grey",
+        text_color: "default",
+        bold: true,
+      },
+      columns,
+      rows: bodyRows.map((row) =>
+        Object.fromEntries(
+          columns.map((column, offset) => [
+            column.name,
+            toPlainText(row[columnStart + offset] ?? ""),
+          ]),
+        )
+      ),
+    });
+  }
+  return elements;
+}
+
+function tableFallbackElements(rows: string[][]): CardElement[] {
+  const header = rows[0] ?? [];
+  const bodyRows = rows.slice(1);
+  const text = bodyRows.length > 0
+    ? bodyRows
+        .map((row) =>
+          row
+            .map((cell, index) => {
+              const label = toPlainText(header[index] ?? "") || `第 ${index + 1} 列`;
+              return `**${label}：** ${normalizeInline(cell)}`;
+            })
+            .join("\n")
+        )
+        .join("\n\n")
+    : header.map(toPlainText).filter(Boolean).join(" · ");
+  return splitLongText(text || "（空表格）").map(markdownDiv);
 }
 
 function startsBlock(lines: string[], index: number): boolean {
