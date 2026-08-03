@@ -50,6 +50,7 @@ export const bridgeConfig = {
   ),
   codexCommand: process.env.CODEX_COMMAND?.trim() || "codex",
   dataDirectory: path.join(projectRoot, "data"),
+  approvalLogPath: path.join(projectRoot, "data", "approval-events.log"),
   uploadsDirectory: path.join(projectRoot, "data", "uploads"),
   inboundFileMaxBytes: positiveInteger(
     process.env.FEISHU_INBOUND_FILE_MAX_BYTES,

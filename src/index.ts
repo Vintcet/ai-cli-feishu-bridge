@@ -139,6 +139,7 @@ const controller = new BridgeController(store, feishu, codex, managedTerminals, 
   uploadTtlMs: bridgeConfig.uploadTtlMs,
   outboundFileMaxBytes: bridgeConfig.outboundFileMaxBytes,
   transcriptPollIntervalMs: bridgeConfig.transcriptPollIntervalMs,
+  approvalLogPath: bridgeConfig.approvalLogPath,
 });
 
 opencode.startAutoDiscovery();

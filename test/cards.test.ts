@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildActivityCard, buildStopCard, buildStopCards, buildUserPromptCards } from "../src/cards.js";
+import {
+  buildActivityCard,
+  buildStopCard,
+  buildStopCards,
+  buildUserInputCards,
+  buildUserInputQuestionCard,
+  buildUserPromptCards,
+} from "../src/cards.js";
 import { splitTextForFeishu } from "../src/feishu-markdown.js";
 import type { SessionRecord } from "../src/domain.js";
 
@@ -103,6 +110,64 @@ test("a card never exceeds Feishu's five native table limit", () => {
   assert.equal(elements.filter((element) => element.tag === "table").length, 5);
   assert.match(JSON.stringify(card), /表 6/);
   assert.match(JSON.stringify(card), /内容 6/);
+});
+
+test("user input renders one interactive card per question", () => {
+  const cards = buildUserInputCards(session, "input-request", [
+    {
+      header: "发布方式",
+      id: "publish",
+      question: "如何发布？",
+      options: [
+        { label: "仅构建", description: "只生成文件" },
+        { label: "构建并发布", description: "生成并发布" },
+      ],
+      custom: false,
+    },
+    {
+      header: "通知范围",
+      id: "notify",
+      question: "通知谁？",
+      options: [
+        { label: "团队", description: "通知团队" },
+        { label: "负责人", description: "只通知负责人" },
+      ],
+      custom: false,
+    },
+  ]);
+
+  assert.equal(cards.length, 2);
+  assert.match(JSON.stringify(cards[0]), /发布方式/);
+  assert.doesNotMatch(JSON.stringify(cards[0]), /通知范围/);
+  assert.match(JSON.stringify(cards[0]), /"action":"input_answer"/);
+  assert.match(JSON.stringify(cards[1]), /"questionId":"notify"/);
+});
+
+test("multi-choice cards expose toggle and submit actions", () => {
+  const question = {
+    header: "范围",
+    id: "scope",
+    question: "选择范围",
+    options: [
+      { label: "代码", description: "源代码" },
+      { label: "测试", description: "自动化测试" },
+    ],
+    multiple: true,
+    custom: false,
+  };
+  const initial = JSON.stringify(
+    buildUserInputQuestionCard(session, "multi-request", question, 0, 1),
+  );
+  assert.match(initial, /"action":"input_toggle"/);
+  assert.match(initial, /"action":"input_submit"/);
+
+  const selected = JSON.stringify(
+    buildUserInputQuestionCard(session, "multi-request", question, 0, 1, {
+      selectedAnswers: ["代码"],
+    }),
+  );
+  assert.match(selected, /已选 1 项/);
+  assert.match(selected, /✓ 代码/);
 });
 
 test("external completion cards do not suggest Feishu replies", () => {

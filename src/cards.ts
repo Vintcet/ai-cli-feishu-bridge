@@ -133,93 +133,245 @@ export function buildResolvedApprovalCard(
   };
 }
 
+export interface UserInputCardState {
+  selectedAnswers?: readonly string[];
+  answered?: boolean;
+  remainingQuestions?: number;
+}
+
+/**
+ * Build one interactive card per question so a Feishu reply never has to
+ * encode several answers into one positional string.
+ */
+export function buildUserInputCards(
+  session: SessionRecord,
+  requestId: string,
+  questions: UserInputQuestion[],
+): Card[] {
+  return questions.map((question, questionIndex) =>
+    buildUserInputQuestionCard(
+      session,
+      requestId,
+      question,
+      questionIndex,
+      questions.length,
+    ));
+}
+
+/**
+ * Compatibility entry point for callers that still expect a single card.
+ * The controller uses buildUserInputCards for the actual multi-question flow.
+ */
 export function buildUserInputCard(
   session: SessionRecord,
   requestId: string,
   questions: UserInputQuestion[],
 ): Card {
-  const runtime = runtimeDisplayName(session.runtime);
-  const questionElements = questions.flatMap((question, questionIndex) => {
-    const options = question.options
-      .map(
-        (option, optionIndex) =>
-          `${optionIndex + 1}. **${truncate(option.label, 80)}**${
-            option.description ? ` — ${truncate(option.description, 180)}` : ""
-          }${option.preview ? `\n   > 预览：${truncate(option.preview.replace(/\s+/gu, " "), 260)}` : ""}`,
-      )
-      .join("\n");
-    const behaviorNotes = [
-      question.multiple ? "可多选" : undefined,
-      question.custom === false ? "仅限所列选项" : "可填写自定义答案",
-    ].filter(Boolean).join(" · ");
-    return [
-      {
-        tag: "div",
-        text: {
-          tag: "lark_md",
-          content: `**${questionIndex + 1}. ${truncate(question.header, 80)}**\n${truncate(question.question, 600)}\n_${behaviorNotes}_${question.isSecret ? "\n\n_此答案不会在处理结果卡片中回显。_" : ""}${options ? `\n\n${options}` : ""}`,
-        },
-      },
-      ...(questionIndex < questions.length - 1 ? [{ tag: "hr" }] : []),
-    ];
-  });
+  return buildUserInputCards(session, requestId, questions)[0]!;
+}
 
-  const actions: Record<string, unknown>[] = [];
-  if (
-    questions.length === 1 &&
-    !questions[0]!.multiple &&
-    questions[0]!.options.length > 0 &&
-    questions[0]!.options.length <= 3
-  ) {
-    for (const option of questions[0]!.options) {
-      actions.push({
+export function buildUserInputQuestionCard(
+  session: SessionRecord,
+  requestId: string,
+  question: UserInputQuestion,
+  questionIndex: number,
+  questionCount: number,
+  state: UserInputCardState = {},
+): Card {
+  const runtime = runtimeDisplayName(session.runtime);
+  const selected = [...(state.selectedAnswers ?? [])];
+  const answered = state.answered === true;
+  const behaviorNotes = [
+    question.multiple ? "可多选" : "单选",
+    question.custom === false ? "仅限所列选项" : "可填写自定义答案",
+  ].join(" · ");
+  const options = question.options
+    .map(
+      (option, optionIndex) =>
+        `${optionIndex + 1}. **${truncate(option.label, 80)}**${
+          option.description ? ` — ${truncate(option.description, 180)}` : ""
+        }${option.preview ? `\n   > 预览：${truncate(option.preview.replace(/\s+/gu, " "), 260)}` : ""}`,
+    )
+    .join("\n");
+  const answerText = question.isSecret
+    ? "已提供（已隐藏）"
+    : selected.length > 0
+      ? truncate(selected.join("、"), 500)
+      : "尚未选择";
+  const elements: Record<string, unknown>[] = [
+    {
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: `**会话：** ${sessionLabel(session)}\n**目录：** ${session.cwd}`,
+      },
+    },
+    { tag: "hr" },
+    {
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: `**${questionIndex + 1}/${questionCount}. ${truncate(question.header, 80)}**\n${truncate(question.question, 800)}\n_${behaviorNotes}_${question.isSecret ? "\n\n_此答案不会在处理结果卡片中回显。_" : ""}${options ? `\n\n${options}` : ""}`,
+      },
+    },
+  ];
+
+  if (answered) {
+    elements.push({
+      tag: "note",
+      elements: [{
+        tag: "plain_text",
+        content: state.remainingQuestions && state.remainingQuestions > 0
+          ? `已记录：${answerText}；还剩 ${state.remainingQuestions} 个问题。`
+          : `已记录：${answerText}。`,
+      }],
+    });
+  } else {
+    const actions: Record<string, unknown>[] = question.options.map((option, optionIndex) => {
+      const isSelected = selected.includes(option.label);
+      return {
         tag: "button",
-        ...(actions.length === 0 ? { type: "primary" } : {}),
-        text: { tag: "plain_text", content: truncate(option.label, 40) },
+        ...(question.multiple
+          ? isSelected
+            ? { type: "primary" }
+            : {}
+          : optionIndex === 0
+            ? { type: "primary" }
+            : {}),
+        text: {
+          tag: "plain_text",
+          content: question.multiple && isSelected
+            ? `✓ ${truncate(option.label, 36)}`
+            : truncate(option.label, 40),
+        },
         value: {
-          action: "input_answer",
+          action: question.multiple ? "input_toggle" : "input_answer",
           requestId,
           sessionId: session.sessionId,
-          questionId: questions[0]!.id,
+          questionId: question.id,
           answer: option.label,
+        },
+      };
+    });
+    if (question.multiple) {
+      actions.push({
+        tag: "button",
+        type: "primary",
+        text: { tag: "plain_text", content: "提交选择" },
+        value: {
+          action: "input_submit",
+          requestId,
+          sessionId: session.sessionId,
+          questionId: question.id,
         },
       });
     }
-  }
-  actions.push({
-    tag: "button",
-    text: { tag: "plain_text", content: "转回本机回答" },
-    value: {
-      action: "input_local",
-      requestId,
-      sessionId: session.sessionId,
-    },
-  });
+    actions.push({
+      tag: "button",
+      text: { tag: "plain_text", content: "转回本机回答" },
+      value: {
+        action: "input_local",
+        requestId,
+        sessionId: session.sessionId,
+      },
+    });
 
-  const replyHint = inputReplyHint(questions);
+    if (question.options.length === 0) {
+      elements.push({
+        tag: "note",
+        elements: [{
+          tag: "plain_text",
+          content: `请引用本卡片回复文字${question.custom === false ? "（当前问题没有可用选项）" : "，或转回本机回答"}。`,
+        }],
+      });
+    } else if (question.multiple) {
+      elements.push({
+        tag: "note",
+        elements: [{
+          tag: "plain_text",
+          content: selected.length > 0
+            ? `已选 ${selected.length} 项；继续点击可切换选择，完成后点击“提交选择”。`
+            : "点击选项进行多选，完成后点击“提交选择”。",
+        }],
+      });
+    } else {
+      elements.push({
+        tag: "note",
+        elements: [{
+          tag: "plain_text",
+          content: question.custom === false
+            ? "点击一个选项即可提交；也可以引用本卡片重新选择。"
+            : "点击一个选项即可提交；也可以引用本卡片回复自定义答案。",
+        }],
+      });
+    }
+    for (const row of chunkCardActions(actions)) {
+      elements.push({ tag: "action", actions: row });
+    }
+  }
+
   return {
     config: { wide_screen_mode: true, update_multi: true },
     header: {
-      template: "orange",
-      title: { tag: "plain_text", content: `${runtime} 等待你补充信息` },
+      template: answered ? "green" : "orange",
+      title: {
+        tag: "plain_text",
+        content: answered
+          ? `${runtime} 已记录第 ${questionIndex + 1} 个问题`
+          : `${runtime} 等待你回答（${questionIndex + 1}/${questionCount}）`,
+      },
+    },
+    elements,
+  };
+}
+
+export function buildResolvedUserInputQuestionCard(
+  session: SessionRecord,
+  question: UserInputQuestion,
+  answers: string[] | undefined,
+  resolution: "answered" | "local" | "timeout" | "rejected",
+  questionIndex: number,
+  questionCount: number,
+): Card {
+  const runtime = runtimeDisplayName(session.runtime);
+  const result = resolution === "answered"
+    ? question.isSecret
+      ? "已提供（已隐藏）"
+      : truncate((answers ?? []).join("、") || "（空）", 500)
+    : resolution === "local"
+      ? `已转回电脑端，请在原 ${runtime} 窗口回答。`
+      : resolution === "rejected"
+        ? `已在原 ${runtime} 窗口取消这组问题。`
+        : "飞书回答已超时，已转回电脑端。";
+  return {
+    config: { wide_screen_mode: true, update_multi: true },
+    header: {
+      template: resolution === "answered" ? "green" : "grey",
+      title: {
+        tag: "plain_text",
+        content: `${runtime} 补充信息${resolution === "answered" ? "已提交" : "已处理"}（${questionIndex + 1}/${questionCount}）`,
+      },
     },
     elements: [
       {
         tag: "div",
         text: {
           tag: "lark_md",
-          content: `**会话：** ${sessionLabel(session)}\n**目录：** ${session.cwd}`,
+          content: `**会话：** ${sessionLabel(session)}\n**${truncate(question.header, 80)}**\n${truncate(question.question, 800)}\n\n**结果：** ${result}`,
         },
       },
-      { tag: "hr" },
-      ...questionElements,
-      {
-        tag: "note",
-        elements: [{ tag: "plain_text", content: replyHint }],
-      },
-      { tag: "action", actions },
     ],
   };
+}
+
+function chunkCardActions(
+  actions: Record<string, unknown>[],
+): Record<string, unknown>[][] {
+  const rows: Record<string, unknown>[][] = [];
+  for (let index = 0; index < actions.length; index += 3) {
+    rows.push(actions.slice(index, index + 3));
+  }
+  return rows;
 }
 
 export function buildResolvedUserInputCard(

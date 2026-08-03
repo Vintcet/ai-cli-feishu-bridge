@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, realpath, stat } from "node:fs/promises";
+import { appendFile, lstat, mkdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -13,9 +13,10 @@ import {
   buildApprovalCard,
   buildErrorCards,
   buildResolvedApprovalCard,
-  buildResolvedUserInputCard,
+  buildResolvedUserInputQuestionCard,
   buildStopCards,
-  buildUserInputCard,
+  buildUserInputCards,
+  buildUserInputQuestionCard,
   buildUserPromptCards,
   type ActivityCardEvent,
 } from "./cards.js";
@@ -100,9 +101,43 @@ interface ApprovalWaiter {
   resolve: (resolution: ApprovalResolution) => void;
 }
 
+type ApprovalDecisionSource =
+  | "automatic"
+  | "desktop"
+  | "feishu_card"
+  | "feishu_text"
+  | "opencode_runtime"
+  | "timeout"
+  | "session_closed";
+
+interface ApprovalCompletionOptions {
+  source: ApprovalDecisionSource;
+  forwardOpenCode?: boolean;
+}
+
+interface ApprovalNotificationTiming {
+  firstSentAt: number;
+  lastSentAt: number;
+  count: number;
+}
+
 type UserInputResolution =
   | { kind: "answered"; answers: UserInputAnswers }
   | { kind: "local" | "timeout" | "rejected" };
+
+type UserInputAnswerResult =
+  | "submitted"
+  | "recorded"
+  | "failed"
+  | "empty"
+  | "stale";
+
+type UserInputToggleResult = "selected" | "deselected" | "stale";
+
+interface UserInputMessageCard {
+  messageId: string;
+  questionId: string;
+}
 
 interface UserInputWaiter {
   source: "hook" | "opencode";
@@ -110,7 +145,9 @@ interface UserInputWaiter {
   turnId: string;
   cwd: string;
   questions: UserInputQuestion[];
-  messageIds: string[];
+  messageCards: UserInputMessageCard[];
+  answers: UserInputAnswers;
+  selections: UserInputAnswers;
   timer: NodeJS.Timeout;
   resolve?: (resolution: UserInputResolution) => void;
   opencodeRequestId?: string;
@@ -190,6 +227,7 @@ interface ControllerConfig {
   outboundFileMaxBytes: number;
   retryBaseDelayMs?: number;
   transcriptPollIntervalMs?: number;
+  approvalLogPath?: string;
   liveClientProcessIds?: (clients: ClientProcessMetadata[]) => ReadonlySet<number>;
 }
 
@@ -219,6 +257,10 @@ interface SessionAliasResult {
 
 export class BridgeController {
   private readonly approvalWaiters = new Map<string, ApprovalWaiter>();
+  private readonly approvalNotificationTimings = new Map<
+    string,
+    ApprovalNotificationTiming
+  >();
   private readonly inputWaiters = new Map<string, UserInputWaiter>();
   private readonly submittingInputs = new Set<string>();
   private readonly remoteInputLocks = new Set<string>();
@@ -246,6 +288,7 @@ export class BridgeController {
   >();
   private readonly attachmentStore: LocalAttachmentStore;
   private readonly transcriptMonitor: CodexTranscriptMonitor;
+  private approvalLogWrite: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly store: BridgeStore,
@@ -277,6 +320,7 @@ export class BridgeController {
     for (const waiter of this.approvalWaiters.values()) {
       clearTimeout(waiter.timer);
     }
+    this.approvalNotificationTimings.clear();
     for (const waiter of this.inputWaiters.values()) {
       clearTimeout(waiter.timer);
     }
@@ -291,6 +335,7 @@ export class BridgeController {
     }
     this.runtimeRetryTimers.clear();
     this.runtimeRetryCounts.clear();
+    await this.approvalLogWrite;
   }
 
   private async initializeCodexTranscriptMonitors(): Promise<void> {
@@ -656,7 +701,9 @@ export class BridgeController {
       };
     }
 
-    const completed = await this.completeApproval(requestId, resolution);
+    const completed = await this.completeApproval(requestId, resolution, {
+      source: "desktop",
+    });
     if (!completed) {
       const current = this.store.getApproval(requestId);
       return current && current.status !== "pending"
@@ -1061,8 +1108,17 @@ export class BridgeController {
         opencodePermissionId: permission.id,
       };
       await this.store.createApproval(approval);
+      this.logApprovalEvent(
+        "requested",
+        session,
+        approval,
+        { autoApprove: this.store.getSettings().autoApprove },
+        now,
+      );
       const timeoutTimer = setTimeout(() => {
-        void this.completeApproval(approval.requestId, "timeout");
+        void this.completeApproval(approval.requestId, "timeout", {
+          source: "timeout",
+        });
       }, this.config.approvalTimeoutMs);
       timeoutTimer.unref?.();
 
@@ -1105,7 +1161,10 @@ export class BridgeController {
       await this.completeApproval(
         approval.requestId,
         reply.reply === "reject" ? "deny" : "allow",
-        false,
+        {
+          source: "opencode_runtime",
+          forwardOpenCode: false,
+        },
       );
     } finally {
       this.opencodePermissionClaims.delete(claimKey);
@@ -1160,31 +1219,20 @@ export class BridgeController {
         turnId: current?.lastTurnId ?? `opencode-${request.id}`,
         cwd,
         questions,
-        messageIds: [],
+        messageCards: [],
+        answers: {},
+        selections: {},
         timer,
         opencodeRequestId: request.id,
       });
 
-      let sentCount = 0;
-      for (const recipient of recipients) {
-        try {
-          const messageId = await this.feishu.sendCard(
-            recipient.chatId,
-            buildUserInputCard(session, requestId, questions),
-          );
-          sentCount += 1;
-          this.inputWaiters.get(requestId)?.messageIds.push(messageId);
-          await this.addRoute(
-            messageId,
-            request.sessionID,
-            recipient.chatId,
-            "input",
-            requestId,
-          );
-        } catch (error) {
-          console.error("[opencode] Failed to send a question card:", error);
-        }
-      }
+      const sentCount = await this.sendUserInputCards(
+        session,
+        requestId,
+        questions,
+        recipients,
+        "opencode",
+      );
       if (sentCount === 0) {
         await this.completeUserInput(requestId, { kind: "local" });
       }
@@ -1475,10 +1523,19 @@ export class BridgeController {
     };
     await this.watchCodexTranscript(session);
     await this.store.createApproval(approval);
+    this.logApprovalEvent(
+      "requested",
+      session,
+      approval,
+      { autoApprove: this.store.getSettings().autoApprove },
+      now,
+    );
 
     const resultPromise = new Promise<ApprovalResolution>((resolve) => {
       const timer = setTimeout(() => {
-        void this.completeApproval(approval.requestId, "timeout");
+        void this.completeApproval(approval.requestId, "timeout", {
+          source: "timeout",
+        });
       }, this.config.approvalTimeoutMs);
       this.approvalWaiters.set(approval.requestId, { timer, resolve });
     });
@@ -1570,32 +1627,21 @@ export class BridgeController {
         turnId: payload.turn_id,
         cwd: payload.cwd,
         questions: payload.tool_input.questions,
-        messageIds: [],
+        messageCards: [],
+        answers: {},
+        selections: {},
         timer,
         resolve,
       });
     });
 
-    let sentCount = 0;
-    for (const recipient of recipients) {
-      try {
-        const messageId = await this.feishu.sendCard(
-          recipient.chatId,
-          buildUserInputCard(session, requestId, payload.tool_input.questions),
-        );
-        sentCount += 1;
-        this.inputWaiters.get(requestId)?.messageIds.push(messageId);
-        await this.addRoute(
-          messageId,
-          payload.session_id,
-          recipient.chatId,
-          "input",
-          requestId,
-        );
-      } catch (error) {
-        console.error("[input] Failed to send a Feishu question card:", error);
-      }
-    }
+    const sentCount = await this.sendUserInputCards(
+      session,
+      requestId,
+      payload.tool_input.questions,
+      recipients,
+      "input",
+    );
     if (sentCount === 0) {
       await this.completeUserInput(requestId, { kind: "local" });
     }
@@ -2153,23 +2199,41 @@ export class BridgeController {
         await this.respond(messageId, chatId, "这组问题已经处理或失效。");
         return;
       }
-      const answers = parseUserInputAnswers(text, waiter.questions);
+      const questionId = waiter.messageCards.find(
+        (item) => item.messageId === quotedRoute.messageId,
+      )?.questionId;
+      const targetQuestions = questionId
+        ? waiter.questions.filter((question) => question.id === questionId)
+        : waiter.questions;
+      const answers = parseUserInputAnswers(text, targetQuestions);
       if (!answers) {
         await this.respond(
           messageId,
           chatId,
-          inputAnswerUsage(waiter.questions),
+          inputAnswerUsage(targetQuestions),
         );
         return;
       }
-      const completed = await this.answerUserInput(quotedRoute.requestId, answers);
+      const result = questionId
+        ? await this.recordUserInputAnswer(
+            quotedRoute.requestId,
+            questionId,
+            answers[questionId] ?? [],
+          )
+        : (await this.answerUserInput(quotedRoute.requestId, answers))
+          ? "submitted"
+          : "stale";
       const inputSession = this.store.getSession(waiter.sessionId);
       await this.respond(
         messageId,
         chatId,
-        completed
+        result === "submitted"
           ? receivedText(inputSession)
-          : notReceivedText(inputSession, "问题已处理或失效。"),
+          : result === "recorded"
+            ? "已记录这张问题卡片的答案，请继续处理其他问题。"
+            : result === "failed"
+              ? notReceivedText(inputSession, "暂时无法把答案交给助手，请稍后重试。")
+              : notReceivedText(inputSession, "问题已处理或失效。"),
       );
       return;
     }
@@ -2181,6 +2245,7 @@ export class BridgeController {
         const completed = await this.completeApproval(
           quotedRoute.requestId,
           approvalResolution,
+          { source: "feishu_text" },
         );
         await this.respond(
           messageId,
@@ -2339,7 +2404,12 @@ export class BridgeController {
       return { toast: { type: "error", content: "审批参数不完整。" } };
     }
 
-    if (action === "input_answer" || action === "input_local") {
+    if (
+      action === "input_answer" ||
+      action === "input_toggle" ||
+      action === "input_submit" ||
+      action === "input_local"
+    ) {
       const waiter = this.inputWaiters.get(requestId);
       if (
         !waiter ||
@@ -2358,22 +2428,70 @@ export class BridgeController {
         };
       }
       const questionId = actionValue?.questionId;
-      const answer = actionValue?.answer;
-      if (typeof questionId !== "string" || typeof answer !== "string") {
-        return { toast: { type: "error", content: "答案参数不完整。" } };
+      if (typeof questionId !== "string") {
+        return { toast: { type: "error", content: "问题参数不完整。" } };
       }
       const question = waiter.questions.find((item) => item.id === questionId);
-      if (!question || !question.options.some((option) => option.label === answer)) {
+      if (!question) {
+        return { toast: { type: "error", content: "这个问题已经失效。" } };
+      }
+      if (action === "input_toggle") {
+        const answer = actionValue?.answer;
+        if (!question.multiple || typeof answer !== "string") {
+          return { toast: { type: "error", content: "多选答案参数不完整。" } };
+        }
+        if (!question.options.some((option) => option.label === answer)) {
+          return { toast: { type: "error", content: "这个答案不属于当前问题。" } };
+        }
+        const result = await this.toggleUserInputAnswer(requestId, questionId, answer);
+        return {
+          toast: {
+            type: result === "stale" ? "warning" : "success",
+            content: result === "stale"
+              ? "这道问题已经处理或失效。"
+              : result === "selected"
+                ? `已选择“${truncate(answer, 80)}”，可继续选择或提交。`
+                : `已取消“${truncate(answer, 80)}”的选择。`,
+          },
+        };
+      }
+      if (action === "input_submit") {
+        if (!question.multiple) {
+          return { toast: { type: "error", content: "这不是多选问题。" } };
+        }
+        const result = await this.submitUserInputQuestion(requestId, questionId);
+        const runtime = runtimeDisplayName(this.store.getSession(waiter.sessionId)?.runtime);
+        return {
+          toast: {
+            type: result === "failed" || result === "stale" ? "warning" : result === "empty" ? "error" : "success",
+            content: result === "submitted"
+              ? `已把答案交给 ${runtime}。`
+              : result === "recorded"
+                ? "已记录这道问题，请继续处理其他问题。"
+                : result === "empty"
+                  ? "请至少选择一个选项。"
+                  : result === "failed"
+                    ? "暂时无法提交，请稍后重试。"
+                    : "这道问题已经处理或失效。",
+          },
+        };
+      }
+      const answer = actionValue?.answer;
+      if (typeof answer !== "string" || !question.options.some((option) => option.label === answer)) {
         return { toast: { type: "error", content: "这个答案不属于当前问题。" } };
       }
-      const completed = await this.answerUserInput(requestId, {
-        [questionId]: [answer],
-      });
+      const result = await this.recordUserInputAnswer(requestId, questionId, [answer]);
       const runtime = runtimeDisplayName(this.store.getSession(waiter.sessionId)?.runtime);
       return {
         toast: {
-          type: completed ? "success" : "warning",
-          content: completed ? `已把答案交给 ${runtime}。` : "这组问题已经处理或失效。",
+          type: result === "submitted" || result === "recorded" ? "success" : "warning",
+          content: result === "submitted"
+            ? `已把答案交给 ${runtime}。`
+            : result === "recorded"
+              ? "已记录这道问题，请继续处理其他问题。"
+              : result === "failed"
+                ? "暂时无法提交，请稍后重试。"
+                : "这道问题已经处理或失效。",
         },
       };
     }
@@ -2392,7 +2510,9 @@ export class BridgeController {
       return { toast: { type: "error", content: "审批请求不存在或已失效。" } };
     }
 
-    const completed = await this.completeApproval(requestId, resolution);
+    const completed = await this.completeApproval(requestId, resolution, {
+      source: "feishu_card",
+    });
     return {
       toast: {
         type: completed ? "success" : "warning",
@@ -3136,6 +3256,43 @@ export class BridgeController {
     );
   }
 
+  private async sendUserInputCards(
+    session: SessionRecord,
+    requestId: string,
+    questions: UserInputQuestion[],
+    recipients: Array<{ chatId: string }>,
+    logLabel: string,
+  ): Promise<number> {
+    const cards = buildUserInputCards(session, requestId, questions);
+    let sentCount = 0;
+    for (const recipient of recipients) {
+      for (const [questionIndex, card] of cards.entries()) {
+        const question = questions[questionIndex];
+        if (!question) {
+          continue;
+        }
+        try {
+          const messageId = await this.feishu.sendCard(recipient.chatId, card);
+          sentCount += 1;
+          this.inputWaiters.get(requestId)?.messageCards.push({
+            messageId,
+            questionId: question.id,
+          });
+          await this.addRoute(
+            messageId,
+            session.sessionId,
+            recipient.chatId,
+            "input",
+            requestId,
+          );
+        } catch (error) {
+          console.error(`[${logLabel}] Failed to send a Feishu question card:`, error);
+        }
+      }
+    }
+    return sentCount;
+  }
+
   private findOpenCodeInput(
     sessionId: string,
     opencodeRequestId: string,
@@ -3242,6 +3399,119 @@ export class BridgeController {
     }
   }
 
+  private async toggleUserInputAnswer(
+    requestId: string,
+    questionId: string,
+    answer: string,
+  ): Promise<UserInputToggleResult> {
+    const waiter = this.inputWaiters.get(requestId);
+    const question = waiter?.questions.find((item) => item.id === questionId);
+    if (!waiter || !question || waiter.answers[questionId]) {
+      return "stale";
+    }
+    const current = waiter.selections[questionId] ?? [];
+    const selected = current.includes(answer);
+    const next = selected
+      ? current.filter((item) => item !== answer)
+      : [...current, answer];
+    if (next.length > 0) {
+      waiter.selections[questionId] = next;
+    } else {
+      delete waiter.selections[questionId];
+    }
+    await this.patchUserInputQuestionCards(requestId, questionId, {
+      selectedAnswers: next,
+    });
+    return selected ? "deselected" : "selected";
+  }
+
+  private async submitUserInputQuestion(
+    requestId: string,
+    questionId: string,
+  ): Promise<UserInputAnswerResult> {
+    const waiter = this.inputWaiters.get(requestId);
+    const selected = waiter?.selections[questionId] ?? [];
+    if (selected.length === 0) {
+      return waiter ? "empty" : "stale";
+    }
+    const result = await this.recordUserInputAnswer(requestId, questionId, selected);
+    if (result === "recorded" || result === "submitted") {
+      const current = this.inputWaiters.get(requestId);
+      if (current) {
+        delete current.selections[questionId];
+      }
+    }
+    return result;
+  }
+
+  private async recordUserInputAnswer(
+    requestId: string,
+    questionId: string,
+    answers: string[],
+  ): Promise<UserInputAnswerResult> {
+    const waiter = this.inputWaiters.get(requestId);
+    const question = waiter?.questions.find((item) => item.id === questionId);
+    if (!waiter || !question || waiter.answers[questionId]) {
+      return "stale";
+    }
+    if (answers.length === 0) {
+      return "empty";
+    }
+
+    waiter.answers[questionId] = [...answers];
+    const allAnswered = waiter.questions.every((item) => waiter.answers[item.id]);
+    if (!allAnswered) {
+      const remainingQuestions = waiter.questions.filter(
+        (item) => !waiter.answers[item.id],
+      ).length;
+      await this.patchUserInputQuestionCards(requestId, questionId, {
+        selectedAnswers: answers,
+        answered: true,
+        remainingQuestions,
+      });
+      return "recorded";
+    }
+
+    const completed = await this.answerUserInput(requestId, waiter.answers);
+    if (completed) {
+      return "submitted";
+    }
+    delete waiter.answers[questionId];
+    return "failed";
+  }
+
+  private async patchUserInputQuestionCards(
+    requestId: string,
+    questionId: string,
+    state: {
+      selectedAnswers?: readonly string[];
+      answered?: boolean;
+      remainingQuestions?: number;
+    },
+  ): Promise<void> {
+    const waiter = this.inputWaiters.get(requestId);
+    const questionIndex = waiter?.questions.findIndex((item) => item.id === questionId) ?? -1;
+    const question = questionIndex >= 0 ? waiter?.questions[questionIndex] : undefined;
+    const session = waiter ? this.store.getSession(waiter.sessionId) : undefined;
+    if (!waiter || !question || !session) {
+      return;
+    }
+    const card = buildUserInputQuestionCard(
+      session,
+      requestId,
+      question,
+      questionIndex,
+      waiter.questions.length,
+      state,
+    );
+    const targets = waiter.messageCards
+      .filter((item) => item.questionId === questionId)
+      .map((item) => item.messageId);
+    await Promise.allSettled(
+      targets.map((messageId) => this.feishu.patchCard(messageId, card)),
+    );
+  }
+
   private async completeUserInput(
     requestId: string,
     resolution: UserInputResolution,
@@ -3269,14 +3539,30 @@ export class BridgeController {
       status,
     });
     waiter.resolve?.(resolution);
-    const card = buildResolvedUserInputCard(
-      session,
-      waiter.questions,
-      resolution.kind === "answered" ? resolution.answers : undefined,
-      resolution.kind,
-    );
+    const questionCards = waiter.messageCards.map((message) => {
+      const questionIndex = waiter.questions.findIndex(
+        (question) => question.id === message.questionId,
+      );
+      const question = questionIndex >= 0 ? waiter.questions[questionIndex] : undefined;
+      if (!question) {
+        return undefined;
+      }
+      return {
+        messageId: message.messageId,
+        card: buildResolvedUserInputQuestionCard(
+          session,
+          question,
+          resolution.kind === "answered"
+            ? resolution.answers[question.id]
+            : undefined,
+          resolution.kind,
+          questionIndex,
+          waiter.questions.length,
+        ),
+      };
+    }).filter((item): item is { messageId: string; card: Record<string, unknown> } => Boolean(item));
     void Promise.allSettled(
-      waiter.messageIds.map((messageId) => this.feishu.patchCard(messageId, card)),
+      questionCards.map((item) => this.feishu.patchCard(item.messageId, item.card)),
     );
     console.log(`[input] ${resolution.kind} for session #${session.shortId}.`);
     return true;
@@ -3300,7 +3586,9 @@ export class BridgeController {
       .filter((approval) => approval.sessionId === sessionId && approval.status === "pending")
       .map((approval) => approval.requestId);
     for (const requestId of requestIds) {
-      await this.completeApproval(requestId, "local");
+      await this.completeApproval(requestId, "local", {
+        source: "session_closed",
+      });
     }
   }
 
@@ -3622,9 +3910,18 @@ export class BridgeController {
     if (!settings.autoApprove) {
       return false;
     }
-    const completed = await this.completeApproval(approval.requestId, "allow");
+    this.logApprovalEvent("automatic_attempt", session, approval, {
+      path: logPrefix,
+      elapsedSinceRequestMs: elapsedMs(approval.createdAt),
+    });
+    const completed = await this.completeApproval(approval.requestId, "allow", {
+      source: "automatic",
+    });
     if (completed) {
-      console.log(`[${logPrefix}] Auto-approved for session #${session.shortId}.`);
+      this.logApprovalEvent("automatic_completed", session, approval, {
+        path: logPrefix,
+        elapsedSinceRequestMs: elapsedMs(approval.createdAt),
+      });
       const resolved = this.store.getApproval(approval.requestId);
       if (
         settings.notifyAutoApprovals &&
@@ -3638,6 +3935,10 @@ export class BridgeController {
     if (this.store.getApproval(approval.requestId)?.status !== "pending") {
       return true;
     }
+    this.logApprovalEvent("automatic_failed", session, approval, {
+      path: logPrefix,
+      elapsedSinceRequestMs: elapsedMs(approval.createdAt),
+    });
     console.warn(
       `[${logPrefix}] Automatic approval failed for session #${session.shortId}; falling back to manual approval.`,
     );
@@ -3663,17 +3964,64 @@ export class BridgeController {
     try {
       recipients = await this.notificationRecipients(session);
     } catch (error) {
+      this.logApprovalEvent("notification_recipients_failed", session, approval, {
+        path: logPrefix,
+        state,
+        error: errorMessage(error),
+      });
       console.error(`[${logPrefix}] Failed to resolve approval recipients:`, error);
       return 0;
     }
+    this.logApprovalEvent("notification_dispatch", session, approval, {
+      path: logPrefix,
+      state,
+      recipientCount: recipients.length,
+      elapsedSinceRequestMs: elapsedMs(approval.createdAt),
+    });
+    if (recipients.length === 0) {
+      this.logApprovalEvent("notification_skipped", session, approval, {
+        path: logPrefix,
+        state,
+        reason: "no_recipients",
+      });
+    }
     let sentCount = 0;
     for (const recipient of recipients) {
+      let messageId: string | undefined;
       try {
         const card = state === "pending"
           ? buildApprovalCard(session, approval)
           : buildResolvedApprovalCard(session, approval, "allow");
-        const messageId = await this.feishu.sendCard(recipient.chatId, card);
+        messageId = await this.feishu.sendCard(recipient.chatId, card);
+        const sentAt = Date.now();
         sentCount += 1;
+        if (state === "pending") {
+          const timing = this.approvalNotificationTimings.get(approval.requestId);
+          this.approvalNotificationTimings.set(
+            approval.requestId,
+            timing
+              ? {
+                  firstSentAt: timing.firstSentAt,
+                  lastSentAt: sentAt,
+                  count: timing.count + 1,
+                }
+              : { firstSentAt: sentAt, lastSentAt: sentAt, count: 1 },
+          );
+        }
+        // Record the external send before local persistence or routing can fail.
+        this.logApprovalEvent(
+          "notification_sent",
+          session,
+          approval,
+          {
+            path: logPrefix,
+            state,
+            chatId: recipient.chatId,
+            messageId,
+            elapsedSinceRequestMs: elapsedMs(approval.createdAt, sentAt),
+          },
+          sentAt,
+        );
         await this.store.addApprovalMessage(approval.requestId, messageId);
         await this.addRoute(
           messageId,
@@ -3694,7 +4042,23 @@ export class BridgeController {
           );
         }
       } catch (error) {
-        console.error(`[${logPrefix}] Failed to send an approval card:`, error);
+        this.logApprovalEvent(
+          messageId ? "notification_followup_failed" : "notification_failed",
+          session,
+          approval,
+          {
+            path: logPrefix,
+            state,
+            chatId: recipient.chatId,
+            ...(messageId ? { messageId } : {}),
+            error: errorMessage(error),
+            elapsedSinceRequestMs: elapsedMs(approval.createdAt),
+          },
+        );
+        console.error(
+          `[${logPrefix}] ${messageId ? "Failed to finish approval notification handling" : "Failed to send an approval card"}:`,
+          error,
+        );
       }
     }
     return sentCount;
@@ -3703,20 +4067,42 @@ export class BridgeController {
   private async completeApproval(
     requestId: string,
     resolution: ApprovalResolution,
-    forwardOpenCode = true,
+    options: ApprovalCompletionOptions,
   ): Promise<boolean> {
     const pending = this.store.getApproval(requestId);
     if (!pending || pending.status !== "pending") {
       return false;
     }
+    const sessionBeforeResolution = this.store.getSession(pending.sessionId);
+    if (sessionBeforeResolution) {
+      this.logApprovalEvent("decision_received", sessionBeforeResolution, pending, {
+        resolution,
+        decisionSource: options.source,
+        elapsedSinceRequestMs: elapsedMs(pending.createdAt),
+      });
+    }
     let forwardedToOpenCode = false;
     if (
-      forwardOpenCode &&
+      options.forwardOpenCode !== false &&
       pending.opencodePermissionId &&
       (resolution === "allow" || resolution === "deny")
     ) {
       try {
         if (!this.opencode) {
+          if (sessionBeforeResolution) {
+            this.logApprovalEvent(
+              "decision_forward_failed",
+              sessionBeforeResolution,
+              pending,
+              {
+                resolution,
+                decisionSource: options.source,
+                target: "opencode",
+                error: "OpenCode manager unavailable",
+                elapsedSinceRequestMs: elapsedMs(pending.createdAt),
+              },
+            );
+          }
           return false;
         }
         await this.opencode.replyPermission(
@@ -3726,6 +4112,20 @@ export class BridgeController {
         );
         forwardedToOpenCode = true;
       } catch (error) {
+        if (sessionBeforeResolution) {
+          this.logApprovalEvent(
+            "decision_forward_failed",
+            sessionBeforeResolution,
+            pending,
+            {
+              resolution,
+              decisionSource: options.source,
+              target: "opencode",
+              error: errorMessage(error),
+              elapsedSinceRequestMs: elapsedMs(pending.createdAt),
+            },
+          );
+        }
         console.error("[approval] Failed to forward decision to opencode:", error);
         return false;
       }
@@ -3766,10 +4166,61 @@ export class BridgeController {
     void Promise.allSettled(
       approval.messageIds.map((messageId) => this.feishu.patchCard(messageId, card)),
     );
-    console.log(
-      `[approval] ${resolution} for session #${session.shortId}.`,
-    );
+    const resolvedAt = Date.parse(approval.resolvedAt ?? "");
+    const completedAt = Number.isFinite(resolvedAt) ? resolvedAt : Date.now();
+    const notificationTiming = this.approvalNotificationTimings.get(requestId);
+    const notificationSentBeforeResolution = notificationTiming
+      ? notificationTiming.firstSentAt <= completedAt
+      : null;
+    this.logApprovalEvent("resolved", session, approval, {
+      resolution,
+      decisionSource: options.source,
+      elapsedSinceRequestMs: elapsedMs(approval.createdAt, completedAt),
+      notificationFirstSentAt: notificationTiming
+        ? new Date(notificationTiming.firstSentAt).toISOString()
+        : null,
+      notificationLastSentAt: notificationTiming
+        ? new Date(notificationTiming.lastSentAt).toISOString()
+        : null,
+      notificationSentBeforeResolution,
+      elapsedSinceNotificationMs:
+        notificationTiming && notificationSentBeforeResolution
+          ? completedAt - notificationTiming.firstSentAt
+        : null,
+      notificationCount: notificationTiming?.count ?? approval.messageIds.length,
+      forwardedToOpenCode,
+    }, completedAt);
+    this.approvalNotificationTimings.delete(requestId);
     return true;
+  }
+
+  private logApprovalEvent(
+    event: string,
+    session: SessionRecord,
+    approval: ApprovalRecord,
+    details: Record<string, unknown> = {},
+    timestamp = Date.now(),
+  ): void {
+    const line = `[approval] ${JSON.stringify({
+      event,
+      at: new Date(timestamp).toISOString(),
+      requestId: approval.requestId,
+      runtime: session.runtime ?? "codex",
+      sessionId: approval.sessionId,
+      sessionShortId: session.shortId,
+      tool: truncate(approval.toolName.replace(/\s+/gu, " "), 120),
+      ...details,
+    })}`;
+    console.log(line);
+    const approvalLogPath = this.config.approvalLogPath;
+    if (!approvalLogPath) {
+      return;
+    }
+    this.approvalLogWrite = this.approvalLogWrite
+      .then(() => appendFile(approvalLogPath, `${line}\n`, "utf8"))
+      .catch((error) => {
+        console.error("[approval] Failed to persist approval audit log:", error);
+      });
   }
 
   private listApprovalViews(): Array<Record<string, unknown>> {
@@ -4605,6 +5056,15 @@ function sessionGroupActivityTime(session: SessionRecord): number {
 function parseTimestamp(value: string | undefined): number {
   const parsed = value ? Date.parse(value) : Number.NaN;
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function elapsedMs(startAt: string | undefined, endAt = Date.now()): number | null {
+  const start = startAt ? Date.parse(startAt) : Number.NaN;
+  return Number.isFinite(start) ? Math.max(0, endAt - start) : null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function normalizeRuntimeCwd(cwd: string): string {

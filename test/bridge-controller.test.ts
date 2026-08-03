@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -227,6 +227,24 @@ function controllerConfig(directory: string) {
           .map((client) => client.processId),
       ),
   };
+}
+
+function approvalLogEvents(
+  lines: readonly string[],
+  requestId: string,
+): Array<Record<string, unknown>> {
+  return lines.flatMap((line) => {
+    const match = line.match(/^\[approval\] (\{.*\})$/u);
+    if (!match) {
+      return [];
+    }
+    try {
+      const event = JSON.parse(match[1]) as Record<string, unknown>;
+      return event.requestId === requestId ? [event] : [];
+    } catch {
+      return [];
+    }
+  });
 }
 
 function messageEvent(
@@ -1144,8 +1162,13 @@ test("local and Feishu approval resolutions share one atomic result", async () =
   }
 });
 
-test("an approval completed in Feishu is visible as resolved to the desktop", async () => {
+test("an approval completed in Feishu is visible to the desktop and logs its source", async (t) => {
+  const approvalLogs: string[] = [];
+  t.mock.method(console, "log", (...args: unknown[]) => {
+    approvalLogs.push(args.map((value) => String(value)).join(" "));
+  });
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-approval-sync-"));
+  const approvalLogPath = path.join(directory, "approval-events.log");
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -1175,7 +1198,7 @@ test("an approval completed in Feishu is visible as resolved to the desktop", as
       new FakeCodex() as unknown as CodexRunner,
       new ManagedTerminalRouter(),
       undefined,
-      controllerConfig(directory),
+      { ...controllerConfig(directory), approvalLogPath },
     );
 
     const hookResultPromise = controller.handlePermissionHook({
@@ -1196,6 +1219,13 @@ test("an approval completed in Feishu is visible as resolved to the desktop", as
       approvals: Array<{ requestId: string }>;
     };
     const requestId = health.approvals[0]!.requestId;
+    while (
+      !approvalLogEvents(approvalLogs, requestId).some(
+        (event) => event.event === "notification_sent",
+      )
+    ) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
 
     const actionResult = await controller.handleCardAction({
       operator: { open_id: "owner" },
@@ -1211,6 +1241,17 @@ test("an approval completed in Feishu is visible as resolved to the desktop", as
     const hookResult = await hookResultPromise;
     assert.match(JSON.stringify(hookResult), /"behavior":"deny"/);
 
+    const events = approvalLogEvents(approvalLogs, requestId);
+    assert.ok(events.some((event) => event.event === "requested"));
+    assert.ok(events.some((event) => event.event === "notification_sent"));
+    const resolvedEvent = events.find((event) => event.event === "resolved");
+    assert.equal(resolvedEvent?.decisionSource, "feishu_card");
+    assert.equal(resolvedEvent?.notificationSentBeforeResolution, true);
+    assert.equal(typeof resolvedEvent?.notificationFirstSentAt, "string");
+    assert.equal(typeof resolvedEvent?.elapsedSinceNotificationMs, "number");
+    assert.ok((resolvedEvent?.elapsedSinceNotificationMs as number) >= 0);
+    assert.equal(resolvedEvent?.notificationCount, 1);
+
     const desktopResult = await controller.handleLocalApproval({
       requestId,
       resolution: "allow",
@@ -1222,12 +1263,21 @@ test("an approval completed in Feishu is visible as resolved to the desktop", as
     assert.equal(desktopResult.ok, true);
     assert.equal(desktopResult.alreadyResolved, true);
     assert.equal(desktopResult.resolution, "deny");
+    await controller.close();
+    const persistedLog = await readFile(approvalLogPath, "utf8");
+    assert.match(persistedLog, new RegExp(requestId, "u"));
+    assert.match(persistedLog, /"event":"notification_sent"/u);
+    assert.match(persistedLog, /"decisionSource":"feishu_card"/u);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-test("automatic Codex approval is silent by default", async () => {
+test("automatic Codex approval is silent by default and logs an automatic decision", async (t) => {
+  const approvalLogs: string[] = [];
+  t.mock.method(console, "log", (...args: unknown[]) => {
+    approvalLogs.push(args.map((value) => String(value)).join(" "));
+  });
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-auto-approval-"));
   try {
     const store = new BridgeStore(directory);
@@ -1270,6 +1320,14 @@ test("automatic Codex approval is silent by default", async () => {
     assert.equal(health.approvals[0]?.resolution, "allow");
     assert.equal(feishu.cards.length, 0);
     assert.equal(feishu.patchedCards.length, 0);
+    const requestId = store.listApprovals()[0]!.requestId;
+    const events = approvalLogEvents(approvalLogs, requestId);
+    assert.ok(events.some((event) => event.event === "automatic_attempt"));
+    const resolvedEvent = events.find((event) => event.event === "resolved");
+    assert.equal(resolvedEvent?.decisionSource, "automatic");
+    assert.equal(resolvedEvent?.notificationSentBeforeResolution, null);
+    assert.equal(resolvedEvent?.elapsedSinceNotificationMs, null);
+    assert.ok(events.some((event) => event.event === "automatic_completed"));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1423,6 +1481,187 @@ test("request_user_input can be answered by replying to the Feishu card", async 
     assert.match(JSON.stringify(hookResult), /permissionDecision/);
     assert.equal(controller.health().pendingInputs, 0);
     assert.ok(feishu.patchedCards.some((item) => item.messageId === questionCardId));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("multiple request_user_input questions use separate clickable cards", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-input-cards-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const sessionId = "codex-session-separate-input-cards";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "running",
+      runtime: "codex",
+      clientProcessId: process.pid,
+    });
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as WorkBuddyRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+
+    const hookResultPromise = controller.handleRequestUserInputHook({
+      hook_event_name: "PreToolUse",
+      session_id: sessionId,
+      turn_id: "turn-separate-input-cards",
+      cwd: directory,
+      model: "gpt-5",
+      tool_name: "request_user_input",
+      tool_input: {
+        questions: [
+          {
+            header: "发布方式",
+            id: "publish",
+            question: "如何发布？",
+            options: [
+              { label: "仅构建", description: "只生成文件" },
+              { label: "构建并发布", description: "生成并发布" },
+            ],
+            custom: false,
+          },
+          {
+            header: "通知范围",
+            id: "notify",
+            question: "通知谁？",
+            options: [
+              { label: "团队", description: "通知团队" },
+              { label: "负责人", description: "只通知负责人" },
+            ],
+            custom: false,
+          },
+        ],
+      },
+    });
+    while (feishu.cards.length < 2) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.equal(feishu.cards.length, 2);
+    assert.doesNotMatch(JSON.stringify(feishu.cards[0]?.card), /通知范围/);
+    assert.doesNotMatch(JSON.stringify(feishu.cards[1]?.card), /发布方式/);
+
+    const firstAction = findCardAction(feishu.cards[0]!.card, "input_answer", "构建并发布");
+    const secondAction = findCardAction(feishu.cards[1]!.card, "input_answer", "负责人");
+    assert.ok(firstAction);
+    assert.ok(secondAction);
+    const firstResult = await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: { value: JSON.stringify(firstAction) },
+    });
+    assert.equal(firstResult.toast.type, "success");
+    assert.equal(controller.health().pendingInputs, 1);
+    assert.match(JSON.stringify(feishu.patchedCards.at(-1)?.card), /已记录/);
+
+    const secondResult = await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: { value: JSON.stringify(secondAction) },
+    });
+    assert.equal(secondResult.toast.type, "success");
+    const hookResult = await hookResultPromise;
+    assert.match(JSON.stringify(hookResult), /构建并发布/);
+    assert.match(JSON.stringify(hookResult), /负责人/);
+    assert.equal(controller.health().pendingInputs, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("multi-choice request_user_input cards toggle and submit selected options", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-input-multi-cards-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const sessionId = "codex-session-multi-input-cards";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "running",
+      runtime: "codex",
+      clientProcessId: process.pid,
+    });
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as WorkBuddyRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+    const hookResultPromise = controller.handleRequestUserInputHook({
+      hook_event_name: "PreToolUse",
+      session_id: sessionId,
+      turn_id: "turn-multi-input-cards",
+      cwd: directory,
+      model: "gpt-5",
+      tool_name: "request_user_input",
+      tool_input: {
+        questions: [{
+          header: "范围",
+          id: "scope",
+          question: "选择范围",
+          options: [
+            { label: "代码", description: "源代码" },
+            { label: "测试", description: "自动化测试" },
+            { label: "文档", description: "项目说明" },
+          ],
+          multiple: true,
+          custom: false,
+        }],
+      },
+    });
+    while (feishu.cards.length < 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const card = feishu.cards[0]!;
+    const codeAction = findCardAction(card.card, "input_toggle", "代码");
+    const docsAction = findCardAction(card.card, "input_toggle", "文档");
+    const submitAction = findCardAction(card.card, "input_submit");
+    assert.ok(codeAction);
+    assert.ok(docsAction);
+    assert.ok(submitAction);
+    await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: { value: JSON.stringify(codeAction) },
+    });
+    await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: { value: JSON.stringify(docsAction) },
+    });
+    assert.match(JSON.stringify(feishu.patchedCards.at(-1)?.card), /已选 2 项/);
+    const submitted = await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: { value: JSON.stringify(submitAction) },
+    });
+    assert.equal(submitted.toast.type, "success");
+    const hookResult = await hookResultPromise;
+    assert.match(JSON.stringify(hookResult), /代码/);
+    assert.match(JSON.stringify(hookResult), /文档/);
+    assert.equal(controller.health().pendingInputs, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -2466,3 +2705,32 @@ test("external sessions follow their real process and untracked records expire q
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+function findCardAction(
+  value: unknown,
+  action: string,
+  answer?: string,
+): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findCardAction(item, action, answer);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    record.action === action &&
+    (answer === undefined || record.answer === answer)
+  ) {
+    return record;
+  }
+  for (const child of Object.values(record)) {
+    const found = findCardAction(child, action, answer);
+    if (found) return found;
+  }
+  return undefined;
+}
