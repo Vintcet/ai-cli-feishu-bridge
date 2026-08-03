@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
-当前版本：`0.17.2`
+当前版本：`0.17.3`
 
 这是一个运行在 Windows 本机的非官方桥接器，把 Codex CLI、Claude Code 和 OpenCode 会话连接到你自己的飞书企业自建应用。每个助手会话可以绑定一个独立私有群，让你在电脑外接收完成或错误通知、处理权限审批和补充问题，并继续向原会话发送消息。
 
@@ -54,7 +54,9 @@
 
 ## 获取程序与首次构建
 
-目前 [GitHub Releases](https://github.com/Vintcet/codex-feishu-bridge/releases) 尚未提供可直接下载的安装包，Git 仓库也不跟踪生成的 EXE。第一次使用需要从源码构建；以后如果 Releases 提供 Windows 压缩包，应完整解压整个目录，不要只拿主程序一个文件。
+Windows 用户可以从 [GitHub Releases](https://github.com/Vintcet/codex-feishu-bridge/releases) 下载 `codex-feishu-bridge-v0.17.3-windows-x64.zip`。压缩包已包含编译后的桥接服务、生产依赖和两个桌面 EXE；请完整解压后使用，不要只拿主程序一个文件。首次运行前，把 `.env.example` 复制为 `.env` 并填写飞书应用配置，然后双击根目录的 `Codex飞书助手.exe`。
+
+从源码构建时执行：
 
 ```powershell
 git clone https://github.com/Vintcet/codex-feishu-bridge.git
@@ -65,7 +67,7 @@ npm run build
 dotnet publish .\desktop-control\CodexFeishuControl.csproj -c Release -o .\desktop-control\publish
 ```
 
-然后编辑 `.env`，并运行：
+然后编辑 `.env`，并运行源码构建出的程序：
 
 ```powershell
 .\desktop-control\publish\CodexFeishuControl.exe

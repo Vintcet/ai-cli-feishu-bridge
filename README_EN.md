@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
-Current version: `0.17.2`
+Current version: `0.17.3`
 
 This is an unofficial Windows-local bridge that connects Codex CLI, Claude Code, and OpenCode sessions to your own Feishu custom app. Each assistant session can have a private Feishu group, so you can receive completion and error notifications, handle approval or follow-up prompts, and continue the original CLI conversation while away from the computer.
 
@@ -48,7 +48,9 @@ Main features:
 
 ## Get the desktop app and build it for the first time
 
-There is currently no downloadable installer on [GitHub Releases](https://github.com/Vintcet/codex-feishu-bridge/releases), and generated executables are not tracked in Git. Build the first copy from source. If a Windows archive is added to Releases later, extract the whole directory instead of copying only the main executable.
+Windows users can download `codex-feishu-bridge-v0.17.3-windows-x64.zip` from [GitHub Releases](https://github.com/Vintcet/codex-feishu-bridge/releases). The archive includes the compiled bridge, production dependencies, and both desktop executables. Extract the complete archive instead of copying only the main executable. Before the first run, copy `.env.example` to `.env`, add your Feishu app settings, then launch `Codex飞书助手.exe` from the archive root.
+
+To build from source instead, run:
 
 ```powershell
 git clone https://github.com/Vintcet/codex-feishu-bridge.git
@@ -59,7 +61,7 @@ npm run build
 dotnet publish .\desktop-control\CodexFeishuControl.csproj -c Release -o .\desktop-control\publish
 ```
 
-Edit `.env`, then run:
+Edit `.env`, then run the source-built application:
 
 ```powershell
 .\desktop-control\publish\CodexFeishuControl.exe
