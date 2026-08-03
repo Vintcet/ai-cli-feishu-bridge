@@ -16,7 +16,7 @@ internal sealed partial class MainForm : Form
     private static readonly Color Border = Color.FromArgb(226, 232, 240);
 
     private readonly BridgeClient bridgeClient = new();
-    private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 2_000 };
+    private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 30_000 };
     private readonly CancellationTokenSource lifetime = new();
     private readonly Font gridBoldFont = new("Microsoft YaHei UI", 9F, FontStyle.Bold);
     private readonly EventWaitHandle activateEvent;
@@ -675,6 +675,7 @@ internal sealed partial class MainForm : Form
         grid.MultiSelect = false;
         grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         grid.AutoGenerateColumns = false;
+        grid.ShowCellToolTips = false;
     }
 
     private Control BuildFooter()
@@ -1235,12 +1236,10 @@ internal sealed partial class MainForm : Form
             if (session.FeishuChatStatus == "error")
             {
                 row.Cells["FeishuGroup"].Style.ForeColor = Danger;
-                row.Cells["FeishuGroup"].ToolTipText = session.FeishuChatError;
             }
             else if (session.FeishuChatStatus == "pending")
             {
                 row.Cells["FeishuGroup"].Style.ForeColor = Warning;
-                row.Cells["FeishuGroup"].ToolTipText = "等待飞书建群权限或正在创建会话群。";
             }
         }
         RestoreGridState(sessionGrid, selectedSessionId, sessionScrollIndex);
