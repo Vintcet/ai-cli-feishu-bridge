@@ -46,3 +46,75 @@ test("destructive, external, and sensitive operations are high risk", () => {
     assert.ok(result.reason.length > 0);
   }
 });
+
+test("path aliases, quoted destructive commands, and incomplete inputs stay manual", () => {
+  const cwd = path.resolve("approval-risk-project");
+  const outside = path.resolve(cwd, "..", "outside", "result.txt");
+  const cases: Array<{ toolName: string; toolInput: unknown }> = [
+    { toolName: "Write", toolInput: { filePath: outside } },
+    {
+      toolName: "external_directory",
+      toolInput: { resources: [outside] },
+    },
+    {
+      toolName: "powershell",
+      toolInput: {
+        command: 'powershell -Command "Remove-Item -Recurse -Force build"',
+      },
+    },
+    {
+      toolName: "Bash",
+      toolInput: { command: `${"x".repeat(64 * 1024)}rm -rf data` },
+    },
+    {
+      toolName: "unknown_custom_tool",
+      toolInput: { operation: "looks harmless" },
+    },
+    {
+      toolName: "Bash",
+      toolInput: { command: "python cleanup.py" },
+    },
+    {
+      toolName: "powershell",
+      toolInput: { command: "Move-Item build ../outside" },
+    },
+    {
+      toolName: "shell_command",
+      toolInput: { command: "echo result > ../outside.txt" },
+    },
+  ];
+
+  for (const item of cases) {
+    const result = assessApprovalRisk({ ...item, cwd });
+    assert.equal(result.level, "high", JSON.stringify(item).slice(0, 500));
+    assert.ok(result.reason.length > 0);
+  }
+});
+
+test("OpenCode resource commands and camel-case project paths can remain low risk", () => {
+  const cwd = path.resolve("approval-risk-project");
+  assert.equal(
+    assessApprovalRisk({
+      toolName: "shell",
+      toolInput: { resources: ["npm test"] },
+      cwd,
+    }).level,
+    "low",
+  );
+  assert.equal(
+    assessApprovalRisk({
+      toolName: "shell_command",
+      toolInput: { command: "git status --short" },
+      cwd,
+    }).level,
+    "low",
+  );
+  assert.equal(
+    assessApprovalRisk({
+      toolName: "Write",
+      toolInput: { filePath: path.join(cwd, "src", "safe.ts") },
+      cwd,
+    }).level,
+    "low",
+  );
+});

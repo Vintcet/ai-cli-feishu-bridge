@@ -226,6 +226,65 @@ test("stopping auto-discovery during a scan does not schedule another pass", asy
   assert.equal(scans, 1);
 });
 
+test("a stale health probe cannot remove a replacement client on the same port", async () => {
+  let markProbeStarted!: () => void;
+  const probeStarted = new Promise<void>((resolve) => {
+    markProbeStarted = resolve;
+  });
+  let releaseProbe!: () => void;
+  const probeGate = new Promise<void>((resolve) => {
+    releaseProbe = resolve;
+  });
+  const oldClient = {
+    probeHealth: async () => {
+      markProbeStarted();
+      await probeGate;
+      return { healthy: false };
+    },
+  };
+  const newClient = { probeHealth: async () => ({ healthy: true }) };
+  const manager = new OpenCodeManager(
+    {
+      onInstanceConnected: () => {},
+      onInstanceDisconnected: () => {},
+      eventHandlers: {},
+    },
+    { autoDiscover: false, enumerateLocalPorts: async () => [] },
+  );
+  const internal = manager as unknown as {
+    instances: Map<number, Record<string, unknown>>;
+    discoveryMisses: Map<number, number>;
+    discovery: { runPass: () => Promise<void> };
+  };
+  const port = 5199;
+  internal.instances.set(port, {
+    port,
+    cwd: "C:/old",
+    client: oldClient,
+    connectedAt: new Date().toISOString(),
+    allowHistoricalFallback: true,
+    closeSubscription: () => {},
+  });
+  internal.discoveryMisses.set(port, 2);
+
+  const pass = internal.discovery.runPass();
+  await probeStarted;
+  const replacement = {
+    port,
+    cwd: "C:/new",
+    client: newClient,
+    connectedAt: new Date().toISOString(),
+    allowHistoricalFallback: true,
+    closeSubscription: () => {},
+  };
+  internal.instances.set(port, replacement);
+  releaseProbe();
+  await pass;
+
+  assert.equal(internal.instances.get(port), replacement);
+  assert.equal(internal.discoveryMisses.has(port), false);
+});
+
 async function waitFor(
   predicate: () => boolean,
   timeoutMs = 5_000,

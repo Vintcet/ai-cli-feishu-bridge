@@ -1,47 +1,25 @@
-import { createHash, randomUUID } from "node:crypto";
-import {
-  appendFile,
-  lstat,
-  mkdir,
-  realpath,
-  rename,
-  rm,
-  stat,
-} from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import path from "node:path";
 
+import { ApprovalCoordinator } from "./approval-coordinator.js";
 import {
-  appendAttachmentsToPrompt,
-  LocalAttachmentStore,
-  parseFeishuContent,
-  type SavedAttachment,
-} from "./attachments.js";
-import { assessApprovalRisk } from "./approval-risk.js";
-import {
-  buildActivityCard,
-  buildApprovalCard,
-  buildErrorCards,
-  buildResolvedApprovalCard,
-  buildResolvedUserInputQuestionCard,
-  buildStopCards,
-  buildUserInputCards,
-  buildUserInputQuestionCard,
-  buildUserPromptCards,
-  type ActivityCardEvent,
-} from "./cards.js";
-import { readLastClaudeAssistantMessage } from "./claude-code-transcript.js";
-import { readCodexTurnCompletion } from "./codex-transcript.js";
+  CardActionHandler,
+  type CardActionResult,
+} from "./card-action-handler.js";
+import { buildStopCards } from "./cards.js";
+import { ActivityCoordinator } from "./activity-coordinator.js";
 import {
   CodexTranscriptMonitor,
   type CodexTranscriptErrorEvent,
 } from "./codex-transcript-monitor.js";
-import type { CodexExitResult } from "./codex-runner.js";
 import { CodexRunner } from "./codex-runner.js";
 import {
-  managedTerminalSessionId,
   ManagedTerminalRouter,
+  managedTerminalSessionId,
 } from "./managed-terminal.js";
 import { OpenCodeManager } from "./opencode-manager.js";
+import { OpenCodeInteractionCoordinator } from "./opencode-interaction-coordinator.js";
+import { OpenCodeEventCoordinator } from "./opencode-event-coordinator.js";
 import type {
   OpenCodeMessage,
   OpenCodeMessagePartUpdatedProperties,
@@ -53,175 +31,42 @@ import type {
   OpenCodeSession,
 } from "./opencode-client.js";
 import {
-  captureLiveTrackedCodexProcessIds,
   type ClientProcessMetadata,
 } from "./process-tracking.js";
 import type {
   ActivityHookPayload,
-  ApprovalRecord,
-  ApprovalResolution,
-  Binding,
   BridgeSettings,
   MessageRouteKind,
   PermissionHookPayload,
   RequestUserInputHookPayload,
-  RuntimeName,
   SessionEndHookPayload,
   SessionRecord,
   SessionStartHookPayload,
   StopHookPayload,
-  UserInputAnswers,
-  UserInputQuestion,
 } from "./domain.js";
 import {
-  normalizeSessionAlias,
-  previewJson,
-  projectNameFromCwd,
-  sessionAddress,
-  sessionAliasKey,
-  sessionAliasValidationError,
-  sessionLabel,
-  shortSessionId,
+  runtimeDisplayName,
   statusLabel,
   stringifyModel,
-  truncate,
-  runtimeDefinition,
-  runtimeDisplayName,
-  runtimeGroupPrefix,
-  runtimeReceivedText,
 } from "./domain.js";
 import { FeishuGateway } from "./feishu.js";
-import {
-  addFileReturnInstruction,
-  extractBridgeFileDirectives,
-  validateBridgeFile,
-} from "./file-transfer.js";
+import { FeishuMessageHandler } from "./feishu-message-handler.js";
+import { extractBridgeFileDirectives } from "./file-transfer.js";
+import { FileTransferCoordinator } from "./file-transfer-coordinator.js";
+import { HookEventCoordinator } from "./hook-event-coordinator.js";
 import { BridgeStore } from "./store.js";
+import { RuntimeRetryCoordinator } from "./runtime-retry-coordinator.js";
+import { RuntimeLaunchCoordinator } from "./runtime-launch-coordinator.js";
+import { RuntimePromptCoordinator } from "./runtime-prompt-coordinator.js";
+import { SessionGroupCoordinator } from "./session-group-coordinator.js";
+import { SessionDirectory } from "./session-directory.js";
+import { UserInputCoordinator } from "./user-input-coordinator.js";
 import {
-  codexErrorFromMessage,
-  isRetryableRuntimeError,
-  retryDelayMs,
-} from "./runtime-errors.js";
+  TurnNotificationCoordinator,
+  turnNotificationWasSent,
+} from "./turn-notification-coordinator.js";
 
 type FeishuEvent = Record<string, any>;
-
-interface ApprovalWaiter {
-  timer: NodeJS.Timeout;
-  resolve: (resolution: ApprovalResolution) => void;
-}
-
-type ApprovalDecisionSource =
-  | "automatic"
-  | "desktop"
-  | "feishu_card"
-  | "feishu_text"
-  | "opencode_runtime"
-  | "timeout"
-  | "session_closed";
-
-interface ApprovalCompletionOptions {
-  source: ApprovalDecisionSource;
-  forwardOpenCode?: boolean;
-}
-
-interface ApprovalNotificationTiming {
-  firstSentAt: number;
-  lastSentAt: number;
-  count: number;
-}
-
-type UserInputResolution =
-  | { kind: "answered"; answers: UserInputAnswers }
-  | { kind: "local" | "timeout" | "rejected" };
-
-type UserInputAnswerResult =
-  | "submitted"
-  | "recorded"
-  | "failed"
-  | "empty"
-  | "stale";
-
-type UserInputToggleResult = "selected" | "deselected" | "stale";
-
-interface UserInputMessageCard {
-  messageId: string;
-  questionId: string;
-  chatId: string;
-}
-
-interface UserInputWaiter {
-  source: "hook" | "opencode";
-  sessionId: string;
-  turnId: string;
-  cwd: string;
-  questions: UserInputQuestion[];
-  messageCards: UserInputMessageCard[];
-  answers: UserInputAnswers;
-  selections: Record<string, UserInputAnswers>;
-  timer: NodeJS.Timeout;
-  resolve?: (resolution: UserInputResolution) => void;
-  opencodeRequestId?: string;
-}
-
-interface QueuedRemotePrompt {
-  prompt: string;
-  sourceMessageId: string;
-  chatId: string;
-  requestFileReturn: boolean;
-  retryAttempt?: number;
-}
-
-interface PendingRuntimeLaunchPrompt extends QueuedRemotePrompt {
-  queueRequested: boolean;
-}
-
-type RuntimeLaunchStatus = "pending" | "claimed" | "launched";
-type RuntimeLaunchKind = "resume" | "new";
-
-interface RuntimeLaunchRequest {
-  requestId: string;
-  kind: RuntimeLaunchKind;
-  sessionId?: string;
-  runtime: RuntimeName;
-  cwd: string;
-  projectName?: string;
-  sourceMessageId?: string;
-  chatId?: string;
-  elevated: boolean;
-  createdAt: string;
-  status: RuntimeLaunchStatus;
-  timer: NodeJS.Timeout;
-}
-
-interface StagedAttachments {
-  createdAt: number;
-  files: SavedAttachment[];
-}
-
-interface PendingRemotePrompt {
-  prompt: string;
-  createdAt: number;
-}
-
-interface FileReturnRequest {
-  chatId: string;
-  remainingStops: number;
-  expiresAt: number;
-}
-
-interface ActivityState {
-  sessionId: string;
-  turnId?: string;
-  startedAt: string;
-  events: ActivityCardEvent[];
-  messageIds: Map<string, string>;
-  lastSentAt: number;
-  revision: number;
-  sentRevision: number;
-  completed: boolean;
-  timer?: NodeJS.Timeout;
-  flushing?: Promise<void>;
-}
 
 interface ControllerConfig {
   bindCommand: string;
@@ -245,65 +90,25 @@ interface ControllerConfig {
   liveClientProcessIds?: (clients: ClientProcessMetadata[]) => ReadonlySet<number>;
 }
 
-interface ActionResult {
-  toast: {
-    type: "success" | "warning" | "error" | "info";
-    content: string;
-  };
-}
-
-interface AliasCommand {
-  targetKind?: "short" | "alias";
-  target?: string;
-  alias?: string;
-}
-
-interface NewRuntimeCommand {
-  runtime: RuntimeName;
-  projectName: string;
-}
-
-interface SessionAliasResult {
-  ok: boolean;
-  error?: string;
-  session?: SessionRecord;
-}
-
 export class BridgeController {
-  private readonly approvalWaiters = new Map<string, ApprovalWaiter>();
-  private readonly approvalNotificationTimings = new Map<
-    string,
-    ApprovalNotificationTiming
-  >();
-  private readonly inputWaiters = new Map<string, UserInputWaiter>();
-  private readonly submittingInputs = new Set<string>();
-  private readonly remoteInputLocks = new Set<string>();
-  private readonly runtimeQueues = new Map<string, QueuedRemotePrompt[]>();
-  private readonly managedQueueDepth = new Map<string, number>();
-  private readonly pendingAttachments = new Map<string, StagedAttachments>();
-  private readonly fileReturnRequests = new Map<string, FileReturnRequest[]>();
-  private readonly activityStates = new Map<string, ActivityState>();
-  private readonly pendingRemotePrompts = new Map<string, PendingRemotePrompt[]>();
-  private readonly runtimeRetryCounts = new Map<string, number>();
-  private readonly runtimeRetryTimers = new Map<string, NodeJS.Timeout>();
-  private readonly pendingRuntimeLaunchPrompts = new Map<
-    string,
-    PendingRuntimeLaunchPrompt[]
-  >();
-  private readonly runtimeLaunchRequests = new Map<string, RuntimeLaunchRequest>();
-  private readonly runtimeLaunchRequestIds = new Map<string, string>();
-  private readonly opencodePortSessions = new Map<number, Set<string>>();
-  private readonly opencodeToolParts = new Map<string, Map<string, string>>();
-  private readonly opencodePermissionClaims = new Set<string>();
-  private readonly opencodeQuestionClaims = new Set<string>();
-  private readonly sessionGroupCreates = new Map<
-    string,
-    Promise<SessionRecord | undefined>
-  >();
-  private readonly turnNotificationsInFlight = new Set<string>();
-  private readonly attachmentStore: LocalAttachmentStore;
+  private readonly approvals: ApprovalCoordinator;
+  private readonly inputs: UserInputCoordinator;
+  private readonly cardActions: CardActionHandler;
+  private readonly feishuMessages: FeishuMessageHandler;
+  private readonly hookEvents: HookEventCoordinator;
+  private readonly sessionGroups: SessionGroupCoordinator;
+  private readonly sessionDirectory: SessionDirectory;
+  private readonly turnNotifications: TurnNotificationCoordinator;
+  private readonly activities: ActivityCoordinator;
+  private readonly files: FileTransferCoordinator;
+  private readonly runtimeRetries: RuntimeRetryCoordinator;
+  private readonly runtimePrompts: RuntimePromptCoordinator;
+  private readonly runtimeLaunches: RuntimeLaunchCoordinator;
+  private readonly opencodeInteractions: OpenCodeInteractionCoordinator;
+  private readonly opencodeEvents: OpenCodeEventCoordinator;
   private readonly transcriptMonitor: CodexTranscriptMonitor;
-  private approvalLogWrite: Promise<void> = Promise.resolve();
+  private closing = false;
+  private closePromise: Promise<void> | undefined;
 
   constructor(
     private readonly store: BridgeStore,
@@ -313,18 +118,231 @@ export class BridgeController {
     private readonly opencode: OpenCodeManager | undefined,
     private readonly config: ControllerConfig,
   ) {
-    this.attachmentStore = new LocalAttachmentStore(
-      config.uploadsDirectory,
-      config.inboundFileMaxBytes,
-      config.inboundAttachmentMaxCount,
-      config.uploadTtlMs,
-      config.uploadMaxFiles,
-      config.uploadMaxBytes,
-    );
+    this.files = new FileTransferCoordinator({
+      feishu,
+      uploadsDirectory: config.uploadsDirectory,
+      inboundFileMaxBytes: config.inboundFileMaxBytes,
+      inboundAttachmentMaxCount: config.inboundAttachmentMaxCount,
+      uploadMaxFiles: config.uploadMaxFiles,
+      uploadMaxBytes: config.uploadMaxBytes,
+      uploadTtlMs: config.uploadTtlMs,
+      outboundFileMaxBytes: config.outboundFileMaxBytes,
+      addRoute: (messageId, sessionId, chatId, kind) =>
+        this.addRoute(messageId, sessionId, chatId, kind),
+    });
     this.transcriptMonitor = new CodexTranscriptMonitor(
       (event) => this.handleCodexTranscriptError(event),
       config.transcriptPollIntervalMs,
     );
+    this.sessionGroups = new SessionGroupCoordinator(
+      store,
+      feishu,
+      config.sessionGroupInactiveMs,
+    );
+    this.sessionDirectory = new SessionDirectory({
+      store,
+      managedTerminals,
+      opencode,
+      sessionActiveMs: config.sessionActiveMs,
+      sessionGroups: this.sessionGroups,
+      liveClientProcessIds: config.liveClientProcessIds,
+      queuedPromptCount: (sessionId) =>
+        this.runtimePrompts.queuedCount(sessionId),
+      respond: (sourceMessageId, chatId, text) =>
+        this.respond(sourceMessageId, chatId, text),
+    });
+    this.turnNotifications = new TurnNotificationCoordinator({
+      store,
+      feishu,
+      recipients: (session) =>
+        this.sessionGroups.notificationRecipients(session),
+      addRoute: (messageId, sessionId, chatId, kind) =>
+        this.addRoute(messageId, sessionId, chatId, kind),
+    });
+    this.activities = new ActivityCoordinator({
+      store,
+      feishu,
+      recipients: (session) =>
+        this.sessionGroups.notificationRecipients(session),
+      addRoute: (messageId, sessionId, chatId, kind) =>
+        this.addRoute(messageId, sessionId, chatId, kind),
+      watchSession: (session) => this.watchCodexTranscript(session),
+    });
+    this.runtimeLaunches = new RuntimeLaunchCoordinator({
+      store,
+      managedTerminals,
+      opencode,
+      timeoutMs: config.runtimeLaunchTimeoutMs,
+      respond: (sourceMessageId, chatId, text) =>
+        this.respond(sourceMessageId, chatId, text),
+      resume: (session, item) =>
+        this.runtimePrompts.resume(
+          session,
+          item.prompt,
+          item.sourceMessageId,
+          item.chatId,
+          item.queueRequested,
+          item.requestFileReturn,
+        ),
+    });
+    this.approvals = new ApprovalCoordinator({
+      store,
+      feishu,
+      opencode,
+      config,
+      notificationRecipients: (session) =>
+        this.sessionGroups.notificationRecipients(session),
+      onOpenCodePermissionForwarded: (sessionId, permissionId) => {
+        this.opencodeInteractions.releasePermissionClaim(sessionId, permissionId);
+      },
+    });
+    this.inputs = new UserInputCoordinator({
+      store,
+      feishu,
+      opencode,
+      inputTimeoutMs: config.inputTimeoutMs,
+      onOpenCodeQuestionAnswered: (sessionId, requestId) => {
+        this.opencodeInteractions.releaseQuestionClaim(sessionId, requestId);
+      },
+    });
+    this.opencodeInteractions = new OpenCodeInteractionCoordinator({
+      store,
+      opencode,
+      approvals: this.approvals,
+      inputs: this.inputs,
+      sessionGroups: this.sessionGroups,
+      approvalTimeoutMs: config.approvalTimeoutMs,
+      isClosing: () => this.closing,
+    });
+    this.runtimeRetries = new RuntimeRetryCoordinator({
+      store,
+      retryBaseDelayMs: config.retryBaseDelayMs,
+      finishActivity: (sessionId, label) =>
+        this.activities.finish(sessionId, label),
+      isRuntimeReady: (session) =>
+        this.runtimePrompts.isRuntimeReadyForRetry(session),
+      sendRetry: (session, prompt) =>
+        this.runtimePrompts.sendRetry(session, prompt),
+      sendErrorNotification: (session, turnId, errorMessage, cards) =>
+        this.turnNotifications.send(
+          session,
+          turnId,
+          "error",
+          errorMessage,
+          cards,
+          "[error] Failed to send a runtime error card:",
+        ),
+      patchCard: (messageId, card) => this.feishu.patchCard(messageId, card),
+      releaseRetryLock: (sessionId) =>
+        this.runtimePrompts.releaseRetryLock(sessionId),
+    });
+    this.runtimePrompts = new RuntimePromptCoordinator({
+      store,
+      codex,
+      managedTerminals,
+      opencode,
+      approvals: this.approvals,
+      inputs: this.inputs,
+      files: this.files,
+      activities: this.activities,
+      runtimeRetries: this.runtimeRetries,
+      clearOpenCodeState: (sessionId) => {
+        this.opencodeEvents.clearSession(sessionId);
+        this.opencodeInteractions.clearSession(sessionId);
+      },
+      respond: (sourceMessageId, chatId, text) =>
+        this.respond(sourceMessageId, chatId, text),
+    });
+    this.opencodeEvents = new OpenCodeEventCoordinator({
+      store,
+      feishu,
+      opencode,
+      sessionGroups: this.sessionGroups,
+      runtimeLaunches: this.runtimeLaunches,
+      runtimeRetries: this.runtimeRetries,
+      inputs: this.inputs,
+      activities: this.activities,
+      turnNotifications: this.turnNotifications,
+      files: this.files,
+      releaseRemoteInputLock: (sessionId) =>
+        this.runtimePrompts.releaseInputLock(sessionId),
+      drainQueue: (sessionId) =>
+        this.runtimePrompts.drainOpenCodeQueue(sessionId),
+      forgetSession: (sessionId, reason) =>
+        this.runtimePrompts.forgetOpenCodeSession(sessionId, reason),
+      consumeRemotePrompt: (sessionId, prompt) =>
+        this.runtimePrompts.consumeRemotePrompt(sessionId, prompt),
+      addRoute: (messageId, sessionId, chatId, kind) =>
+        this.addRoute(messageId, sessionId, chatId, kind),
+    });
+    this.cardActions = new CardActionHandler(
+      store,
+      this.approvals,
+      this.inputs,
+      this.runtimeRetries,
+    );
+    this.feishuMessages = new FeishuMessageHandler({
+      store,
+      bindCommand: config.bindCommand,
+      files: this.files,
+      runtimeLaunches: this.runtimeLaunches,
+      sessionDirectory: this.sessionDirectory,
+      inputs: this.inputs,
+      approvals: this.approvals,
+      managedTerminals,
+      opencode,
+      queuedPromptCount: () => this.runtimePrompts.totalQueuedCount(),
+      initializeSessionGroups: () => this.initializeSessionGroups(),
+      respond: (sourceMessageId, chatId, text) =>
+        this.respond(sourceMessageId, chatId, text),
+      resumeSession: (
+        session,
+        prompt,
+        sourceMessageId,
+        chatId,
+        queueRequested,
+        requestFileReturn,
+      ) =>
+        this.runtimePrompts.resume(
+          session,
+          prompt,
+          sourceMessageId,
+          chatId,
+          queueRequested,
+          requestFileReturn,
+        ),
+    });
+    this.hookEvents = new HookEventCoordinator({
+      store,
+      feishu,
+      managedTerminals,
+      transcriptMonitor: this.transcriptMonitor,
+      files: this.files,
+      activities: this.activities,
+      sessionGroups: this.sessionGroups,
+      runtimeLaunches: this.runtimeLaunches,
+      approvals: this.approvals,
+      inputs: this.inputs,
+      runtimeRetries: this.runtimeRetries,
+      turnNotifications: this.turnNotifications,
+      approvalTimeoutMs: config.approvalTimeoutMs,
+      inputTimeoutMs: config.inputTimeoutMs,
+      isClosing: () => this.closing,
+      watchTranscript: (session) => this.watchCodexTranscript(session),
+      migratePromptState: (oldSessionId, newSessionId) =>
+        this.runtimePrompts.migrateSession(oldSessionId, newSessionId),
+      clearPromptState: (sessionId) =>
+        this.runtimePrompts.clearSession(sessionId),
+      prepareStop: (sessionId) => this.runtimePrompts.prepareStop(sessionId),
+      decrementManagedQueueDepth: (sessionId) =>
+        this.runtimePrompts.decrementManagedQueue(sessionId),
+      drainExternalQueue: (sessionId) =>
+        this.runtimePrompts.drainExternalQueue(sessionId),
+      consumeRemotePrompt: (sessionId, prompt) =>
+        this.runtimePrompts.consumeRemotePrompt(sessionId, prompt),
+      addRoute: (messageId, sessionId, chatId, kind) =>
+        this.addRoute(messageId, sessionId, chatId, kind),
+    });
   }
 
   async initialize(): Promise<void> {
@@ -334,26 +352,36 @@ export class BridgeController {
   }
 
   async close(): Promise<void> {
+    if (this.closePromise) {
+      return this.closePromise;
+    }
+    this.closing = true;
+    this.closePromise = this.closeInternal();
+    return this.closePromise;
+  }
+
+  private async closeInternal(): Promise<void> {
     await this.transcriptMonitor.close();
-    for (const waiter of this.approvalWaiters.values()) {
-      clearTimeout(waiter.timer);
+    await this.resolvePendingInteractionsForShutdown();
+    this.inputs.dispose();
+    this.runtimeLaunches.dispose();
+    this.activities.dispose();
+    this.runtimeRetries.dispose();
+    await this.approvals.dispose();
+  }
+
+  private async resolvePendingInteractionsForShutdown(): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await this.approvals.awaitActiveCompletions();
+      await this.inputs.resolveAllForShutdown();
+      await this.approvals.resolveAllForShutdown();
+      if (
+        this.inputs.pendingCount === 0 &&
+        !this.approvals.hasPendingApprovals()
+      ) {
+        return;
+      }
     }
-    this.approvalNotificationTimings.clear();
-    for (const waiter of this.inputWaiters.values()) {
-      clearTimeout(waiter.timer);
-    }
-    for (const request of this.runtimeLaunchRequests.values()) {
-      clearTimeout(request.timer);
-    }
-    for (const activity of this.activityStates.values()) {
-      if (activity.timer) clearTimeout(activity.timer);
-    }
-    for (const timer of this.runtimeRetryTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.runtimeRetryTimers.clear();
-    this.runtimeRetryCounts.clear();
-    await this.approvalLogWrite;
   }
 
   private async initializeCodexTranscriptMonitors(): Promise<void> {
@@ -363,107 +391,23 @@ export class BridgeController {
   }
 
   async initializeSessionGroups(): Promise<void> {
-    if (!this.store.getOwnerOpenId()) {
-      return;
-    }
-    const now = Date.now();
-    const inactiveMs = this.config.sessionGroupInactiveMs ?? 7 * 24 * 60 * 60 * 1000;
-    const sessions = this.store
-      .listOpenSessions()
-      .filter(
-        (session) =>
-          session.managedByAssistant === true &&
-          (Boolean(session.feishuChatId) ||
-            now - sessionGroupActivityTime(session) < inactiveMs),
-      );
-    for (const session of sessions) {
-      await this.ensureSessionGroup(session.sessionId);
-    }
+    await this.sessionGroups.initialize();
   }
 
   async cleanupInactiveSessionGroups(
     now = Date.now(),
   ): Promise<{ deleted: number; failed: number }> {
-    const inactiveMs = this.config.sessionGroupInactiveMs ?? 7 * 24 * 60 * 60 * 1000;
-    let deleted = 0;
-    let failed = 0;
-    for (const session of this.store.listSessionsWithFeishuGroups()) {
-      const chatId = session.feishuChatId;
-      if (!chatId || now - sessionGroupActivityTime(session) < inactiveMs) {
-        continue;
-      }
-      try {
-        await this.feishu.deleteSessionGroup(chatId);
-        await this.store.clearSessionFeishuChat(session.sessionId, chatId);
-        deleted += 1;
-        console.log(
-          `[feishu] Dissolved inactive session group ${chatId} for #${session.shortId}.`,
-        );
-      } catch (error) {
-        failed += 1;
-        console.warn(
-          `[feishu] Could not dissolve inactive group ${chatId} for #${session.shortId}:`,
-          error,
-        );
-      }
-    }
-    return { deleted, failed };
+    return await this.sessionGroups.cleanup(now);
   }
 
   handleRuntimeLaunchClaim(): Record<string, unknown> {
-    const request = [...this.runtimeLaunchRequests.values()]
-      .filter((item) => item.status === "pending")
-      .sort(
-        (left, right) =>
-          left.createdAt.localeCompare(right.createdAt) ||
-          left.requestId.localeCompare(right.requestId),
-      )[0];
-    if (!request) {
-      return { ok: true };
-    }
-    request.status = "claimed";
-    return {
-      ok: true,
-      request: {
-        requestId: request.requestId,
-        kind: request.kind,
-        sessionId: request.sessionId,
-        runtime: request.runtime,
-        cwd: request.cwd,
-        projectName: request.projectName,
-        elevated: request.elevated,
-        createdAt: request.createdAt,
-      },
-    };
+    return this.runtimeLaunches.claim();
   }
 
   async handleRuntimeLaunchComplete(
     value: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    const requestId = typeof value.requestId === "string"
-      ? value.requestId.trim()
-      : "";
-    const success = value.success;
-    if (!requestId || typeof success !== "boolean") {
-      return { ok: false, error: "自动恢复结果参数不完整。" };
-    }
-    const request = this.runtimeLaunchRequests.get(requestId);
-    if (!request) {
-      return { ok: true, alreadyResolved: true };
-    }
-    if (success) {
-      if (request.kind === "new") {
-        this.clearRuntimeLaunchRequest(request);
-        return { ok: true, kind: request.kind };
-      }
-      request.status = "launched";
-      return { ok: true, sessionId: request.sessionId };
-    }
-    const detail = typeof value.error === "string" && value.error.trim()
-      ? truncate(value.error.trim(), 500)
-      : "桌面助手未能启动对应窗口。";
-    await this.failRuntimeLaunch(request, detail);
-    return { ok: true, sessionId: request.sessionId };
+    return await this.runtimeLaunches.complete(value);
   }
 
   /**
@@ -475,7 +419,7 @@ export class BridgeController {
     if (!includeLocalDetails) {
       return { ok: true };
     }
-    const sessions = this.listActiveSessions();
+    const sessions = this.sessionDirectory.listActive();
     const displayedSessions = [...sessions].sort(
       (left, right) =>
         left.openedAt.localeCompare(right.openedAt) ||
@@ -489,7 +433,7 @@ export class BridgeController {
           !activeSessionIds.has(session.sessionId) &&
           !this.managedTerminals.isOnline(session),
       );
-    const approvals = this.listApprovalViews();
+    const approvals = this.approvals.listViews();
     const pairingCode = this.store.getPairingCode();
     const sessionView = (session: SessionRecord) => ({
       sessionId: session.sessionId,
@@ -522,9 +466,7 @@ export class BridgeController {
             : "pending"
           : "not_applicable",
       feishuChatError: session.feishuChatError ?? "",
-      queuedPrompts:
-        (this.runtimeQueues.get(session.sessionId)?.length ?? 0) +
-        (this.managedQueueDepth.get(session.sessionId) ?? 0),
+      queuedPrompts: this.runtimePrompts.queuedCount(session.sessionId),
     });
     return {
       ok: true,
@@ -540,26 +482,21 @@ export class BridgeController {
           approval.status === "pending" &&
           approval.requiresManualApproval === true,
       ).length,
+      pendingDesktopApprovals: approvals.filter(
+        (approval) =>
+          approval.status === "pending" &&
+          approval.desktopApprovalRequested === true,
+      ).length,
       approvals,
-      pendingInputs: this.inputWaiters.size,
+      pendingInputs: this.inputs.pendingCount,
       queuedPrompts:
-        [...this.runtimeQueues.values()].reduce(
-          (total, queue) => total + queue.length,
-          0,
-        ) +
-        [...this.pendingRuntimeLaunchPrompts.values()].reduce(
-          (total, queue) => total + queue.length,
-          0,
-        ) +
-        [...this.managedQueueDepth.values()].reduce(
-          (total, depth) => total + depth,
-          0,
-        ),
+        this.runtimePrompts.totalQueuedCount() +
+        this.runtimeLaunches.queuedPromptCount,
       runningResumes: sessions.filter((session) => this.codex.isRunning(session.sessionId))
         .length,
-      pendingRuntimeLaunches: this.runtimeLaunchRequests.size,
+      pendingRuntimeLaunches: this.runtimeLaunches.pendingCount,
       opencodeInstances: this.opencode?.listInstances().length ?? 0,
-      activeSessionDefinition: this.activeSessionDefinition(),
+      activeSessionDefinition: this.sessionDirectory.activeDefinition(),
       settings: this.store.getSettings(),
       sessions: displayedSessions.map(sessionView),
       historySessions: historySessions.map(sessionView),
@@ -589,19 +526,16 @@ export class BridgeController {
       ? this.store.findSessionByManagedTerminalId(terminalId)
       : undefined;
     if (terminalId) {
-      this.remoteInputLocks.delete(managedTerminalSessionId(terminalId));
+      this.runtimePrompts.clearSession(managedTerminalSessionId(terminalId));
     }
     if (session) {
       await this.transcriptMonitor.unwatch(session.sessionId);
-      this.remoteInputLocks.delete(session.sessionId);
-      this.runtimeQueues.delete(session.sessionId);
-      this.managedQueueDepth.delete(session.sessionId);
-      this.pendingRemotePrompts.delete(session.sessionId);
-      this.fileReturnRequests.delete(session.sessionId);
-      this.resetRuntimeRetryState(session.sessionId);
-      await this.resolveInputsForSession(session.sessionId, "local");
-      await this.resolveApprovalsForSession(session.sessionId);
-      void this.finishActivity(session.sessionId, "窗口已关闭");
+      this.runtimePrompts.clearSession(session.sessionId);
+      this.files.removeSession(session.sessionId);
+      this.runtimeRetries.reset(session.sessionId);
+      await this.inputs.resolveForSession(session.sessionId, "local");
+      await this.approvals.resolveForSession(session.sessionId);
+      void this.activities.finish(session.sessionId, "窗口已关闭");
       await this.store.upsertSession({
         sessionId: session.sessionId,
         alias: session.alias,
@@ -619,38 +553,7 @@ export class BridgeController {
   async handleSessionAliasUpdate(
     value: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    const sessionId = typeof value.sessionId === "string" ? value.sessionId.trim() : "";
-    const hasAlias = Object.prototype.hasOwnProperty.call(value, "alias");
-    const aliasValue = value.alias;
-    if (
-      !sessionId ||
-      !hasAlias ||
-      (typeof aliasValue !== "string" && aliasValue !== null)
-    ) {
-      return { ok: false, error: "会话 ID 或别名参数不完整。" };
-    }
-
-    const session = this.listAliasReservedSessions().find(
-      (item) => item.sessionId === sessionId,
-    );
-    if (!session) {
-      return { ok: false, error: "这个会话已不在活跃或历史列表中，请刷新后重试。" };
-    }
-
-    const result = await this.updateSessionAlias(
-      session,
-      typeof aliasValue === "string" ? aliasValue : undefined,
-    );
-    return result.ok
-      ? {
-          ok: true,
-          session: {
-            sessionId: result.session?.sessionId,
-            shortId: result.session?.shortId,
-            alias: result.session?.alias ?? "",
-          },
-        }
-      : { ok: false, error: result.error };
+    return await this.sessionDirectory.handleAliasUpdate(value);
   }
 
   async handleSessionGroupRetry(
@@ -660,31 +563,7 @@ export class BridgeController {
     if (!sessionId || sessionId.length > 256) {
       return { ok: false, error: "会话 ID 参数不正确。" };
     }
-    const session = this.store.getSession(sessionId);
-    if (!session || session.managedByAssistant !== true) {
-      return { ok: false, error: "这个会话不存在，或不是由助手创建的。" };
-    }
-    if (session.feishuChatId) {
-      return {
-        ok: true,
-        alreadyConnected: true,
-        chatId: session.feishuChatId,
-        chatName: session.feishuChatName ?? "",
-      };
-    }
-    await this.store.setSessionFeishuChatError(sessionId, undefined);
-    const updated = await this.ensureSessionGroup(sessionId, true);
-    return updated?.feishuChatId
-      ? {
-          ok: true,
-          alreadyConnected: false,
-          chatId: updated.feishuChatId,
-          chatName: updated.feishuChatName ?? "",
-        }
-      : {
-          ok: false,
-          error: updated?.feishuChatError || "飞书群创建失败，请检查应用权限后重试。",
-        };
+    return await this.sessionGroups.retry(sessionId);
   }
 
   async handleSessionHistoryHide(
@@ -704,51 +583,7 @@ export class BridgeController {
   async handleLocalApproval(
     value: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    const requestId =
-      typeof value.requestId === "string" ? value.requestId.trim() : "";
-    const resolution = value.resolution;
-    if (
-      !requestId ||
-      requestId.length > 128 ||
-      (resolution !== "allow" &&
-        resolution !== "deny")
-    ) {
-      return { ok: false, error: "审批请求或处理方式不正确。" };
-    }
-
-    const existing = this.store.getApproval(requestId);
-    if (!existing) {
-      return { ok: false, error: "审批请求不存在或已过期。" };
-    }
-    if (existing.status !== "pending") {
-      return {
-        ok: true,
-        alreadyResolved: true,
-        resolution: existing.resolution ?? "local",
-        message: "这条审批已由另一端处理。",
-      };
-    }
-
-    const completed = await this.completeApproval(requestId, resolution, {
-      source: "desktop",
-    });
-    if (!completed) {
-      const current = this.store.getApproval(requestId);
-      return current && current.status !== "pending"
-        ? {
-            ok: true,
-            alreadyResolved: true,
-            resolution: current.resolution ?? "local",
-            message: "这条审批已由另一端处理。",
-          }
-        : { ok: false, error: "审批状态没有改变，请刷新后重试。" };
-    }
-    return {
-      ok: true,
-      alreadyResolved: false,
-      resolution,
-      message: approvalText(resolution, this.store.getSession(existing.sessionId)),
-    };
+    return await this.approvals.handleLocalApproval(value);
   }
 
   async handleSettingsUpdate(
@@ -880,981 +715,104 @@ export class BridgeController {
   }
 
   async handleOpenCodeSessionCreated(session: OpenCodeSession): Promise<void> {
-    const sessionId = session.id;
-    const instance = this.opencode?.findInstanceBySession(sessionId);
-    const cwd = session.directory || instance?.cwd || "";
-    if (!cwd) {
-      return;
-    }
-    const existing = this.store.getSession(sessionId);
-    const record = await this.store.upsertSession({
-      sessionId,
-      cwd,
-      model: stringifyModel(session.model),
-      status: existing?.status === "ended" ? "waiting" : existing?.status ?? "waiting",
-      source: "opencode",
-      runtime: "opencode",
-      managedByAssistant: true,
-    });
-    const port = instance?.port;
-    if (port !== undefined) {
-      let sessionIds = this.opencodePortSessions.get(port);
-      if (!sessionIds) {
-        sessionIds = new Set();
-        this.opencodePortSessions.set(port, sessionIds);
-      }
-      sessionIds.add(sessionId);
-    }
-    console.log(`[opencode] Registered session #${record.shortId} (${cwd}).`);
-    if (!record.feishuChatId) {
-      void this.ensureSessionGroup(sessionId).catch((error) => {
-        console.warn("[opencode] Could not create Feishu group:", error);
-      });
-    }
-    await this.tryDrainRuntimeLaunch(sessionId);
+    await this.opencodeEvents.handleSessionCreated(session);
   }
 
   async handleOpenCodeSessionDeleted(sessionId: string): Promise<void> {
-    await this.forgetOpenCodeSession(sessionId, "会话已关闭");
+    await this.opencodeEvents.handleSessionDeleted(sessionId);
   }
 
   async handleOpenCodeSessionStatus(sessionId: string, status: string): Promise<void> {
-    const current = this.store.getSession(sessionId);
-    if (!current || current.runtime !== "opencode" || current.status === "ended") {
-      return;
-    }
-    if (
-      status === "busy" &&
-      !this.hasPendingInputForSession(sessionId) &&
-      !this.store.hasPendingApprovalForSession(sessionId)
-    ) {
-      await this.store.upsertSession({
-        sessionId,
-        cwd: current.cwd,
-        model: current.model,
-        status: "running",
-        runtime: "opencode",
-        managedByAssistant: true,
-      });
-    }
+    await this.opencodeEvents.handleSessionStatus(sessionId, status);
   }
 
   async handleOpenCodeSessionCompacted(sessionId: string): Promise<void> {
-    const current = this.store.getSession(sessionId);
-    if (!current || current.runtime !== "opencode") {
-      return;
-    }
-    if (this.store.getSettings().notifyActivity) {
-      await this.recordOpenCodeActivity(sessionId, {
-        hook_event_name: "PreCompact",
-        cwd: current.cwd,
-      });
-    }
+    await this.opencodeEvents.handleSessionCompacted(sessionId);
   }
 
   async handleOpenCodeSessionIdle(sessionId: string): Promise<void> {
-    const current = this.store.getSession(sessionId);
-    if (!current || current.runtime !== "opencode" || current.status === "ended") {
-      this.remoteInputLocks.delete(sessionId);
-      return;
-    }
-    if (
-      this.hasPendingInputForSession(sessionId) ||
-      this.store.hasPendingApprovalForSession(sessionId)
-    ) {
-      return;
-    }
-    const result = await this.opencode?.lastAssistantText(sessionId);
-    const assistantMessage = result?.text || undefined;
-    const hasError = result?.hasError === true;
-    if (hasError) {
-      const detail = assistantMessage || current.lastError || "opencode 本轮发生错误。";
-      if (current.status === "error") {
-        if (!this.runtimeRetryTimers.has(sessionId)) {
-          this.remoteInputLocks.delete(sessionId);
-          void this.tryDrainOpenCodeQueue(sessionId);
-        }
-        return;
-      }
-      const retrying = await this.notifyRuntimeTurnError(
-        current,
-        `opencode-error-${randomUUID()}`,
-        detail,
-      );
-      if (!retrying) {
-        this.remoteInputLocks.delete(sessionId);
-        void this.tryDrainOpenCodeQueue(sessionId);
-      }
-      return;
-    }
-    this.remoteInputLocks.delete(sessionId);
-    this.resetRuntimeRetryState(sessionId);
-    const turnId = `opencode-${Date.now()}`;
-    const session = await this.store.upsertSession({
-      sessionId,
-      cwd: current.cwd,
-      model: current.model,
-      turnId,
-      status: "waiting",
-      assistantMessage,
-      runtime: "opencode",
-      managedByAssistant: true,
-    });
-    await this.finishActivity(sessionId, "本轮处理完成");
-
-    const fileDirectives = extractBridgeFileDirectives(
-      assistantMessage?.trim() || "opencode 已结束本轮处理。",
-    );
-    const message =
-      fileDirectives.displayMessage ||
-      assistantMessage || "opencode 已结束本轮处理。";
-    await this.sendTurnNotificationCards(
-      session,
-      turnId,
-      "stop",
-      message,
-      buildStopCards(session, message),
-      "[opencode] Failed to send a completion card:",
-    );
-
-    const fileReturnRequest = this.advanceFileReturnRequests(sessionId);
-    if (fileReturnRequest && fileDirectives.paths.length > 0) {
-      void this.sendRequestedFiles(
-        session,
-        fileReturnRequest.chatId,
-        fileDirectives.paths,
-      ).catch((error) => {
-        console.error("[files] Asynchronous file return failed:", error);
-      });
-    }
-    void this.tryDrainOpenCodeQueue(sessionId);
+    await this.opencodeEvents.handleSessionIdle(sessionId);
   }
 
   async handleOpenCodeSessionError(
     sessionId: string,
     error: string | undefined,
   ): Promise<void> {
-    const current = this.store.getSession(sessionId);
-    if (!current || current.runtime !== "opencode" || current.status === "ended") {
-      return;
-    }
-    const detail = truncate(error || "opencode 发生未知错误。", 500);
-    if (current.status === "error") {
-      return;
-    }
-    const retrying = await this.notifyRuntimeTurnError(
-      current,
-      `opencode-error-${randomUUID()}`,
-      detail,
-    );
-    if (!retrying) {
-      this.remoteInputLocks.delete(sessionId);
-      void this.tryDrainOpenCodeQueue(sessionId);
-    }
+    await this.opencodeEvents.handleSessionError(sessionId, error);
   }
 
   async handleOpenCodeInstanceDisconnected(port: number): Promise<void> {
-    const sessionIds = this.opencodePortSessions.get(port);
-    if (sessionIds) {
-      for (const sessionId of [...sessionIds]) {
-        await this.forgetOpenCodeSession(sessionId, "opencode 窗口已关闭");
-      }
-      this.opencodePortSessions.delete(port);
-    }
+    await this.opencodeEvents.handleInstanceDisconnected(port);
   }
 
   async handleOpenCodePermissionUpdated(permission: OpenCodePermission): Promise<void> {
-    const sessionId = permission.sessionID;
-    if (!sessionId) {
-      return;
-    }
-    const claimKey = this.opencodeInteractionKey(sessionId, permission.id);
-    if (this.opencodePermissionClaims.has(claimKey)) {
-      return;
-    }
-    this.opencodePermissionClaims.add(claimKey);
-    try {
-      const existing = this.store.listApprovals().find(
-        (approval) =>
-          approval.sessionId === sessionId &&
-          approval.opencodePermissionId === permission.id,
-      );
-      if (existing && existing.status !== "pending") {
-        return;
-      }
-      const current = this.store.getSession(sessionId);
-      const instance = this.opencode?.findInstanceBySession(sessionId);
-      const cwd = current?.cwd || existing?.cwd || instance?.cwd || "";
-      const session = await this.store.upsertSession({
-        sessionId,
-        cwd,
-        model: current?.model,
-        status: "pending_approval",
-        runtime: "opencode",
-        managedByAssistant: true,
-      });
-      if (existing) {
-        const automaticallyHandled = await this.tryAutomaticApproval(
-          session,
-          existing,
-          "opencode",
-        );
-        if (!automaticallyHandled && existing.messageIds.length === 0) {
-          await this.sendApprovalCards(session, existing, "pending", "opencode");
-        }
-        return;
-      }
-      const now = Date.now();
-      const toolName =
-        permission.action ??
-        (typeof permission.permission === "string"
-          ? permission.permission
-          : permission.type ?? "permission");
-      const toolInput = {
-        action: permission.action,
-        resources: permission.resources,
-        save: permission.save,
-        source: permission.source,
-        permission: permission.permission ?? permission.type,
-        patterns: permission.patterns,
-        input: permission.input,
-        metadata: permission.metadata,
-        always: permission.always,
-      };
-      const risk = assessApprovalRisk({ toolName, toolInput, cwd });
-      const approval: ApprovalRecord = {
-        requestId: randomUUID(),
-        sessionId,
-        turnId: current?.lastTurnId ?? `opencode-${now}`,
-        cwd,
-        toolName,
-        toolPreview: previewJson(toolInput),
-        createdAt: new Date(now).toISOString(),
-        expiresAt: new Date(now + this.config.approvalTimeoutMs).toISOString(),
-        status: "pending",
-        messageIds: [],
-        requiresManualApproval:
-          !this.store.getSettings().autoApprove || risk.level === "high",
-        riskLevel: risk.level,
-        riskReason: risk.reason,
-        opencodePermissionId: permission.id,
-      };
-      await this.store.createApproval(approval);
-      this.logApprovalEvent(
-        "requested",
-        session,
-        approval,
-        {
-          autoApprove: this.store.getSettings().autoApprove,
-          riskLevel: risk.level,
-          riskReason: risk.reason,
-        },
-        now,
-      );
-      const timeoutTimer = setTimeout(() => {
-        void this.completeApproval(approval.requestId, "timeout", {
-          source: "timeout",
-        });
-      }, this.config.approvalTimeoutMs);
-      timeoutTimer.unref?.();
-
-      const automaticallyHandled = await this.tryAutomaticApproval(
-        session,
-        approval,
-        "opencode",
-      );
-      if (!automaticallyHandled) {
-        await this.sendApprovalCards(session, approval, "pending", "opencode");
-      }
-    } finally {
-      this.opencodePermissionClaims.delete(claimKey);
-    }
+    await this.opencodeInteractions.handlePermissionUpdated(permission);
   }
 
   async handleOpenCodePermissionReplied(
     reply: OpenCodePermissionReplied,
   ): Promise<void> {
-    const claimKey = this.opencodeInteractionKey(reply.sessionID, reply.requestID);
-    const approval = this.store
-      .listApprovals()
-      .find(
-        (item) =>
-          item.sessionId === reply.sessionID &&
-          item.opencodePermissionId === reply.requestID &&
-          item.status === "pending",
-      );
-    if (!approval) {
-      this.opencodePermissionClaims.delete(claimKey);
-      if (!this.store.hasPendingApprovalForSession(reply.sessionID)) {
-        await this.updateOpenCodeInteractionStatus(
-          reply.sessionID,
-          reply.reply === "reject" ? "waiting" : "running",
-        );
-      }
-      return;
-    }
-    try {
-      await this.completeApproval(
-        approval.requestId,
-        reply.reply === "reject" ? "deny" : "allow",
-        {
-          source: "opencode_runtime",
-          forwardOpenCode: false,
-        },
-      );
-    } finally {
-      this.opencodePermissionClaims.delete(claimKey);
-    }
+    await this.opencodeInteractions.handlePermissionReplied(reply);
   }
 
   async handleOpenCodeQuestionAsked(request: OpenCodeQuestionRequest): Promise<void> {
-    const claimKey = this.opencodeInteractionKey(request.sessionID, request.id);
-    if (this.opencodeQuestionClaims.has(claimKey)) {
-      return;
-    }
-    this.opencodeQuestionClaims.add(claimKey);
-    let requestId: string | undefined;
-    try {
-      const current = this.store.getSession(request.sessionID);
-      const instance = this.opencode?.findInstanceBySession(request.sessionID);
-      const cwd = current?.cwd || instance?.cwd || "";
-      if (!cwd || request.questions.length === 0) {
-        this.opencodeQuestionClaims.delete(claimKey);
-        return;
-      }
-      const questions: UserInputQuestion[] = request.questions.map((question, index) => ({
-        header: question.header || `问题 ${index + 1}`,
-        id: `opencode_question_${index + 1}`,
-        question: question.question,
-        options: question.options,
-        multiple: question.multiple === true,
-        custom: question.custom !== false,
-      }));
-      const session = await this.store.upsertSession({
-        sessionId: request.sessionID,
-        cwd,
-        model: current?.model,
-        turnId: current?.lastTurnId ?? `opencode-${request.id}`,
-        status: "pending_input",
-        runtime: "opencode",
-        managedByAssistant: true,
-      });
-      const recipients = await this.notificationRecipients(session);
-      if (recipients.length === 0) {
-        return;
-      }
-
-      requestId = randomUUID();
-      const timer = setTimeout(() => {
-        void this.completeUserInput(requestId!, { kind: "timeout" });
-      }, this.config.inputTimeoutMs);
-      timer.unref?.();
-      this.inputWaiters.set(requestId, {
-        source: "opencode",
-        sessionId: request.sessionID,
-        turnId: current?.lastTurnId ?? `opencode-${request.id}`,
-        cwd,
-        questions,
-        messageCards: [],
-        answers: {},
-        selections: {},
-        timer,
-        opencodeRequestId: request.id,
-      });
-
-      const allQuestionsDelivered = await this.sendUserInputCards(
-        session,
-        requestId,
-        questions,
-        recipients,
-        "opencode",
-      );
-      if (!allQuestionsDelivered) {
-        await this.completeUserInput(requestId, { kind: "local" });
-      }
-    } catch (error) {
-      if (requestId) {
-        const waiter = this.inputWaiters.get(requestId);
-        if (waiter) {
-          clearTimeout(waiter.timer);
-          this.inputWaiters.delete(requestId);
-        }
-      }
-      this.opencodeQuestionClaims.delete(claimKey);
-      throw error;
-    }
+    await this.opencodeInteractions.handleQuestionAsked(request);
   }
 
   async handleOpenCodeQuestionReplied(reply: OpenCodeQuestionReplied): Promise<void> {
-    const claimKey = this.opencodeInteractionKey(reply.sessionID, reply.requestID);
-    const pending = this.findOpenCodeInput(reply.sessionID, reply.requestID);
-    if (!pending) {
-      this.opencodeQuestionClaims.delete(claimKey);
-      await this.updateOpenCodeInteractionStatus(reply.sessionID, "running");
-      return;
-    }
-    const answers: UserInputAnswers = {};
-    pending.waiter.questions.forEach((question, index) => {
-      answers[question.id] = reply.answers[index] ?? [];
-    });
-    try {
-      await this.completeUserInput(pending.requestId, { kind: "answered", answers });
-    } finally {
-      this.opencodeQuestionClaims.delete(claimKey);
-    }
+    await this.opencodeInteractions.handleQuestionReplied(reply);
   }
 
   async handleOpenCodeQuestionRejected(
     rejection: OpenCodeQuestionRejected,
   ): Promise<void> {
-    const claimKey = this.opencodeInteractionKey(rejection.sessionID, rejection.requestID);
-    const pending = this.findOpenCodeInput(rejection.sessionID, rejection.requestID);
-    if (pending) {
-      try {
-        await this.completeUserInput(pending.requestId, { kind: "rejected" });
-      } finally {
-        this.opencodeQuestionClaims.delete(claimKey);
-      }
-      return;
-    }
-    this.opencodeQuestionClaims.delete(claimKey);
-    await this.updateOpenCodeInteractionStatus(rejection.sessionID, "waiting");
+    await this.opencodeInteractions.handleQuestionRejected(rejection);
   }
 
   async handleOpenCodeMessagePartUpdated(
     properties: OpenCodeMessagePartUpdatedProperties,
   ): Promise<void> {
-    const sessionId = properties.sessionID;
-    const part = properties.part;
-    if (!sessionId || !part || !this.store.getSettings().notifyActivity) {
-      return;
-    }
-    const status = part.state?.status;
-    if (!status || part.type !== "tool") {
-      return;
-    }
-    const current = this.store.getSession(sessionId);
-    if (!current || current.runtime !== "opencode") {
-      return;
-    }
-    let partsBySession = this.opencodeToolParts.get(sessionId);
-    if (!partsBySession) {
-      partsBySession = new Map();
-      this.opencodeToolParts.set(sessionId, partsBySession);
-    }
-    const partId = part.id || `${properties.messageID ?? "?"}-${part.tool}-${part.state?.title ?? ""}`;
-    const previous = partsBySession.get(partId);
-    if (previous === status) {
-      return;
-    }
-    partsBySession.set(partId, status);
-    const toolName = part.tool;
-    if (status === "running" || status === "pending") {
-      await this.recordOpenCodeActivity(sessionId, {
-        hook_event_name: "PreToolUse",
-        cwd: current.cwd,
-        tool_name: toolName,
-        tool_preview: previewJson(part.state?.input, 800),
-      });
-    } else if (status === "completed") {
-      await this.recordOpenCodeActivity(sessionId, {
-        hook_event_name: "PostToolUse",
-        cwd: current.cwd,
-        tool_name: toolName,
-        tool_response_preview: previewJson(part.state?.output, 800),
-      });
-    }
+    await this.opencodeEvents.handleMessagePartUpdated(properties);
   }
 
   async handleOpenCodeMessageUpdated(message: OpenCodeMessage): Promise<void> {
-    if (message.role !== "user" || !message.sessionID) {
-      return;
-    }
-    const prompt = (message.parts ?? [])
-      .filter((part) => part.type === "text" && typeof part.text === "string")
-      .map((part) => part.text as string)
-      .join("\n")
-      .trim();
-    if (!prompt) {
-      return;
-    }
-    const sessionId = message.sessionID;
-    if (this.consumeRemotePrompt(sessionId, prompt)) {
-      return;
-    }
-    const settings = this.store.getSettings();
-    const session = this.store.getSession(sessionId);
-    if (!settings.notifyUserPrompts || session?.managedByAssistant !== true) {
-      return;
-    }
-    await this.store.upsertSession({
-      sessionId,
-      cwd: session.cwd,
-      model: session.model,
-      status: "running",
-      runtime: "opencode",
-      managedByAssistant: true,
-    });
-    for (const recipient of await this.notificationRecipients(session)) {
-      try {
-        for (const card of buildUserPromptCards(session, prompt)) {
-          const messageId = await this.feishu.sendCard(recipient.chatId, card);
-          await this.addRoute(messageId, sessionId, recipient.chatId, "user_prompt");
-        }
-      } catch (error) {
-        console.error("[opencode] Failed to send a PC prompt card:", error);
-      }
-    }
+    await this.opencodeEvents.handleMessageUpdated(message);
   }
 
   async handleSessionStartHook(
     payload: SessionStartHookPayload,
   ): Promise<Record<string, unknown>> {
-    const claimedTerminal = payload.managed_terminal_id
-      ? this.managedTerminals.claimById(
-          payload.managed_terminal_id,
-          payload.cwd,
-          payload.session_id,
-        )
-      : this.managedTerminals.claim(payload.cwd, payload.session_id);
-    const managedTerminalId =
-      payload.managed_terminal_id ?? claimedTerminal?.terminalId ?? null;
-    const managedTerminalElevated =
-      managedTerminalId
-        ? payload.managed_terminal_elevated ?? claimedTerminal?.elevated ?? null
-        : null;
-    const placeholder = managedTerminalId
-      ? this.store.findSessionByManagedTerminalId(managedTerminalId)
-      : undefined;
-    const openedAt =
-      placeholder?.openedAt ??
-      (claimedTerminal
-        ? new Date(claimedTerminal.createdAt).toISOString()
-        : undefined);
-    const session = await this.store.upsertSession({
-      sessionId: payload.session_id,
-      alias: placeholder?.source === "managed_window" ? placeholder.alias : undefined,
-      cwd: payload.cwd,
-      model: payload.model,
-      status: managedTerminalId ? "waiting" : "running",
-      source: payload.source,
-      runtime: payload.runtime ?? claimedTerminal?.runtime,
-      clientProcessId: managedTerminalId
-        ? null
-        : payload.client_process_id ?? null,
-      clientProcessStartedAt: managedTerminalId
-        ? null
-        : payload.client_process_started_at ?? null,
-      managedTerminalId,
-      managedTerminalElevated,
-      managedByAssistant: managedTerminalId ? true : false,
-      transcriptPath: payload.transcript_path,
-      openedAt,
-    });
-    if (
-      placeholder?.source === "managed_window" &&
-      placeholder.sessionId !== session.sessionId
-    ) {
-      if (this.remoteInputLocks.delete(placeholder.sessionId)) {
-        this.remoteInputLocks.add(session.sessionId);
-      }
-      const queueDepth = this.managedQueueDepth.get(placeholder.sessionId);
-      if (queueDepth !== undefined) {
-        this.managedQueueDepth.delete(placeholder.sessionId);
-        this.managedQueueDepth.set(session.sessionId, queueDepth);
-      }
-      const fileRequests = this.fileReturnRequests.get(placeholder.sessionId);
-      if (fileRequests) {
-        this.fileReturnRequests.delete(placeholder.sessionId);
-        this.fileReturnRequests.set(session.sessionId, fileRequests);
-      }
-      const pendingPrompts = this.pendingRemotePrompts.get(placeholder.sessionId);
-      if (pendingPrompts) {
-        this.pendingRemotePrompts.delete(placeholder.sessionId);
-        this.pendingRemotePrompts.set(session.sessionId, pendingPrompts);
-      }
-      const activity = this.activityStates.get(placeholder.sessionId);
-      if (activity) {
-        this.activityStates.delete(placeholder.sessionId);
-        activity.sessionId = session.sessionId;
-        this.activityStates.set(session.sessionId, activity);
-      }
-      await this.store.replaceSessionReferences(placeholder.sessionId, session.sessionId);
-    }
-    const currentSession = this.store.getSession(session.sessionId) ?? session;
-    await this.watchCodexTranscript(currentSession);
-    console.log(
-      `[session] ${payload.source} registered session #${currentSession.shortId}.`,
-    );
-    if (currentSession.managedByAssistant === true && !currentSession.feishuChatId) {
-      void this.ensureSessionGroup(currentSession.sessionId);
-    }
-    await this.tryDrainRuntimeLaunch(currentSession.sessionId);
-    return {};
+    return await this.hookEvents.handleSessionStart(payload);
   }
 
   async handleSessionEndHook(
     payload: SessionEndHookPayload,
   ): Promise<Record<string, unknown>> {
-    await this.resolveInputsForSession(payload.session_id, "local");
-    await this.resolveApprovalsForSession(payload.session_id);
-    await this.transcriptMonitor.unwatch(payload.session_id);
-    const session = await this.store.upsertSession({
-      sessionId: payload.session_id,
-      cwd: payload.cwd,
-      status: "ended",
-      runtime: payload.runtime,
-      transcriptPath: payload.transcript_path,
-      ...(payload.managed_terminal_id !== undefined
-        ? { managedTerminalId: payload.managed_terminal_id }
-        : {}),
-      ...(payload.managed_terminal_elevated !== undefined
-        ? { managedTerminalElevated: payload.managed_terminal_elevated }
-        : {}),
-    });
-    this.remoteInputLocks.delete(payload.session_id);
-    this.runtimeQueues.delete(payload.session_id);
-    this.managedQueueDepth.delete(payload.session_id);
-    this.pendingRemotePrompts.delete(payload.session_id);
-    this.fileReturnRequests.delete(payload.session_id);
-    this.resetRuntimeRetryState(payload.session_id);
-    void this.finishActivity(payload.session_id, "会话已结束");
-    this.managedTerminals.release(payload.session_id);
-    console.log(`[session] Ended session #${session.shortId}.`);
-    return {};
+    return await this.hookEvents.handleSessionEnd(payload);
   }
 
   async handlePermissionHook(
     payload: PermissionHookPayload,
   ): Promise<Record<string, unknown>> {
-    const session = await this.store.upsertSession({
-      sessionId: payload.session_id,
-      cwd: payload.cwd,
-      model: payload.model,
-      turnId: payload.turn_id,
-      status: "pending_approval",
-      runtime: payload.runtime,
-      transcriptPath: payload.transcript_path,
-      ...(payload.managed_terminal_id !== undefined
-        ? { managedTerminalId: payload.managed_terminal_id }
-        : {}),
-      ...(payload.managed_terminal_elevated !== undefined
-        ? { managedTerminalElevated: payload.managed_terminal_elevated }
-        : {}),
-    });
-
-    const now = Date.now();
-    const risk = assessApprovalRisk({
-      toolName: payload.tool_name,
-      toolInput: payload.tool_input,
-      cwd: payload.cwd,
-    });
-    const approval: ApprovalRecord = {
-      requestId: randomUUID(),
-      sessionId: payload.session_id,
-      turnId: payload.turn_id,
-      cwd: payload.cwd,
-      toolName: payload.tool_name,
-      toolPreview: previewJson(payload.tool_input),
-      createdAt: new Date(now).toISOString(),
-      expiresAt: new Date(now + this.config.approvalTimeoutMs).toISOString(),
-      status: "pending",
-      messageIds: [],
-      requiresManualApproval:
-        !this.store.getSettings().autoApprove || risk.level === "high",
-      riskLevel: risk.level,
-      riskReason: risk.reason,
-    };
-    await this.watchCodexTranscript(session);
-    await this.store.createApproval(approval);
-    this.logApprovalEvent(
-      "requested",
-      session,
-      approval,
-      {
-        autoApprove: this.store.getSettings().autoApprove,
-        riskLevel: risk.level,
-        riskReason: risk.reason,
-      },
-      now,
-    );
-
-    const resultPromise = new Promise<ApprovalResolution>((resolve) => {
-      const timer = setTimeout(() => {
-        void this.completeApproval(approval.requestId, "timeout", {
-          source: "timeout",
-        });
-      }, this.config.approvalTimeoutMs);
-      this.approvalWaiters.set(approval.requestId, { timer, resolve });
-    });
-
-    const automaticallyHandled = await this.tryAutomaticApproval(
-      session,
-      approval,
-      payload.runtime ?? "codex",
-    );
-    if (!automaticallyHandled) {
-      const sentCount = await this.sendApprovalCards(
-        session,
-        approval,
-        "pending",
-        "approval",
-      );
-      if (sentCount > 0) {
-        console.log(
-          `[approval] Waiting for desktop or Feishu decision for session #${session.shortId}.`,
-        );
-      } else {
-        console.warn(
-          `[approval] Feishu unavailable; waiting for desktop decision for session #${session.shortId}.`,
-        );
-      }
-    }
-
-    const resolution = await resultPromise;
-    if (resolution === "allow") {
-      return {
-        hookSpecificOutput: {
-          hookEventName: "PermissionRequest",
-          decision: { behavior: "allow" },
-        },
-      };
-    }
-    if (resolution === "deny") {
-      return {
-        hookSpecificOutput: {
-          hookEventName: "PermissionRequest",
-          decision: {
-            behavior: "deny",
-            message: "用户已通过飞书拒绝这次操作。",
-          },
-        },
-      };
-    }
-    return {};
+    return await this.hookEvents.handlePermission(payload);
   }
 
   async handleRequestUserInputHook(
     payload: RequestUserInputHookPayload,
   ): Promise<Record<string, unknown>> {
-    const session = await this.store.upsertSession({
-      sessionId: payload.session_id,
-      cwd: payload.cwd,
-      model: payload.model,
-      turnId: payload.turn_id,
-      status: "pending_input",
-      runtime: payload.runtime,
-      ...(payload.transcript_path !== undefined
-        ? { transcriptPath: payload.transcript_path }
-        : {}),
-      ...(payload.managed_terminal_id !== undefined
-        ? { managedTerminalId: payload.managed_terminal_id }
-        : {}),
-      ...(payload.managed_terminal_elevated !== undefined
-        ? { managedTerminalElevated: payload.managed_terminal_elevated }
-        : {}),
-    });
-    await this.watchCodexTranscript(session);
-    const recipients = await this.notificationRecipients(session);
-    if (recipients.length === 0) {
-      return {};
-    }
-
-    const requestId = randomUUID();
-    const autoResolutionMs = payload.tool_input.autoResolutionMs;
-    const timeoutMs = typeof autoResolutionMs === "number" && autoResolutionMs > 0
-      ? Math.min(this.config.inputTimeoutMs, autoResolutionMs)
-      : this.config.inputTimeoutMs;
-    const resultPromise = new Promise<UserInputResolution>((resolve) => {
-      const timer = setTimeout(() => {
-        void this.completeUserInput(requestId, { kind: "timeout" });
-      }, timeoutMs);
-      this.inputWaiters.set(requestId, {
-        source: "hook",
-        sessionId: payload.session_id,
-        turnId: payload.turn_id,
-        cwd: payload.cwd,
-        questions: payload.tool_input.questions,
-        messageCards: [],
-        answers: {},
-        selections: {},
-        timer,
-        resolve,
-      });
-    });
-
-    const allQuestionsDelivered = await this.sendUserInputCards(
-      session,
-      requestId,
-      payload.tool_input.questions,
-      recipients,
-      "input",
-    );
-    if (!allQuestionsDelivered) {
-      await this.completeUserInput(requestId, { kind: "local" });
-    }
-
-    const resolution = await resultPromise;
-    if (resolution.kind !== "answered") {
-      return {};
-    }
-    const answerText = payload.tool_input.questions
-      .map(
-        (question, index) =>
-          `${index + 1}. ${question.header} (${question.id}): ${(resolution.answers[question.id] ?? []).join("、")}`,
-      )
-      .join("\n");
-    if (payload.runtime === "claudecode") {
-      const originalInput = payload.tool_input.claudeCodeOriginalInput;
-      const questionTextById = payload.tool_input.claudeCodeQuestionTextById;
-      if (originalInput && questionTextById) {
-        const answers = Object.fromEntries(
-          payload.tool_input.questions.flatMap((question) => {
-            const questionText = questionTextById[question.id];
-            return questionText
-              ? [[questionText, (resolution.answers[question.id] ?? []).join(", ")]]
-              : [];
-          }),
-        );
-        const annotations = Object.fromEntries(
-          payload.tool_input.questions.flatMap((question) => {
-            const questionText = questionTextById[question.id];
-            const selected = resolution.answers[question.id] ?? [];
-            if (!questionText || selected.length !== 1) {
-              return [];
-            }
-            const preview = question.options.find(
-              (option) => option.label === selected[0],
-            )?.preview;
-            return preview ? [[questionText, { preview }]] : [];
-          }),
-        );
-        return {
-          hookSpecificOutput: {
-            hookEventName: "PreToolUse",
-            permissionDecision: "allow",
-            updatedInput: {
-              ...originalInput,
-              answers,
-              annotations,
-            },
-          },
-        };
-      }
-    }
-    return {
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: `request_user_input 已由用户通过飞书回答：\n${answerText}\n请直接使用这些答案继续，不要再次询问同一组问题。`,
-      },
-    };
+    return await this.hookEvents.handleRequestUserInput(payload);
   }
 
   async handleActivityHook(
     payload: ActivityHookPayload,
   ): Promise<Record<string, unknown>> {
-    const settings = this.store.getSettings();
-    if (payload.hook_event_name === "UserPromptSubmit") {
-      void this.handleUserPromptSubmit(payload, settings).catch((error) => {
-        console.error("[prompt] Could not sync the PC prompt to Feishu:", error);
-      });
-    }
-    if (settings.notifyActivity) {
-      void this.recordActivity(payload).catch((error) => {
-        console.error("[activity] Could not record Codex activity:", error);
-      });
-    }
-    return {};
+    return await this.hookEvents.handleActivity(payload);
   }
 
-  async handleStopHook(payload: StopHookPayload): Promise<Record<string, unknown>> {
-    if ((this.managedQueueDepth.get(payload.session_id) ?? 0) > 0) {
-      this.remoteInputLocks.add(payload.session_id);
-    } else {
-      this.remoteInputLocks.delete(payload.session_id);
-    }
-    const previous = this.store.getSession(payload.session_id);
-
-    let assistantMessage = payload.last_assistant_message;
-    let turnId = payload.turn_id;
-    let structuredCodexError: string | undefined;
-    let structuredCodexErrorCode: string | undefined;
-    if (payload.runtime === "claudecode" && payload.transcript_path) {
-      const transcriptMessage = await readLastClaudeAssistantMessage(payload.transcript_path);
-      assistantMessage ||= transcriptMessage?.text ?? null;
-      turnId = transcriptMessage?.turnId ?? turnId;
-    } else if (payload.transcript_path) {
-      const completion = await readCodexTurnCompletion(payload.transcript_path, turnId);
-      assistantMessage ||= completion?.assistantMessage ?? null;
-      structuredCodexError = completion?.error;
-      structuredCodexErrorCode = completion?.errorCode;
-      turnId = completion?.turnId ?? turnId;
-    }
-
-    const session = await this.store.upsertSession({
-      sessionId: payload.session_id,
-      cwd: payload.cwd,
-      model: payload.model,
-      turnId,
-      status: "waiting",
-      assistantMessage,
-      runtime: payload.runtime,
-      transcriptPath: payload.transcript_path,
-      ...(payload.managed_terminal_id !== undefined
-        ? { managedTerminalId: payload.managed_terminal_id }
-        : {}),
-      ...(payload.managed_terminal_elevated !== undefined
-        ? { managedTerminalElevated: payload.managed_terminal_elevated }
-        : {}),
-    });
-    const codexError = structuredCodexError ?? codexErrorFromMessage(assistantMessage);
-    if (!codexError) {
-      this.resetRuntimeRetryState(payload.session_id);
-    }
-    if (turnId && turnNotificationWasSent(previous, turnId)) {
-      return {};
-    }
-    if (codexError) {
-      await this.notifyRuntimeTurnError(
-        session,
-        turnId,
-        codexError,
-        structuredCodexErrorCode,
-      );
-      return {};
-    }
-    await this.finishActivity(payload.session_id, "本轮处理完成");
-    const fileReturnRequest = this.advanceFileReturnRequests(payload.session_id);
-    this.decrementManagedQueueDepth(payload.session_id);
-
-    const fileDirectives = extractBridgeFileDirectives(
-      assistantMessage?.trim() || `${runtimeDisplayName(session.runtime)} 已结束本轮处理。`,
-    );
-    const message = fileDirectives.displayMessage ||
-      `${runtimeDisplayName(session.runtime)} 已结束本轮处理。`;
-    const sentCount = await this.sendTurnNotificationCards(
-      session,
-      turnId,
-      "stop",
-      message,
-      buildStopCards(session, message),
-      "[stop] Failed to send a Feishu completion card:",
-    );
-    if (sentCount > 0) {
-      console.log(`[stop] Notified Feishu for session #${session.shortId}.`);
-    }
-    if (fileReturnRequest && fileDirectives.paths.length > 0) {
-      void this.sendRequestedFiles(
-        session,
-        fileReturnRequest.chatId,
-        fileDirectives.paths,
-      ).catch((error) => {
-        console.error("[files] Asynchronous file return failed:", error);
-      });
-    }
-    void this.tryDrainExternalQueue(payload.session_id);
-    return {};
+  async handleStopHook(
+    payload: StopHookPayload,
+  ): Promise<Record<string, unknown>> {
+    return await this.hookEvents.handleStop(payload);
   }
 
   private async handleCodexTranscriptError(
@@ -1879,146 +837,12 @@ export class BridgeController {
       runtime: "codex",
       transcriptPath: event.transcriptPath,
     });
-    await this.notifyRuntimeTurnError(
+    await this.runtimeRetries.notifyTurnError(
       session,
       event.turnId,
       event.error,
       event.errorCode,
     );
-  }
-
-  private async notifyRuntimeTurnError(
-    session: SessionRecord,
-    turnId: string,
-    errorMessage: string,
-    errorCode?: string,
-  ): Promise<boolean> {
-    if (turnNotificationWasSent(this.store.getSession(session.sessionId), turnId)) {
-      return false;
-    }
-    await this.finishActivity(session.sessionId, "本轮发生错误");
-    const retryCount = this.runtimeRetryCounts.get(session.sessionId) ?? 0;
-    const retrySettings = this.store.getSettings();
-    const retryDelay = retryDelayMs(retrySettings, this.config.retryBaseDelayMs);
-    const canRetry =
-      retrySettings.autoRetryErrors &&
-      retryCount < retrySettings.retryMaxAttempts &&
-      isRetryableRuntimeError(errorMessage, errorCode) &&
-      this.isRuntimeReadyForRetry(session);
-    const detail = canRetry
-      ? `${errorMessage}\n\n助手将在 ${Math.ceil(retryDelay / 1_000)} 秒后自动重试（第 ${retryCount + 1}/${retrySettings.retryMaxAttempts} 次）。`
-      : errorMessage;
-    const failedSession = await this.store.upsertSession({
-      sessionId: session.sessionId,
-      cwd: session.cwd,
-      model: session.model,
-      turnId,
-      status: "error",
-      error: errorMessage,
-      runtime: session.runtime,
-    });
-    await this.sendTurnNotificationCards(
-      failedSession,
-      turnId,
-      "error",
-      errorMessage,
-      buildErrorCards(failedSession, detail),
-      "[error] Failed to send a runtime error card:",
-    );
-    if (!canRetry) {
-      return false;
-    }
-    const retryAttempt = retryCount + 1;
-    this.runtimeRetryCounts.set(session.sessionId, retryAttempt);
-    const previousTimer = this.runtimeRetryTimers.get(session.sessionId);
-    if (previousTimer) {
-      clearTimeout(previousTimer);
-    }
-    const retryTimer = setTimeout(() => {
-      if (this.runtimeRetryTimers.get(session.sessionId) !== retryTimer) {
-        return;
-      }
-      this.runtimeRetryTimers.delete(session.sessionId);
-      const current = this.store.getSession(session.sessionId);
-      const currentSettings = this.store.getSettings();
-      if (
-        !currentSettings.autoRetryErrors ||
-        retryCount >= currentSettings.retryMaxAttempts ||
-        this.runtimeRetryCounts.get(session.sessionId) !== retryAttempt ||
-        !current ||
-        !this.isRuntimeReadyForRetry(current)
-      ) {
-        return;
-      }
-      const retryPrompt =
-        "刚才的请求因临时服务错误失败。请重试上一项任务，并继续从中断处执行。";
-      void this.sendRuntimeRetry(current, retryPrompt).catch((error) => {
-        console.error("[retry] Runtime retry failed:", error);
-      });
-    }, retryDelay);
-    this.runtimeRetryTimers.set(session.sessionId, retryTimer);
-    retryTimer.unref?.();
-    return true;
-  }
-
-  private async sendTurnNotificationCards(
-    session: SessionRecord,
-    turnId: string,
-    kind: "stop" | "error",
-    notificationMessage: string,
-    cards: Record<string, unknown>[],
-    failureMessage: string,
-  ): Promise<number> {
-    const notificationKey = `${session.sessionId}\u0000${turnId}`;
-    if (this.turnNotificationsInFlight.has(notificationKey)) {
-      return 0;
-    }
-    this.turnNotificationsInFlight.add(notificationKey);
-    try {
-      if (
-        !(await this.store.claimTurnNotification(
-          session.sessionId,
-          turnId,
-          kind,
-          notificationMessage,
-        ))
-      ) {
-        return 0;
-      }
-      const recipients = await this.notificationRecipients(session);
-      if (recipients.length === 0) {
-        await this.store.releaseTurnNotification(session.sessionId, turnId);
-        return 0;
-      }
-      let sentCount = 0;
-      for (const recipient of recipients) {
-        try {
-          for (const [cardIndex, card] of cards.entries()) {
-            const messageId = await this.feishu.sendCard(
-              recipient.chatId,
-              card,
-              turnNotificationIdempotencyKey(
-                session.sessionId,
-                turnId,
-                kind,
-                recipient.chatId,
-                cardIndex,
-              ),
-            );
-            sentCount += 1;
-            await this.addRoute(messageId, session.sessionId, recipient.chatId, kind);
-          }
-        } catch (error) {
-          console.error(failureMessage, error);
-        }
-      }
-      if (sentCount === recipients.length * cards.length) {
-        await this.store.completeTurnNotification(session.sessionId, turnId);
-      }
-      return sentCount;
-    } finally {
-      this.turnNotificationsInFlight.delete(notificationKey);
-    }
   }
 
   private async recoverPendingTurnNotifications(): Promise<void> {
@@ -2035,7 +859,7 @@ export class BridgeController {
             await this.store.releaseTurnNotification(session.sessionId, turnId);
             continue;
           }
-          await this.notifyRuntimeTurnError(session, turnId, errorMessage);
+          await this.runtimeRetries.notifyTurnError(session, turnId, errorMessage);
           continue;
         }
         const fileDirectives = extractBridgeFileDirectives(
@@ -2045,7 +869,7 @@ export class BridgeController {
         );
         const message = fileDirectives.displayMessage ||
           `${runtimeDisplayName(session.runtime)} 已结束本轮处理。`;
-        await this.sendTurnNotificationCards(
+        await this.turnNotifications.send(
           session,
           turnId,
           "stop",
@@ -2062,55 +886,6 @@ export class BridgeController {
     }
   }
 
-  private resetRuntimeRetryState(sessionId: string): void {
-    this.runtimeRetryCounts.delete(sessionId);
-    const timer = this.runtimeRetryTimers.get(sessionId);
-    if (timer) {
-      clearTimeout(timer);
-      this.runtimeRetryTimers.delete(sessionId);
-    }
-  }
-
-  private isRuntimeReadyForRetry(session: SessionRecord): boolean {
-    if (runtimeDefinition(session.runtime).transport === "http_event_stream") {
-      return Boolean(this.opencode?.findActiveInstanceBySession(session.sessionId));
-    }
-    return this.managedTerminals.isReady(session);
-  }
-
-  private async sendRuntimeRetry(
-    session: SessionRecord,
-    retryPrompt: string,
-  ): Promise<void> {
-    const runningSession = await this.store.upsertSession({
-      sessionId: session.sessionId,
-      alias: session.alias,
-      cwd: session.cwd,
-      model: session.model,
-      status: "running",
-      source: session.source,
-      runtime: session.runtime,
-      managedTerminalId: session.managedTerminalId,
-      managedTerminalElevated: session.managedTerminalElevated,
-      managedByAssistant: session.managedByAssistant,
-    });
-    this.remoteInputLocks.add(session.sessionId);
-    this.rememberRemotePrompt(session.sessionId, retryPrompt);
-    try {
-      if (runtimeDefinition(runningSession.runtime).transport === "http_event_stream") {
-        if (!this.opencode) {
-          throw new Error("opencode 支持未启用。");
-        }
-        await this.opencode.sendPrompt(runningSession.sessionId, retryPrompt);
-      } else {
-        await this.managedTerminals.send(runningSession, retryPrompt, "steer");
-      }
-    } catch (error) {
-      this.remoteInputLocks.delete(session.sessionId);
-      this.forgetRemotePrompt(session.sessionId, retryPrompt);
-      throw error;
-    }
-  }
 
   private async watchCodexTranscript(session: SessionRecord): Promise<void> {
     if (
@@ -2124,2781 +899,13 @@ export class BridgeController {
   }
 
   async handleFeishuMessage(data: FeishuEvent): Promise<void> {
-    const openId = data.sender?.sender_id?.open_id;
-    const message = data.message;
-    const chatId = message?.chat_id;
-    const messageId = message?.message_id;
-    const chatType = message?.chat_type ?? "unknown";
-    const parsedContent = parseFeishuContent(message);
-    const text = parsedContent.text;
-
-    if (!openId || !chatId || !messageId) {
-      console.warn("[message] Ignored a message without sender, chat, or message id.");
-      return;
-    }
-
-    if (!(await this.store.claimInboundMessage(messageId))) {
-      console.log(`[message] Ignored duplicate Feishu message ${messageId}.`);
-      return;
-    }
-
-    console.log(
-      `[message] Received Feishu ${String(message?.message_type ?? "text")} (${text.length} chars, ${parsedContent.attachments.length} attachments, ${chatType}).`,
-    );
-
-    const bindAttempt = chatType === "p2p"
-      ? parseBindCommand(text, this.config.bindCommand)
-      : { matched: false };
-    if (bindAttempt.matched) {
-      const result = await this.store.bindOwner(
-        {
-          openId,
-          chatId,
-          chatType,
-          boundAt: new Date().toISOString(),
-        },
-        bindAttempt.code,
-      );
-      if (result === "invalid_code") {
-        await this.respond(
-          messageId,
-          chatId,
-          `绑定码不正确。请在电脑端 Codex 飞书助手中查看本机绑定命令，再发送“${this.config.bindCommand} 绑定码”。`,
-        );
-        return;
-      }
-      if (result === "owner_mismatch") {
-        await this.respond(
-          messageId,
-          chatId,
-          "这个助手已经设置了唯一管理员，其他飞书账号不能绑定或控制本机 Codex。",
-        );
-        return;
-      }
-      await this.respond(
-        messageId,
-        chatId,
-        result === "bound"
-          ? "绑定成功，你已成为这台电脑上 Codex 助手的唯一管理员。"
-          : "管理员绑定已恢复。现在可以继续接收通知和回复 Codex。",
-      );
-      void this.initializeSessionGroups().catch((error) => {
-        console.warn("[feishu] Could not initialize existing session groups:", error);
-      });
-      return;
-    }
-
-    if (chatType === "p2p" && text === "解绑") {
-      const removed = await this.store.removeBinding(openId);
-      await this.respond(messageId, chatId, removed ? "已解绑。" : "当前账号还没有绑定。");
-      return;
-    }
-
-    if (!this.store.isBound(openId)) {
-      await this.respond(
-        messageId,
-        chatId,
-        this.store.getOwnerOpenId()
-          ? "飞书连接正常，但这个助手只允许已设置的管理员账号操作。"
-          : `飞书连接正常。请先在电脑端查看随机绑定码，然后私聊发送“${this.config.bindCommand} 绑定码”。`,
-      );
-      return;
-    }
-
-    const groupSession = chatType === "p2p"
-      ? undefined
-      : this.store.findSessionByFeishuChatId(chatId);
-    if (chatType !== "p2p" && !groupSession) {
-      await this.respond(
-        messageId,
-        chatId,
-        codexNotReceived("当前群未绑定会话。"),
-      );
-      return;
-    }
-    if (groupSession) {
-      await this.store.touchSessionActivity(groupSession.sessionId);
-    }
-
-    const attachmentKey = this.attachmentKey(openId, chatId);
-    if (parsedContent.attachments.length > 0) {
-      try {
-        const downloaded = await this.attachmentStore.download(
-          this.feishu,
-          messageId,
-          parsedContent.attachments,
-        );
-        this.stageAttachments(attachmentKey, downloaded);
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        await this.respond(messageId, chatId, `附件接收失败：${truncate(detail, 500)}`);
-        return;
-      }
-      if (!text) {
-        const staged = this.peekAttachments(attachmentKey);
-        await this.respond(
-          messageId,
-          chatId,
-          groupSession
-            ? `已安全保存 ${parsedContent.attachments.length} 个附件（当前暂存 ${staged.length} 个）。下一条直接发送处理要求即可。`
-            : `已安全保存 ${parsedContent.attachments.length} 个附件（当前暂存 ${staged.length} 个）。下一条请发送处理要求；有多个窗口时请写成“@别名 要求”或“#短ID 要求”。`,
-        );
-        return;
-      }
-    }
-
-    // Session groups are a direct Codex input surface. Keep bridge
-    // administration in the bot's private chat so words such as “状态” or
-    // “帮助” can still be sent to the corresponding Codex session.
-    const isPrivateChat = chatType === "p2p";
-
-    if (isPrivateChat) {
-      const newRuntimeCommand = parseNewRuntimeCommand(text);
-      if (newRuntimeCommand) {
-        await this.handleFeishuNewRuntimeCommand(
-          newRuntimeCommand,
-          messageId,
-          chatId,
-        );
-        return;
-      }
-      if (/^新建(?:\s|$)/iu.test(text)) {
-        await this.respond(messageId, chatId, newRuntimeCommandUsage());
-        return;
-      }
-    }
-
-    if (isPrivateChat && (text === "工作区" || text.toLowerCase() === "workspace")) {
-      const workspaceRoot = this.store.getSettings().workspaceRoot;
-      await this.respond(
-        messageId,
-        chatId,
-        workspaceRoot
-          ? `默认工作区：${workspaceRoot}\n新建命令示例：新建 codex 我的项目`
-          : "尚未设置默认工作区。请在电脑端“设置”中选择。",
-      );
-      return;
-    }
-
-    if (isPrivateChat && text === "状态") {
-      const sessions = this.listActiveSessions();
-      const pending = sessions.filter((session) => session.status === "pending_approval").length;
-      const queued = [...this.runtimeQueues.values()].reduce(
-        (total, queue) => total + queue.length,
-        0,
-      ) + [...this.managedQueueDepth.values()].reduce(
-        (total, depth) => total + depth,
-        0,
-      );
-      await this.respond(
-        messageId,
-        chatId,
-        `飞书桥接在线，当前账号已绑定。活跃会话 ${sessions.length} 个，待审批 ${pending} 个，待补充 ${this.inputWaiters.size} 个，排队 ${queued} 条。\n${this.activeSessionDefinition()}`,
-      );
-      return;
-    }
-
-    if (isPrivateChat && (text === "会话" || text.toLowerCase() === "sessions")) {
-      await this.respond(messageId, chatId, this.formatSessionList());
-      return;
-    }
-
-    if (isPrivateChat) {
-      const aliasCommand = parseAliasCommand(text);
-      if (aliasCommand) {
-        await this.handleFeishuAliasCommand(aliasCommand, messageId, chatId);
-        return;
-      }
-      if (/^别名(?:\s|$)/.test(text)) {
-        await this.respond(messageId, chatId, aliasCommandUsage());
-        return;
-      }
-    }
-
-    if (isPrivateChat && text === "帮助") {
-      await this.respond(
-        messageId,
-        chatId,
-        "用法：\n1. 发送“新建 codex 项目名”“新建 claude 项目名”或“新建 opencode 项目名”；\n2. 发送“工作区”查看默认项目根目录；\n3. 引用助手同步窗口的通知并回复；\n4. 发送 @别名 内容，运行中会直接插话；\n5. 发送“排队 @别名 内容”，排到下一轮；\n6. 发送“发文件 @别名 要求”，让助手完成后把文件发回；\n7. 可直接发送图片或文件，下一条再发送处理要求；\n8. 发送“会话”或“别名”查看路由；\n9. 外部会话仅支持通知、审批和补充信息；审批和补充信息卡片可在飞书处理。",
-      );
-      return;
-    }
-
-    if (!text) {
-      await this.respond(messageId, chatId, "没有识别到文字或可下载的附件。请发送“帮助”查看用法。");
-      return;
-    }
-
-    const quotedRoute = this.store.findMessageRoute([
-      message?.parent_id,
-      message?.root_id,
-    ]);
-
-    if (quotedRoute?.kind === "input" && quotedRoute.requestId) {
-      const waiter = this.inputWaiters.get(quotedRoute.requestId);
-      if (!waiter) {
-        await this.respond(messageId, chatId, "这组问题已经处理或失效。");
-        return;
-      }
-      const questionId = waiter.messageCards.find(
-        (item) => item.messageId === quotedRoute.messageId,
-      )?.questionId;
-      const targetQuestions = questionId
-        ? waiter.questions.filter((question) => question.id === questionId)
-        : waiter.questions;
-      const answers = parseUserInputAnswers(text, targetQuestions);
-      if (!answers) {
-        await this.respond(
-          messageId,
-          chatId,
-          inputAnswerUsage(targetQuestions),
-        );
-        return;
-      }
-      const result = questionId
-        ? await this.recordUserInputAnswer(
-            quotedRoute.requestId,
-            questionId,
-            answers[questionId] ?? [],
-          )
-        : (await this.answerUserInput(quotedRoute.requestId, answers))
-          ? "submitted"
-          : "stale";
-      const inputSession = this.store.getSession(waiter.sessionId);
-      await this.respond(
-        messageId,
-        chatId,
-        result === "submitted"
-          ? receivedText(inputSession)
-          : result === "recorded"
-            ? "已记录这张问题卡片的答案，请继续处理其他问题。"
-            : result === "failed"
-              ? notReceivedText(inputSession, "暂时无法把答案交给助手，请稍后重试。")
-              : notReceivedText(inputSession, "问题已处理或失效。"),
-      );
-      return;
-    }
-
-    if (quotedRoute?.requestId && this.store.hasPendingApprovalForSession(quotedRoute.sessionId)) {
-      const approvalResolution = approvalResolutionFromText(text);
-      if (approvalResolution) {
-        const approvalSession = this.store.getSession(quotedRoute.sessionId);
-        const completed = await this.completeApproval(
-          quotedRoute.requestId,
-          approvalResolution,
-          { source: "feishu_text" },
-        );
-        await this.respond(
-          messageId,
-          chatId,
-          completed
-            ? approvalText(approvalResolution, approvalSession)
-            : "这条审批已经处理或失效。",
-        );
-      } else {
-        await this.respond(
-          messageId,
-          chatId,
-          "这个会话正在等待审批。请点击审批卡片按钮，或引用卡片回复“批准”或“拒绝”。",
-        );
-      }
-      return;
-    }
-
-    const leadingDirectives = parsePromptDirectives(text);
-    const explicit = parseExplicitSession(leadingDirectives.prompt) ??
-      parseExplicitAlias(leadingDirectives.prompt);
-
-    let target: SessionRecord | undefined;
-    let prompt = leadingDirectives.prompt;
-    let queueRequested = leadingDirectives.queue;
-    let fileReturnRequested = leadingDirectives.fileReturn;
-
-    if (groupSession) {
-      target = this.store.getSession(groupSession.sessionId) ?? groupSession;
-      // A session group is already an unambiguous route. Ignore @alias/#id
-      // prefixes here so one group can never accidentally steer another session.
-      if (explicit) {
-        prompt = explicit.prompt;
-      }
-    } else if (explicit) {
-      const matches = explicit.kind === "short"
-        ? this.findActiveSessionsByShortToken(explicit.token)
-        : this.findActiveSessionsByAlias(explicit.token);
-      const address = explicit.kind === "short"
-        ? `#${explicit.token}`
-        : `@${explicit.token}`;
-      if (matches.length !== 1) {
-        await this.respond(
-          messageId,
-          chatId,
-          matches.length === 0
-            ? codexNotReceived(`没有找到 ${address} 对应的活跃会话。`)
-            : explicit.kind === "short"
-              ? codexNotReceived(`${address} 匹配到多个会话。`)
-              : codexNotReceived(`${address} 不是唯一别名。`),
-        );
-        return;
-      }
-      target = matches[0];
-      prompt = explicit.prompt;
-    } else if (quotedRoute) {
-      target = this.listActiveSessions().find(
-        (session) => session.sessionId === quotedRoute.sessionId,
-      );
-    } else {
-      const activeSessions = this.listActiveSessions();
-      if (activeSessions.length === 1) {
-        target = activeSessions[0];
-      } else {
-        await this.respond(
-          messageId,
-          chatId,
-          activeSessions.length === 0
-            ? codexNotReceived("当前没有活跃会话。")
-            : codexNotReceived("有多个活跃会话，请指定目标。"),
-        );
-        return;
-      }
-    }
-
-    if (!target) {
-      await this.respond(
-        messageId,
-        chatId,
-        groupSession
-          ? codexNotReceived("对应窗口已关闭。")
-          : codexNotReceived("对应会话不可用。"),
-      );
-      return;
-    }
-    const nestedDirectives = parsePromptDirectives(prompt);
-    prompt = nestedDirectives.prompt;
-    queueRequested ||= nestedDirectives.queue;
-    fileReturnRequested ||= nestedDirectives.fileReturn;
-    if (!prompt) {
-      await this.respond(messageId, chatId, codexNotReceived("内容为空。"));
-      return;
-    }
-    const attachments = this.takeAttachments(attachmentKey);
-    prompt = appendAttachmentsToPrompt(prompt, attachments);
-    if (fileReturnRequested) {
-      prompt = addFileReturnInstruction(prompt);
-    }
-    const targetRuntime = runtimeDefinition(target.runtime);
-    if (
-      groupSession &&
-      target.managedByAssistant === true &&
-      !target.clientProcessId &&
-      !this.isRuntimeAvailable(target)
-    ) {
-      await this.queueRuntimeLaunch(target, {
-        prompt,
-        sourceMessageId: messageId,
-        chatId,
-        requestFileReturn: fileReturnRequested,
-        queueRequested,
-      });
-      return;
-    }
-    if (
-      !this.managedTerminals.isManaged(target) &&
-      targetRuntime.transport !== "http_event_stream"
-    ) {
-      await this.respond(
-        messageId,
-        chatId,
-        externalSessionInputBlockedMessage(target),
-      );
-      return;
-    }
-    if (
-      targetRuntime.transport === "http_event_stream" &&
-      !this.opencode?.findActiveInstanceBySession(target.sessionId)
-    ) {
-      await this.respond(
-        messageId,
-        chatId,
-        notReceivedText(target, "opencode 窗口未连接。"),
-      );
-      return;
-    }
-    await this.resumeSession(
-      target,
-      prompt,
-      messageId,
-      chatId,
-      queueRequested,
-      fileReturnRequested,
-    );
-  }
-
-  async handleCardAction(data: FeishuEvent): Promise<ActionResult> {
-    const actionValue = normalizeActionValue(data.action?.value);
-    const action = actionValue?.action;
-    const requestId = actionValue?.requestId;
-    const operatorOpenId = data.operator?.open_id;
-
-    if (!operatorOpenId || !this.store.isBound(operatorOpenId)) {
-      return { toast: { type: "warning", content: "只有已绑定的管理员可以审批。" } };
-    }
-    if (typeof requestId !== "string") {
-      return { toast: { type: "error", content: "审批参数不完整。" } };
-    }
-
-    if (
-      action === "input_answer" ||
-      action === "input_toggle" ||
-      action === "input_submit" ||
-      action === "input_local"
-    ) {
-      const waiter = this.inputWaiters.get(requestId);
-      if (
-        !waiter ||
-        (typeof actionValue?.sessionId === "string" &&
-          waiter.sessionId !== actionValue.sessionId)
-      ) {
-        return { toast: { type: "warning", content: "这组问题已经处理或失效。" } };
-      }
-      if (action === "input_local") {
-        const completed = await this.completeUserInput(requestId, { kind: "local" });
-        return {
-          toast: {
-            type: completed ? "success" : "warning",
-            content: completed ? "已转回电脑端回答。" : "这组问题已经处理或失效。",
-          },
-        };
-      }
-      const questionId = actionValue?.questionId;
-      if (typeof questionId !== "string") {
-        return { toast: { type: "error", content: "问题参数不完整。" } };
-      }
-      const question = waiter.questions.find((item) => item.id === questionId);
-      if (!question) {
-        return { toast: { type: "error", content: "这个问题已经失效。" } };
-      }
-      const suppliedSelectionKey = actionValue?.selectionKey;
-      const selectionKey = typeof suppliedSelectionKey === "string"
-        ? suppliedSelectionKey
-        : `operator:${operatorOpenId}`;
-      if (
-        typeof suppliedSelectionKey === "string" &&
-        !waiter.messageCards.some(
-          (item) =>
-            item.questionId === questionId &&
-            item.chatId === suppliedSelectionKey,
-        )
-      ) {
-        return { toast: { type: "warning", content: "这张问题卡已经失效。" } };
-      }
-      if (action === "input_toggle") {
-        const answer = actionValue?.answer;
-        if (!question.multiple || typeof answer !== "string") {
-          return { toast: { type: "error", content: "多选答案参数不完整。" } };
-        }
-        if (!question.options.some((option) => option.label === answer)) {
-          return { toast: { type: "error", content: "这个答案不属于当前问题。" } };
-        }
-        const result = await this.toggleUserInputAnswer(
-          requestId,
-          questionId,
-          answer,
-          selectionKey,
-        );
-        return {
-          toast: {
-            type: result === "stale" ? "warning" : "success",
-            content: result === "stale"
-              ? "这道问题已经处理或失效。"
-              : result === "selected"
-                ? `已选择“${truncate(answer, 80)}”，可继续选择或提交。`
-                : `已取消“${truncate(answer, 80)}”的选择。`,
-          },
-        };
-      }
-      if (action === "input_submit") {
-        if (!question.multiple) {
-          return { toast: { type: "error", content: "这不是多选问题。" } };
-        }
-        const result = await this.submitUserInputQuestion(
-          requestId,
-          questionId,
-          selectionKey,
-        );
-        const runtime = runtimeDisplayName(this.store.getSession(waiter.sessionId)?.runtime);
-        return {
-          toast: {
-            type: result === "failed" || result === "stale" ? "warning" : result === "empty" ? "error" : "success",
-            content: result === "submitted"
-              ? `已把答案交给 ${runtime}。`
-              : result === "recorded"
-                ? "已记录这道问题，请继续处理其他问题。"
-                : result === "empty"
-                  ? "请至少选择一个选项。"
-                  : result === "failed"
-                    ? "暂时无法提交，请稍后重试。"
-                    : "这道问题已经处理或失效。",
-          },
-        };
-      }
-      const answer = actionValue?.answer;
-      if (typeof answer !== "string" || !question.options.some((option) => option.label === answer)) {
-        return { toast: { type: "error", content: "这个答案不属于当前问题。" } };
-      }
-      const result = await this.recordUserInputAnswer(requestId, questionId, [answer]);
-      const runtime = runtimeDisplayName(this.store.getSession(waiter.sessionId)?.runtime);
-      return {
-        toast: {
-          type: result === "submitted" || result === "recorded" ? "success" : "warning",
-          content: result === "submitted"
-            ? `已把答案交给 ${runtime}。`
-            : result === "recorded"
-              ? "已记录这道问题，请继续处理其他问题。"
-              : result === "failed"
-                ? "暂时无法提交，请稍后重试。"
-                : "这道问题已经处理或失效。",
-        },
-      };
-    }
-
-    const resolution = actionToResolution(action);
-    if (!resolution) {
-      return { toast: { type: "warning", content: "无法识别这个操作。" } };
-    }
-
-    const approval = this.store.getApproval(requestId);
-    if (
-      !approval ||
-      (typeof actionValue?.sessionId === "string" &&
-        approval.sessionId !== actionValue.sessionId)
-    ) {
-      return { toast: { type: "error", content: "审批请求不存在或已失效。" } };
-    }
-
-    const completed = await this.completeApproval(requestId, resolution, {
-      source: "feishu_card",
-    });
-    return {
-      toast: {
-        type: completed ? "success" : "warning",
-        content: completed
-          ? approvalText(resolution, this.store.getSession(approval.sessionId))
-          : "这条审批已经处理或失效。",
-      },
-    };
-  }
-
-  private async handleFeishuNewRuntimeCommand(
-    command: NewRuntimeCommand,
-    messageId: string,
-    chatId: string,
-  ): Promise<void> {
-    const validationError = projectDirectoryNameValidationError(command.projectName);
-    if (validationError) {
-      await this.respond(messageId, chatId, `项目名不正确：${validationError}`);
-      return;
-    }
-    const workspaceRoot = this.store.getSettings().workspaceRoot;
-    if (!workspaceRoot) {
-      await this.respond(
-        messageId,
-        chatId,
-        "尚未设置默认工作区。请先在电脑端“设置”中选择默认工作区。",
-      );
-      return;
-    }
-    let prepared: { cwd: string; created: boolean };
-    try {
-      prepared = await prepareProjectDirectory(workspaceRoot, command.projectName);
-    } catch (error) {
-      await this.respond(
-        messageId,
-        chatId,
-        `项目目录准备失败：${error instanceof Error ? error.message : String(error)}`,
-      );
-      return;
-    }
-    await this.queueNewRuntimeLaunch(
-      command.runtime,
-      prepared.cwd,
-      command.projectName,
-      messageId,
-      chatId,
-      prepared.created,
-    );
-  }
-
-  private async queueNewRuntimeLaunch(
-    runtime: RuntimeName,
-    cwd: string,
-    projectName: string,
-    sourceMessageId: string,
-    chatId: string,
-    directoryCreated: boolean,
-  ): Promise<void> {
-    const requestId = randomUUID();
-    const timeoutMs = this.config.runtimeLaunchTimeoutMs ?? 2 * 60 * 1000;
-    const timer = setTimeout(() => {
-      const request = this.runtimeLaunchRequests.get(requestId);
-      if (request) {
-        void this.failRuntimeLaunch(
-          request,
-          "等待桌面助手打开窗口超时。请确认面板正在运行，然后重试。",
-        );
-      }
-    }, timeoutMs);
-    timer.unref?.();
-    const request: RuntimeLaunchRequest = {
-      requestId,
-      kind: "new",
-      runtime,
-      cwd,
-      projectName,
-      sourceMessageId,
-      chatId,
-      elevated: false,
-      createdAt: new Date().toISOString(),
-      status: "pending",
-      timer,
-    };
-    this.runtimeLaunchRequests.set(requestId, request);
-    await this.respond(
-      sourceMessageId,
-      chatId,
-      `${directoryCreated ? "已创建" : "已找到"}项目“${projectName}”：${cwd}\n正在请求电脑端启动 ${runtimeDisplayName(runtime)}；会话登记后会自动创建对应飞书群。`,
-    );
-  }
-
-  private isRuntimeAvailable(session: SessionRecord): boolean {
-    if (session.status === "ended") {
-      return false;
-    }
-    if (runtimeDefinition(session.runtime).transport === "http_event_stream") {
-      return Boolean(this.opencode?.findActiveInstanceBySession(session.sessionId));
-    }
-    return this.managedTerminals.isReady(session);
-  }
-
-  private isRuntimeStarting(session: SessionRecord): boolean {
-    if (runtimeDefinition(session.runtime).transport === "http_event_stream") {
-      return this.opencode?.hasPendingSession(session.sessionId) === true;
-    }
-    const normalizedCwd = normalizeRuntimeCwd(session.cwd);
-    return this.managedTerminals.listOnline().some(
-      (registration) =>
-        normalizeRuntimeCwd(registration.cwd) === normalizedCwd &&
-        registration.runtime === (session.runtime ?? "codex") &&
-        (!registration.sessionId || registration.sessionId === session.sessionId),
-    );
-  }
-
-  private async queueRuntimeLaunch(
-    session: SessionRecord,
-    item: PendingRuntimeLaunchPrompt,
-  ): Promise<void> {
-    const queue = this.pendingRuntimeLaunchPrompts.get(session.sessionId) ?? [];
-    queue.push(item);
-    this.pendingRuntimeLaunchPrompts.set(session.sessionId, queue);
-
-    const existingRequestId = this.runtimeLaunchRequestIds.get(session.sessionId);
-    const existingRequest = existingRequestId
-      ? this.runtimeLaunchRequests.get(existingRequestId)
-      : undefined;
-    if (existingRequest) {
-      await this.respond(
-        item.sourceMessageId,
-        item.chatId,
-        `${runtimeDisplayName(session.runtime)} 会话正在自动恢复；这条消息会在窗口就绪后发送。`,
-      );
-      return;
-    }
-
-    const requestId = randomUUID();
-    const timeoutMs = this.config.runtimeLaunchTimeoutMs ?? 2 * 60 * 1000;
-    const timer = setTimeout(() => {
-      const request = this.runtimeLaunchRequests.get(requestId);
-      if (request) {
-        void this.failRuntimeLaunch(
-          request,
-          "等待桌面助手自动打开窗口超时。请确认面板正在运行，然后在群里重试。",
-        );
-      }
-    }, timeoutMs);
-    timer.unref?.();
-    const request: RuntimeLaunchRequest = {
-      requestId,
-      kind: "resume",
-      sessionId: session.sessionId,
-      runtime: session.runtime ?? "codex",
-      cwd: session.cwd,
-      elevated: session.managedTerminalElevated === true,
-      createdAt: new Date().toISOString(),
-      status: this.isRuntimeStarting(session) ? "launched" : "pending",
-      timer,
-    };
-    this.runtimeLaunchRequests.set(requestId, request);
-    this.runtimeLaunchRequestIds.set(session.sessionId, requestId);
-    await this.respond(
-      item.sourceMessageId,
-      item.chatId,
-      request.status === "pending"
-        ? `${runtimeDisplayName(session.runtime)} 窗口已关闭，正在请求电脑端自动恢复；这条消息会在窗口就绪后发送。`
-        : `${runtimeDisplayName(session.runtime)} 窗口正在启动；这条消息会在窗口就绪后发送。`,
-    );
-  }
-
-  private async failRuntimeLaunch(
-    request: RuntimeLaunchRequest,
-    detail: string,
-  ): Promise<void> {
-    this.clearRuntimeLaunchRequest(request);
-    if (request.kind === "new") {
-      if (request.sourceMessageId && request.chatId) {
-        await this.respond(
-          request.sourceMessageId,
-          request.chatId,
-          `${runtimeDisplayName(request.runtime)} 未启动：${detail}`,
-        );
-      }
-      return;
-    }
-    const sessionId = request.sessionId;
-    if (!sessionId) {
-      return;
-    }
-    const queue = this.pendingRuntimeLaunchPrompts.get(sessionId) ?? [];
-    this.pendingRuntimeLaunchPrompts.delete(sessionId);
-    const session = this.store.getSession(sessionId);
-    for (const item of queue) {
-      await this.respond(
-        item.sourceMessageId,
-        item.chatId,
-        notReceivedText(session ?? { runtime: request.runtime }, detail),
-      );
-    }
-  }
-
-  private async tryDrainRuntimeLaunch(sessionId: string): Promise<void> {
-    const session = this.store.getSession(sessionId);
-    if (!session || !this.isRuntimeAvailable(session)) {
-      return;
-    }
-    const requestId = this.runtimeLaunchRequestIds.get(sessionId);
-    const request = requestId ? this.runtimeLaunchRequests.get(requestId) : undefined;
-    if (request) {
-      this.clearRuntimeLaunchRequest(request);
-    }
-    const queue = this.pendingRuntimeLaunchPrompts.get(sessionId);
-    if (!queue?.length) {
-      this.pendingRuntimeLaunchPrompts.delete(sessionId);
-      return;
-    }
-    this.pendingRuntimeLaunchPrompts.delete(sessionId);
-    for (let index = 0; index < queue.length; index += 1) {
-      const item = queue[index]!;
-      const current = this.store.getSession(sessionId) ?? session;
-      await this.resumeSession(
-        current,
-        item.prompt,
-        item.sourceMessageId,
-        item.chatId,
-        item.queueRequested || index > 0,
-        item.requestFileReturn,
-      );
-    }
-  }
-
-  private clearRuntimeLaunchRequest(request: RuntimeLaunchRequest): void {
-    clearTimeout(request.timer);
-    this.runtimeLaunchRequests.delete(request.requestId);
-    if (
-      request.sessionId &&
-      this.runtimeLaunchRequestIds.get(request.sessionId) === request.requestId
-    ) {
-      this.runtimeLaunchRequestIds.delete(request.sessionId);
-    }
-  }
-
-  private async resumeSession(
-    session: SessionRecord,
-    prompt: string,
-    sourceMessageId: string,
-    chatId: string,
-    queueRequested = false,
-    requestFileReturn = false,
-  ): Promise<void> {
-    if (this.store.hasPendingApprovalForSession(session.sessionId)) {
-      await this.respond(
-        sourceMessageId,
-        chatId,
-        codexNotReceived("请先处理待审批操作。"),
-      );
-      return;
-    }
-    if (this.hasPendingInputForSession(session.sessionId)) {
-      await this.respond(
-        sourceMessageId,
-        chatId,
-        codexNotReceived("请先回答待补充问题。"),
-      );
-      return;
-    }
-    if (runtimeDefinition(session.runtime).transport === "http_event_stream") {
-      await this.resumeOpenCodeSession(
-        session,
-        prompt,
-        sourceMessageId,
-        chatId,
-        requestFileReturn,
-      );
-      return;
-    }
-    const managedTerminal = this.managedTerminals.isManaged(session);
-    if (managedTerminal && !this.managedTerminals.isReady(session)) {
-      await this.respond(
-        sourceMessageId,
-        chatId,
-        codexNotReceived("窗口尚未就绪。"),
-      );
-      return;
-    }
-    if (!managedTerminal &&
-        (this.codex.isRunning(session.sessionId) ||
-          this.remoteInputLocks.has(session.sessionId))) {
-      const queue = this.runtimeQueues.get(session.sessionId) ?? [];
-      queue.push({
-        prompt,
-        sourceMessageId,
-        chatId,
-        requestFileReturn,
-      });
-      this.runtimeQueues.set(session.sessionId, queue);
-      await this.respond(
-        sourceMessageId,
-        chatId,
-        receivedText(session),
-      );
-      return;
-    }
-    if (!managedTerminal) {
-      this.remoteInputLocks.add(session.sessionId);
-    }
-
-    try {
-      const runningSession = await this.store.upsertSession({
-        sessionId: session.sessionId,
-        alias: session.alias,
-        cwd: session.cwd,
-        model: session.model,
-        status: "running",
-        source: session.source,
-        managedTerminalId: session.managedTerminalId,
-        managedTerminalElevated: session.managedTerminalElevated,
-      });
-      if (managedTerminal) {
-        const busy = this.remoteInputLocks.has(session.sessionId) ||
-          session.status === "running";
-        const submitMode = queueRequested && busy ? "queue" : "steer";
-        if (submitMode === "queue") {
-          this.managedQueueDepth.set(
-            session.sessionId,
-            (this.managedQueueDepth.get(session.sessionId) ?? 0) + 1,
-          );
-        }
-        this.remoteInputLocks.add(session.sessionId);
-        this.rememberRemotePrompt(session.sessionId, prompt);
-        try {
-          await this.managedTerminals.send(runningSession, prompt, submitMode);
-        } catch (error) {
-          this.forgetRemotePrompt(session.sessionId, prompt);
-          if (submitMode === "queue") {
-            this.decrementManagedQueueDepth(session.sessionId);
-          }
-          throw error;
-        }
-        if (requestFileReturn) {
-          this.registerFileReturnRequest(
-            session.sessionId,
-            chatId,
-            submitMode === "queue"
-              ? this.managedQueueDepth.get(session.sessionId) ?? 1
-              : 0,
-          );
-        }
-        const ackId = await this.respond(
-          sourceMessageId,
-          chatId,
-          receivedText(runningSession),
-        );
-        if (ackId) {
-          await this.addRoute(ackId, session.sessionId, chatId, "resume_ack");
-        }
-        return;
-      }
-      await this.startExternalPrompt(runningSession, {
-        prompt,
-        sourceMessageId,
-        chatId,
-        requestFileReturn,
-      });
-    } catch (error) {
-      this.remoteInputLocks.delete(session.sessionId);
-      const message = error instanceof Error ? error.message : String(error);
-      await this.store.upsertSession({
-        sessionId: session.sessionId,
-        alias: session.alias,
-        cwd: session.cwd,
-        model: session.model,
-        status: "error",
-        error: message,
-        source: session.source,
-        managedTerminalId: session.managedTerminalId,
-        managedTerminalElevated: session.managedTerminalElevated,
-      });
-      await this.respond(
-        sourceMessageId,
-        chatId,
-        codexNotReceived(truncate(message, 160)),
-      );
-    }
-  }
-
-  private async startExternalPrompt(
-    session: SessionRecord,
-    item: QueuedRemotePrompt,
-  ): Promise<void> {
-    this.remoteInputLocks.add(session.sessionId);
-    await this.codex.resume(session, item.prompt, async (result) => {
-      const retrying = await this.handleCodexExit(session, result, item);
-      if (!retrying) {
-        await this.tryDrainExternalQueue(session.sessionId);
-      }
-    });
-    if (item.requestFileReturn && item.retryAttempt === undefined) {
-      this.registerFileReturnRequest(session.sessionId, item.chatId, 0);
-    }
-    if (item.retryAttempt === undefined) {
-      const ackId = await this.respond(
-        item.sourceMessageId,
-        item.chatId,
-        receivedText(session),
-      );
-      if (ackId) {
-        await this.addRoute(ackId, session.sessionId, item.chatId, "resume_ack");
-      }
-    }
-  }
-
-  private async tryDrainExternalQueue(sessionId: string): Promise<void> {
-    if (this.codex.isRunning(sessionId) || this.remoteInputLocks.has(sessionId)) {
-      return;
-    }
-    const queue = this.runtimeQueues.get(sessionId);
-    const item = queue?.shift();
-    if (!item) {
-      this.runtimeQueues.delete(sessionId);
-      return;
-    }
-    if (queue?.length === 0) {
-      this.runtimeQueues.delete(sessionId);
-    }
-    const session = this.store.getSession(sessionId);
-    if (!session || session.status === "ended") {
-      await this.respond(
-        item.sourceMessageId,
-        item.chatId,
-        "排队消息未执行：对应的外部 Codex 会话已经结束。",
-      );
-      return;
-    }
-    try {
-      const runningSession = await this.store.upsertSession({
-        sessionId: session.sessionId,
-        alias: session.alias,
-        cwd: session.cwd,
-        model: session.model,
-        status: "running",
-        source: session.source,
-      });
-      await this.startExternalPrompt(runningSession, item);
-    } catch (error) {
-      this.remoteInputLocks.delete(sessionId);
-      const message = error instanceof Error ? error.message : String(error);
-      await this.respond(
-        item.sourceMessageId,
-        item.chatId,
-        `排队消息启动失败：${truncate(message, 500)}`,
-      );
-      void this.tryDrainExternalQueue(sessionId);
-    }
-  }
-
-  private async resumeOpenCodeSession(
-    session: SessionRecord,
-    prompt: string,
-    sourceMessageId: string,
-    chatId: string,
-    requestFileReturn: boolean,
-  ): Promise<void> {
-    if (!this.opencode?.findActiveInstanceBySession(session.sessionId)) {
-      await this.respond(
-        sourceMessageId,
-        chatId,
-        notReceivedText(session, "opencode 窗口未连接。"),
-      );
-      return;
-    }
-    if (
-      this.remoteInputLocks.has(session.sessionId) ||
-      session.status === "running"
-    ) {
-      const queue = this.runtimeQueues.get(session.sessionId) ?? [];
-      queue.push({ prompt, sourceMessageId, chatId, requestFileReturn });
-      this.runtimeQueues.set(session.sessionId, queue);
-      await this.respond(sourceMessageId, chatId, receivedText(session));
-      return;
-    }
-    this.remoteInputLocks.add(session.sessionId);
-    try {
-      const runningSession = await this.store.upsertSession({
-        sessionId: session.sessionId,
-        alias: session.alias,
-        cwd: session.cwd,
-        model: session.model,
-        status: "running",
-        source: "opencode",
-        runtime: "opencode",
-        managedByAssistant: true,
-      });
-      this.rememberRemotePrompt(session.sessionId, prompt);
-      await this.opencode.sendPrompt(session.sessionId, prompt);
-      if (requestFileReturn) {
-        this.registerFileReturnRequest(session.sessionId, chatId, 0);
-      }
-      const ackId = await this.respond(
-        sourceMessageId,
-        chatId,
-        receivedText(runningSession),
-      );
-      if (ackId) {
-        await this.addRoute(ackId, session.sessionId, chatId, "resume_ack");
-      }
-    } catch (error) {
-      this.remoteInputLocks.delete(session.sessionId);
-      this.forgetRemotePrompt(session.sessionId, prompt);
-      const message = error instanceof Error ? error.message : String(error);
-      await this.store.upsertSession({
-        sessionId: session.sessionId,
-        alias: session.alias,
-        cwd: session.cwd,
-        model: session.model,
-        status: "error",
-        error: message,
-        runtime: "opencode",
-        managedByAssistant: true,
-      });
-      await this.respond(
-        sourceMessageId,
-        chatId,
-        notReceivedText(session, truncate(message, 160)),
-      );
-    }
-  }
-
-  private async tryDrainOpenCodeQueue(sessionId: string): Promise<void> {
-    if (this.remoteInputLocks.has(sessionId)) {
-      return;
-    }
-    const queue = this.runtimeQueues.get(sessionId);
-    const item = queue?.shift();
-    if (!item) {
-      this.runtimeQueues.delete(sessionId);
-      return;
-    }
-    if (queue?.length === 0) {
-      this.runtimeQueues.delete(sessionId);
-    }
-    const session = this.store.getSession(sessionId);
-    if (
-      !session ||
-      runtimeDefinition(session.runtime).transport !== "http_event_stream" ||
-      session.status === "ended"
-    ) {
-      await this.respond(
-        item.sourceMessageId,
-        item.chatId,
-        notReceivedText({ runtime: "opencode" }, "对应的 opencode 窗口已经关闭。"),
-      );
-      return;
-    }
-    if (!this.opencode?.findActiveInstanceBySession(sessionId)) {
-      this.remoteInputLocks.add(sessionId);
-      await this.respond(
-        item.sourceMessageId,
-        item.chatId,
-        notReceivedText(session, "opencode 窗口未连接。"),
-      );
-      this.remoteInputLocks.delete(sessionId);
-      void this.tryDrainOpenCodeQueue(sessionId);
-      return;
-    }
-    this.remoteInputLocks.add(sessionId);
-    try {
-      const runningSession = await this.store.upsertSession({
-        sessionId: session.sessionId,
-        alias: session.alias,
-        cwd: session.cwd,
-        model: session.model,
-        status: "running",
-        runtime: "opencode",
-        managedByAssistant: true,
-      });
-      this.rememberRemotePrompt(session.sessionId, item.prompt);
-      await this.opencode.sendPrompt(session.sessionId, item.prompt);
-      if (item.requestFileReturn) {
-        this.registerFileReturnRequest(session.sessionId, item.chatId, 0);
-      }
-      const ackId = await this.respond(
-        item.sourceMessageId,
-        item.chatId,
-        receivedText(runningSession),
-      );
-      if (ackId) {
-        await this.addRoute(ackId, session.sessionId, item.chatId, "resume_ack");
-      }
-    } catch (error) {
-      this.remoteInputLocks.delete(sessionId);
-      this.forgetRemotePrompt(sessionId, item.prompt);
-      const message = error instanceof Error ? error.message : String(error);
-      await this.respond(
-        item.sourceMessageId,
-        item.chatId,
-        notReceivedText(session, truncate(message, 500)),
-      );
-      void this.tryDrainOpenCodeQueue(sessionId);
-    }
-  }
-
-  private async forgetOpenCodeSession(
-    sessionId: string,
-    reason: string,
-  ): Promise<void> {
-    await this.resolveInputsForSession(sessionId, "local");
-    await this.resolveApprovalsForSession(sessionId);
-    const session = this.store.getSession(sessionId);
-    if (session && session.status !== "ended") {
-      await this.store.upsertSession({
-        sessionId,
-        cwd: session.cwd,
-        model: session.model,
-        status: "ended",
-        runtime: "opencode",
-        managedByAssistant: true,
-      });
-    }
-    this.remoteInputLocks.delete(sessionId);
-    const queued = this.runtimeQueues.get(sessionId);
-    this.runtimeQueues.delete(sessionId);
-    this.pendingRemotePrompts.delete(sessionId);
-    this.fileReturnRequests.delete(sessionId);
-    this.resetRuntimeRetryState(sessionId);
-    this.opencodeToolParts.delete(sessionId);
-    this.clearOpenCodeInteractionClaims(sessionId);
-    if (session) {
-      void this.finishActivity(sessionId, reason).catch((error) => {
-        console.warn("[opencode] Could not finalize activity:", error);
-      });
-    }
-    this.opencode?.forgetSession(sessionId);
-    if (queued) {
-      for (const item of queued) {
-        await this.respond(
-          item.sourceMessageId,
-          item.chatId,
-          notReceivedText({ runtime: "opencode" }, reason),
-        );
-      }
-    }
-  }
-
-  private async recordOpenCodeActivity(
-    sessionId: string,
-    input: {
-      hook_event_name: "PreToolUse" | "PostToolUse" | "PreCompact";
-      cwd: string;
-      turnId?: string;
-      tool_name?: string;
-      tool_preview?: string;
-      tool_response_preview?: string;
-    },
-  ): Promise<void> {
-    const payload: ActivityHookPayload = {
-      hook_event_name: input.hook_event_name,
-      session_id: sessionId,
-      turn_id: input.turnId,
-      cwd: input.cwd,
-      model: undefined,
-      prompt: undefined,
-      tool_name: input.tool_name,
-      tool_preview: input.tool_preview,
-      tool_response_preview: input.tool_response_preview,
-    };
-    await this.recordActivity(payload);
-  }
-
-  private async handleCodexExit(
-    session: SessionRecord,
-    result: CodexExitResult,
-    item: QueuedRemotePrompt,
-  ): Promise<boolean> {
-    this.remoteInputLocks.delete(session.sessionId);
-    if (result.code === 0) {
-      return false;
-    }
-    const reason =
-      result.stderr ||
-      (result.signal
-        ? `Codex 进程被信号 ${result.signal} 终止。`
-        : `Codex 进程退出，代码 ${String(result.code)}。`);
-    const failedSession = await this.store.upsertSession({
-      sessionId: session.sessionId,
-      cwd: session.cwd,
-      model: session.model,
-      status: "error",
-      error: reason,
-    });
-    const attempt = item.retryAttempt ?? 0;
-    const retrySettings = this.store.getSettings();
-    const retryDelay = retryDelayMs(retrySettings, this.config.retryBaseDelayMs);
-    const retrying =
-      retrySettings.autoRetryErrors &&
-      isRetryableRuntimeError(reason) &&
-      attempt < retrySettings.retryMaxAttempts;
-    const detail = retrying
-      ? `${reason}\n\n助手将在 ${Math.ceil(retryDelay / 1_000)} 秒后自动重试（第 ${attempt + 1}/${retrySettings.retryMaxAttempts} 次）。`
-      : reason;
-    for (const recipient of await this.notificationRecipients(failedSession)) {
-      try {
-        for (const card of buildErrorCards(failedSession, detail)) {
-          const messageId = await this.feishu.sendCard(recipient.chatId, card);
-          await this.addRoute(messageId, session.sessionId, recipient.chatId, "error");
-        }
-      } catch (error) {
-        console.error("[resume] Failed to send an error notification:", error);
-      }
-    }
-    if (retrying) {
-      this.remoteInputLocks.add(session.sessionId);
-      setTimeout(() => {
-        const current = this.store.getSession(session.sessionId);
-        const currentSettings = this.store.getSettings();
-        if (
-          !currentSettings.autoRetryErrors ||
-          attempt >= currentSettings.retryMaxAttempts ||
-          !current ||
-          current.status === "ended"
-        ) {
-          this.remoteInputLocks.delete(session.sessionId);
-          void this.tryDrainExternalQueue(session.sessionId);
-          return;
-        }
-        void this.startExternalPrompt(current, {
-          ...item,
-          retryAttempt: attempt + 1,
-        }).catch((error) => {
-          this.remoteInputLocks.delete(session.sessionId);
-          console.error("[retry] External retry failed:", error);
-          void this.tryDrainExternalQueue(session.sessionId);
-        });
-      }, retryDelay);
-    }
-    return retrying;
-  }
-
-  private hasPendingInputForSession(sessionId: string): boolean {
-    return [...this.inputWaiters.values()].some(
-      (waiter) => waiter.sessionId === sessionId,
-    );
-  }
-
-  private async sendUserInputCards(
-    session: SessionRecord,
-    requestId: string,
-    questions: UserInputQuestion[],
-    recipients: Array<{ chatId: string }>,
-    logLabel: string,
-  ): Promise<boolean> {
-    const deliveredQuestionIds = new Set<string>();
-    for (const recipient of recipients) {
-      const cards = buildUserInputCards(
-        session,
-        requestId,
-        questions,
-        recipient.chatId,
-      );
-      for (const [questionIndex, card] of cards.entries()) {
-        const question = questions[questionIndex];
-        if (!question) {
-          continue;
-        }
-        try {
-          const messageId = await this.feishu.sendCard(recipient.chatId, card);
-          deliveredQuestionIds.add(question.id);
-          this.inputWaiters.get(requestId)?.messageCards.push({
-            messageId,
-            questionId: question.id,
-            chatId: recipient.chatId,
-          });
-          await this.addRoute(
-            messageId,
-            session.sessionId,
-            recipient.chatId,
-            "input",
-            requestId,
-          );
-        } catch (error) {
-          console.error(`[${logLabel}] Failed to send a Feishu question card:`, error);
-        }
-      }
-    }
-    return questions.every((question) => deliveredQuestionIds.has(question.id));
-  }
-
-  private findOpenCodeInput(
-    sessionId: string,
-    opencodeRequestId: string,
-  ): { requestId: string; waiter: UserInputWaiter } | undefined {
-    for (const [requestId, waiter] of this.inputWaiters) {
-      if (
-        waiter.source === "opencode" &&
-        waiter.sessionId === sessionId &&
-        waiter.opencodeRequestId === opencodeRequestId
-      ) {
-        return { requestId, waiter };
-      }
-    }
-    return undefined;
-  }
-
-  private opencodeInteractionKey(sessionId: string, requestId: string): string {
-    return `${sessionId}\u0000${requestId}`;
-  }
-
-  private clearOpenCodeInteractionClaims(sessionId: string): void {
-    const prefix = `${sessionId}\u0000`;
-    for (const key of this.opencodePermissionClaims) {
-      if (key.startsWith(prefix)) {
-        this.opencodePermissionClaims.delete(key);
-      }
-    }
-    for (const key of this.opencodeQuestionClaims) {
-      if (key.startsWith(prefix)) {
-        this.opencodeQuestionClaims.delete(key);
-      }
-    }
-  }
-
-  private async updateOpenCodeInteractionStatus(
-    sessionId: string,
-    status: "running" | "waiting",
-  ): Promise<void> {
-    const current = this.store.getSession(sessionId);
-    const instance = this.opencode?.findInstanceBySession(sessionId);
-    const cwd = current?.cwd || instance?.cwd || "";
-    if (
-      !cwd ||
-      current?.status === "ended" ||
-      this.hasPendingInputForSession(sessionId) ||
-      this.store.hasPendingApprovalForSession(sessionId)
-    ) {
-      return;
-    }
-    await this.store.upsertSession({
-      sessionId,
-      cwd,
-      model: current?.model,
-      status,
-      runtime: "opencode",
-      managedByAssistant: true,
-    });
-  }
-
-  private async answerUserInput(
-    requestId: string,
-    answers: UserInputAnswers,
-  ): Promise<boolean> {
-    const waiter = this.inputWaiters.get(requestId);
-    if (!waiter || this.submittingInputs.has(requestId)) {
-      return false;
-    }
-    if (waiter.source === "hook") {
-      return this.completeUserInput(requestId, { kind: "answered", answers });
-    }
-    if (!waiter.opencodeRequestId || !this.opencode) {
-      return false;
-    }
-
-    this.submittingInputs.add(requestId);
-    try {
-      const orderedAnswers = waiter.questions.map((question) => answers[question.id] ?? []);
-      await this.opencode.replyQuestion(
-        waiter.sessionId,
-        waiter.opencodeRequestId,
-        orderedAnswers,
-      );
-      const completed = await this.completeUserInput(requestId, {
-        kind: "answered",
-        answers,
-      });
-      this.opencodeQuestionClaims.delete(
-        this.opencodeInteractionKey(waiter.sessionId, waiter.opencodeRequestId),
-      );
-      return completed || !this.inputWaiters.has(requestId);
-    } catch (error) {
-      console.error("[input] Failed to forward answer to opencode:", error);
-      try {
-        const pending = await this.opencode.listQuestions(waiter.sessionId);
-        if (!pending.some((request) => request.id === waiter.opencodeRequestId)) {
-          await this.completeUserInput(requestId, { kind: "local" });
-        }
-      } catch (probeError) {
-        console.warn("[input] Could not confirm opencode question state:", probeError);
-      }
-      return false;
-    } finally {
-      this.submittingInputs.delete(requestId);
-    }
-  }
-
-  private async toggleUserInputAnswer(
-    requestId: string,
-    questionId: string,
-    answer: string,
-    selectionKey: string,
-  ): Promise<UserInputToggleResult> {
-    const waiter = this.inputWaiters.get(requestId);
-    const question = waiter?.questions.find((item) => item.id === questionId);
-    if (!waiter || !question || waiter.answers[questionId]) {
-      return "stale";
-    }
-    const selections = waiter.selections[selectionKey] ?? {};
-    const current = selections[questionId] ?? [];
-    const selected = current.includes(answer);
-    const next = selected
-      ? current.filter((item) => item !== answer)
-      : [...current, answer];
-    if (next.length > 0) {
-      selections[questionId] = next;
-      waiter.selections[selectionKey] = selections;
-    } else {
-      delete selections[questionId];
-      if (Object.keys(selections).length === 0) {
-        delete waiter.selections[selectionKey];
-      }
-    }
-    await this.patchUserInputQuestionCards(requestId, questionId, {
-      selectedAnswers: next,
-    }, selectionKey);
-    return selected ? "deselected" : "selected";
-  }
-
-  private async submitUserInputQuestion(
-    requestId: string,
-    questionId: string,
-    selectionKey: string,
-  ): Promise<UserInputAnswerResult> {
-    const waiter = this.inputWaiters.get(requestId);
-    const selected = waiter?.selections[selectionKey]?.[questionId] ?? [];
-    if (selected.length === 0) {
-      return waiter ? "empty" : "stale";
-    }
-    const result = await this.recordUserInputAnswer(requestId, questionId, selected);
-    if (result === "recorded" || result === "submitted") {
-      const current = this.inputWaiters.get(requestId);
-      if (current) {
-        const selections = current.selections[selectionKey];
-        if (selections) {
-          delete selections[questionId];
-          if (Object.keys(selections).length === 0) {
-            delete current.selections[selectionKey];
-          }
-        }
-      }
-    }
-    return result;
-  }
-
-  private async recordUserInputAnswer(
-    requestId: string,
-    questionId: string,
-    answers: string[],
-  ): Promise<UserInputAnswerResult> {
-    const waiter = this.inputWaiters.get(requestId);
-    const question = waiter?.questions.find((item) => item.id === questionId);
-    if (!waiter || !question || waiter.answers[questionId]) {
-      return "stale";
-    }
-    if (answers.length === 0) {
-      return "empty";
-    }
-
-    waiter.answers[questionId] = [...answers];
-    const allAnswered = waiter.questions.every((item) => waiter.answers[item.id]);
-    if (!allAnswered) {
-      const remainingQuestions = waiter.questions.filter(
-        (item) => !waiter.answers[item.id],
-      ).length;
-      await this.patchUserInputQuestionCards(requestId, questionId, {
-        selectedAnswers: answers,
-        answered: true,
-        remainingQuestions,
-      });
-      return "recorded";
-    }
-
-    const completed = await this.answerUserInput(requestId, waiter.answers);
-    if (completed) {
-      return "submitted";
-    }
-    const attemptedAnswers = Object.fromEntries(
-      Object.entries(waiter.answers).map(([id, values]) => [id, [...values]]),
-    ) as UserInputAnswers;
-    for (const id of Object.keys(waiter.answers)) {
-      delete waiter.answers[id];
-    }
-    waiter.selections = {};
-    const chatIds = new Set(waiter.messageCards.map((item) => item.chatId));
-    for (const chatId of chatIds) {
-      const selections: UserInputAnswers = {};
-      for (const item of waiter.questions) {
-        const values = attemptedAnswers[item.id];
-        if (item.multiple && values?.length) {
-          selections[item.id] = [...values];
-        }
-      }
-      if (Object.keys(selections).length > 0) {
-        waiter.selections[chatId] = selections;
-      }
-    }
-    await Promise.all(
-      waiter.questions.map((item) =>
-        this.patchUserInputQuestionCards(requestId, item.id, {
-          selectedAnswers: attemptedAnswers[item.id] ?? [],
-          answered: false,
-        })
-      ),
-    );
-    return "failed";
-  }
-
-  private async patchUserInputQuestionCards(
-    requestId: string,
-    questionId: string,
-    state: {
-      selectedAnswers?: readonly string[];
-      answered?: boolean;
-      remainingQuestions?: number;
-    },
-    selectionKey?: string,
-  ): Promise<void> {
-    const waiter = this.inputWaiters.get(requestId);
-    const questionIndex = waiter?.questions.findIndex((item) => item.id === questionId) ?? -1;
-    const question = questionIndex >= 0 ? waiter?.questions[questionIndex] : undefined;
-    const session = waiter ? this.store.getSession(waiter.sessionId) : undefined;
-    if (!waiter || !question || !session) {
-      return;
-    }
-    const targets = waiter.messageCards
-      .filter(
-        (item) =>
-          item.questionId === questionId &&
-          (selectionKey === undefined || item.chatId === selectionKey),
-      );
-    await Promise.allSettled(
-      targets.map((target) => {
-        const selectedAnswers = state.selectedAnswers ??
-          waiter.selections[target.chatId]?.[questionId];
-        const card = buildUserInputQuestionCard(
-          session,
-          requestId,
-          question,
-          questionIndex,
-          waiter.questions.length,
-          { ...state, selectedAnswers },
-          target.chatId,
-        );
-        return this.feishu.patchCard(target.messageId, card);
-      }),
-    );
+    await this.feishuMessages.handle(data);
   }
 
-  private async completeUserInput(
-    requestId: string,
-    resolution: UserInputResolution,
-  ): Promise<boolean> {
-    const waiter = this.inputWaiters.get(requestId);
-    if (!waiter) {
-      return false;
-    }
-    clearTimeout(waiter.timer);
-    this.inputWaiters.delete(requestId);
-    this.submittingInputs.delete(requestId);
-    const status = waiter.source === "opencode"
-      ? resolution.kind === "answered"
-        ? "running"
-        : resolution.kind === "rejected"
-          ? "waiting"
-          : "pending_input"
-      : resolution.kind === "answered"
-        ? "running"
-        : "waiting";
-    const session = await this.store.upsertSession({
-      sessionId: waiter.sessionId,
-      cwd: waiter.cwd,
-      turnId: waiter.turnId,
-      status,
-    });
-    waiter.resolve?.(resolution);
-    const questionCards = waiter.messageCards.map((message) => {
-      const questionIndex = waiter.questions.findIndex(
-        (question) => question.id === message.questionId,
-      );
-      const question = questionIndex >= 0 ? waiter.questions[questionIndex] : undefined;
-      if (!question) {
-        return undefined;
-      }
-      return {
-        messageId: message.messageId,
-        card: buildResolvedUserInputQuestionCard(
-          session,
-          question,
-          resolution.kind === "answered"
-            ? resolution.answers[question.id]
-            : undefined,
-          resolution.kind,
-          questionIndex,
-          waiter.questions.length,
-        ),
-      };
-    }).filter((item): item is { messageId: string; card: Record<string, unknown> } => Boolean(item));
-    void Promise.allSettled(
-      questionCards.map((item) => this.feishu.patchCard(item.messageId, item.card)),
-    );
-    console.log(`[input] ${resolution.kind} for session #${session.shortId}.`);
-    return true;
+  async handleCardAction(data: FeishuEvent): Promise<CardActionResult> {
+    return await this.cardActions.handle(data);
   }
 
-  private async resolveInputsForSession(
-    sessionId: string,
-    resolution: "local" | "timeout",
-  ): Promise<void> {
-    const requestIds = [...this.inputWaiters]
-      .filter(([, waiter]) => waiter.sessionId === sessionId)
-      .map(([requestId]) => requestId);
-    for (const requestId of requestIds) {
-      await this.completeUserInput(requestId, { kind: resolution });
-    }
-  }
-
-  private async resolveApprovalsForSession(sessionId: string): Promise<void> {
-    const requestIds = this.store
-      .listApprovals()
-      .filter((approval) => approval.sessionId === sessionId && approval.status === "pending")
-      .map((approval) => approval.requestId);
-    for (const requestId of requestIds) {
-      await this.completeApproval(requestId, "local", {
-        source: "session_closed",
-      });
-    }
-  }
-
-  private async recordActivity(payload: ActivityHookPayload): Promise<void> {
-    const current = this.store.getSession(payload.session_id);
-    const isRemoteQuestion = payload.hook_event_name === "PreToolUse" &&
-      payload.tool_name === "request_user_input";
-    const session = !current ||
-        (!isRemoteQuestion &&
-          (current.status !== "running" ||
-            (payload.turn_id && current.lastTurnId !== payload.turn_id)))
-      ? await this.store.upsertSession({
-          sessionId: payload.session_id,
-          cwd: payload.cwd,
-          model: payload.model,
-          turnId: payload.turn_id,
-          status: "running",
-          runtime: payload.runtime,
-          ...(payload.transcript_path !== undefined
-            ? { transcriptPath: payload.transcript_path }
-            : {}),
-          ...(payload.managed_terminal_id !== undefined
-            ? { managedTerminalId: payload.managed_terminal_id }
-            : {}),
-          ...(payload.managed_terminal_elevated !== undefined
-            ? { managedTerminalElevated: payload.managed_terminal_elevated }
-            : {}),
-        })
-      : current;
-    await this.watchCodexTranscript(session);
-    let state = this.activityStates.get(payload.session_id);
-    if (state && payload.turn_id && state.turnId && state.turnId !== payload.turn_id) {
-      await this.finishActivity(payload.session_id, "上一轮已结束");
-      state = undefined;
-    }
-    if (!state) {
-      state = {
-        sessionId: payload.session_id,
-        turnId: payload.turn_id,
-        startedAt: new Date().toISOString(),
-        events: [],
-        messageIds: new Map(),
-        lastSentAt: 0,
-        revision: 0,
-        sentRevision: -1,
-        completed: false,
-      };
-      this.activityStates.set(payload.session_id, state);
-    }
-    state.turnId ??= payload.turn_id;
-    state.events.push(activityEventFromPayload(payload));
-    state.events = state.events.slice(-6);
-    state.revision += 1;
-    this.scheduleActivityFlush(session.sessionId);
-  }
-
-  private async handleUserPromptSubmit(
-    payload: ActivityHookPayload,
-    settings: BridgeSettings,
-  ): Promise<void> {
-    const prompt = payload.prompt;
-    if (!prompt?.trim()) {
-      return;
-    }
-    if (this.consumeRemotePrompt(payload.session_id, prompt)) {
-      return;
-    }
-    if (!settings.notifyUserPrompts) {
-      return;
-    }
-    const session = this.store.getSession(payload.session_id);
-    if (session?.managedByAssistant !== true) {
-      return;
-    }
-    for (const recipient of await this.notificationRecipients(session)) {
-      try {
-        for (const card of buildUserPromptCards(session, prompt)) {
-          const messageId = await this.feishu.sendCard(recipient.chatId, card);
-          await this.addRoute(messageId, session.sessionId, recipient.chatId, "user_prompt");
-        }
-      } catch (error) {
-        console.error("[prompt] Failed to send a PC prompt card:", error);
-      }
-    }
-  }
-
-  private rememberRemotePrompt(sessionId: string, prompt: string): void {
-    const now = Date.now();
-    const queue = (this.pendingRemotePrompts.get(sessionId) ?? [])
-      .filter((item) => now - item.createdAt <= 60_000);
-    queue.push({ prompt: normalizePromptForMatch(prompt), createdAt: now });
-    this.pendingRemotePrompts.set(sessionId, queue.slice(-12));
-  }
-
-  private forgetRemotePrompt(sessionId: string, prompt: string): void {
-    const queue = this.pendingRemotePrompts.get(sessionId);
-    if (!queue) return;
-    const normalized = normalizePromptForMatch(prompt);
-    const index = queue.findIndex((item) => item.prompt === normalized);
-    if (index >= 0) queue.splice(index, 1);
-    if (queue.length === 0) this.pendingRemotePrompts.delete(sessionId);
-  }
-
-  private consumeRemotePrompt(sessionId: string, prompt: string): boolean {
-    const queue = this.pendingRemotePrompts.get(sessionId);
-    if (!queue) return false;
-    const now = Date.now();
-    const normalized = normalizePromptForMatch(prompt);
-    const fresh = queue.filter((item) => now - item.createdAt <= 60_000);
-    const index = fresh.findIndex((item) => item.prompt === normalized);
-    if (index < 0) {
-      if (fresh.length === 0) this.pendingRemotePrompts.delete(sessionId);
-      else this.pendingRemotePrompts.set(sessionId, fresh);
-      return false;
-    }
-    fresh.splice(index, 1);
-    if (fresh.length === 0) this.pendingRemotePrompts.delete(sessionId);
-    else this.pendingRemotePrompts.set(sessionId, fresh);
-    return true;
-  }
-
-  private scheduleActivityFlush(sessionId: string): void {
-    const state = this.activityStates.get(sessionId);
-    if (!state || state.timer || state.completed) return;
-    const delay = Math.max(0, 2_000 - (Date.now() - state.lastSentAt));
-    state.timer = setTimeout(() => {
-      state.timer = undefined;
-      void this.flushActivity(sessionId).catch((error) => {
-        console.error("[activity] Could not update Feishu progress card:", error);
-      });
-    }, delay);
-  }
-
-  private async flushActivity(sessionId: string, force = false): Promise<void> {
-    const state = this.activityStates.get(sessionId);
-    if (!state) return;
-    if (state.flushing) {
-      await state.flushing;
-      if (force && state.sentRevision < state.revision) {
-        await this.flushActivity(sessionId, true);
-      }
-      return;
-    }
-    if (!force && state.sentRevision >= state.revision) return;
-    const capturedRevision = state.revision;
-    const operation = (async () => {
-      const session = this.store.getSession(sessionId);
-      if (!session) return;
-      const card = buildActivityCard(
-        session,
-        state.events,
-        state.startedAt,
-        state.completed,
-      );
-      for (const recipient of await this.notificationRecipients(session)) {
-        try {
-          const existingMessageId = state.messageIds.get(recipient.chatId);
-          if (existingMessageId) {
-            await this.feishu.patchCard(existingMessageId, card);
-          } else {
-            const messageId = await this.feishu.sendCard(recipient.chatId, card);
-            state.messageIds.set(recipient.chatId, messageId);
-            await this.addRoute(messageId, sessionId, recipient.chatId, "activity");
-          }
-        } catch (error) {
-          console.error("[activity] Failed to send or patch a progress card:", error);
-        }
-      }
-      state.lastSentAt = Date.now();
-      state.sentRevision = capturedRevision;
-    })();
-    state.flushing = operation;
-    try {
-      await operation;
-    } finally {
-      state.flushing = undefined;
-    }
-    if (!state.completed && state.sentRevision < state.revision) {
-      this.scheduleActivityFlush(sessionId);
-    }
-  }
-
-  private async finishActivity(sessionId: string, label: string): Promise<void> {
-    const state = this.activityStates.get(sessionId);
-    if (!state) return;
-    if (state.timer) {
-      clearTimeout(state.timer);
-      state.timer = undefined;
-    }
-    if (!state.completed) {
-      state.completed = true;
-      state.events.push({ at: new Date().toISOString(), label });
-      state.events = state.events.slice(-6);
-      state.revision += 1;
-    }
-    await this.flushActivity(sessionId, true);
-    this.activityStates.delete(sessionId);
-  }
-
-  private attachmentKey(openId: string, chatId: string): string {
-    return `${openId}\u0000${chatId}`;
-  }
-
-  private stageAttachments(key: string, files: SavedAttachment[]): void {
-    this.pruneStagedAttachments();
-    const current = this.pendingAttachments.get(key)?.files ?? [];
-    const limit = Math.max(1, this.config.inboundAttachmentMaxCount * 2);
-    this.pendingAttachments.set(key, {
-      createdAt: Date.now(),
-      files: [...current, ...files].slice(-limit),
-    });
-  }
-
-  private peekAttachments(key: string): SavedAttachment[] {
-    this.pruneStagedAttachments();
-    return this.pendingAttachments.get(key)?.files ?? [];
-  }
-
-  private takeAttachments(key: string): SavedAttachment[] {
-    this.pruneStagedAttachments();
-    const staged = this.pendingAttachments.get(key);
-    this.pendingAttachments.delete(key);
-    return staged?.files ?? [];
-  }
-
-  private pruneStagedAttachments(): void {
-    const cutoff = Date.now() - this.config.uploadTtlMs;
-    for (const [key, staged] of this.pendingAttachments) {
-      if (staged.createdAt < cutoff) {
-        this.pendingAttachments.delete(key);
-      }
-    }
-  }
-
-  private registerFileReturnRequest(
-    sessionId: string,
-    chatId: string,
-    remainingStops: number,
-  ): void {
-    const now = Date.now();
-    const requests = (this.fileReturnRequests.get(sessionId) ?? []).filter(
-      (request) => request.expiresAt > now,
-    );
-    requests.push({
-      chatId,
-      remainingStops: Math.max(0, remainingStops),
-      expiresAt: now + 2 * 60 * 60 * 1000,
-    });
-    this.fileReturnRequests.set(sessionId, requests);
-  }
-
-  private advanceFileReturnRequests(sessionId: string): FileReturnRequest | undefined {
-    const now = Date.now();
-    const requests = (this.fileReturnRequests.get(sessionId) ?? []).filter(
-      (request) => request.expiresAt > now,
-    );
-    const eligibleIndex = requests.findIndex((request) => request.remainingStops === 0);
-    const eligible = eligibleIndex >= 0 ? requests.splice(eligibleIndex, 1)[0] : undefined;
-    for (const request of requests) {
-      if (request.remainingStops > 0) {
-        request.remainingStops -= 1;
-      }
-    }
-    if (requests.length > 0) {
-      this.fileReturnRequests.set(sessionId, requests);
-    } else {
-      this.fileReturnRequests.delete(sessionId);
-    }
-    return eligible;
-  }
-
-  private decrementManagedQueueDepth(sessionId: string): void {
-    const current = this.managedQueueDepth.get(sessionId) ?? 0;
-    if (current <= 1) {
-      this.managedQueueDepth.delete(sessionId);
-    } else {
-      this.managedQueueDepth.set(sessionId, current - 1);
-    }
-  }
-
-  private async sendRequestedFiles(
-    session: SessionRecord,
-    chatId: string,
-    candidates: string[],
-  ): Promise<void> {
-    const errors: string[] = [];
-    let sentCount = 0;
-    for (const candidate of candidates.slice(0, 3)) {
-      try {
-        const file = await validateBridgeFile(
-          candidate,
-          session.cwd,
-          this.config.outboundFileMaxBytes,
-        );
-        const messageId = await this.feishu.sendLocalFile(chatId, file.path);
-        await this.addRoute(messageId, session.sessionId, chatId, "stop");
-        sentCount += 1;
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        errors.push(`${candidate}：${detail}`);
-      }
-    }
-    if (errors.length > 0) {
-      await this.feishu.sendText(
-        chatId,
-        `文件回传结果：成功 ${sentCount} 个，失败 ${errors.length} 个。\n${errors
-          .map((error) => `- ${truncate(error, 400)}`)
-          .join("\n")}`,
-      );
-    }
-  }
-
-  private async tryAutomaticApproval(
-    session: SessionRecord,
-    approval: ApprovalRecord,
-    logPrefix: string,
-  ): Promise<boolean> {
-    const settings = this.store.getSettings();
-    if (!settings.autoApprove) {
-      return false;
-    }
-    if (approval.riskLevel !== "low") {
-      this.logApprovalEvent("automatic_skipped_high_risk", session, approval, {
-        path: logPrefix,
-        riskLevel: approval.riskLevel ?? "unknown",
-        riskReason: approval.riskReason ?? "未记录风险判定",
-        elapsedSinceRequestMs: elapsedMs(approval.createdAt),
-      });
-      return false;
-    }
-    this.logApprovalEvent("automatic_attempt", session, approval, {
-      path: logPrefix,
-      riskLevel: approval.riskLevel,
-      riskReason: approval.riskReason,
-      elapsedSinceRequestMs: elapsedMs(approval.createdAt),
-    });
-    const completed = await this.completeApproval(approval.requestId, "allow", {
-      source: "automatic",
-    });
-    if (completed) {
-      this.logApprovalEvent("automatic_completed", session, approval, {
-        path: logPrefix,
-        elapsedSinceRequestMs: elapsedMs(approval.createdAt),
-      });
-      const resolved = this.store.getApproval(approval.requestId);
-      if (
-        settings.notifyAutoApprovals &&
-        resolved?.status === "resolved" &&
-        resolved.messageIds.length === 0
-      ) {
-        await this.sendApprovalCards(session, resolved, "resolved", logPrefix);
-      }
-      return true;
-    }
-    if (this.store.getApproval(approval.requestId)?.status !== "pending") {
-      return true;
-    }
-    this.logApprovalEvent("automatic_failed", session, approval, {
-      path: logPrefix,
-      elapsedSinceRequestMs: elapsedMs(approval.createdAt),
-    });
-    console.warn(
-      `[${logPrefix}] Automatic approval failed for session #${session.shortId}; falling back to manual approval.`,
-    );
-    return false;
-  }
-
-  private async sendApprovalCards(
-    session: SessionRecord,
-    approval: ApprovalRecord,
-    state: "pending" | "resolved",
-    logPrefix: string,
-  ): Promise<number> {
-    if (
-      state === "pending" &&
-      this.store.getApproval(approval.requestId)?.status !== "pending"
-    ) {
-      return 0;
-    }
-    if (state === "pending") {
-      await this.store.requireManualApproval(approval.requestId);
-    }
-    let recipients: Array<{ chatId: string; binding?: Binding }>;
-    try {
-      recipients = await this.notificationRecipients(session);
-    } catch (error) {
-      this.logApprovalEvent("notification_recipients_failed", session, approval, {
-        path: logPrefix,
-        state,
-        error: errorMessage(error),
-      });
-      console.error(`[${logPrefix}] Failed to resolve approval recipients:`, error);
-      return 0;
-    }
-    this.logApprovalEvent("notification_dispatch", session, approval, {
-      path: logPrefix,
-      state,
-      recipientCount: recipients.length,
-      elapsedSinceRequestMs: elapsedMs(approval.createdAt),
-    });
-    if (recipients.length === 0) {
-      this.logApprovalEvent("notification_skipped", session, approval, {
-        path: logPrefix,
-        state,
-        reason: "no_recipients",
-      });
-    }
-    let sentCount = 0;
-    for (const recipient of recipients) {
-      let messageId: string | undefined;
-      try {
-        const card = state === "pending"
-          ? buildApprovalCard(session, approval)
-          : buildResolvedApprovalCard(session, approval, "allow");
-        messageId = await this.feishu.sendCard(recipient.chatId, card);
-        const sentAt = Date.now();
-        sentCount += 1;
-        if (state === "pending") {
-          const timing = this.approvalNotificationTimings.get(approval.requestId);
-          this.approvalNotificationTimings.set(
-            approval.requestId,
-            timing
-              ? {
-                  firstSentAt: timing.firstSentAt,
-                  lastSentAt: sentAt,
-                  count: timing.count + 1,
-                }
-              : { firstSentAt: sentAt, lastSentAt: sentAt, count: 1 },
-          );
-        }
-        // Record the external send before local persistence or routing can fail.
-        this.logApprovalEvent(
-          "notification_sent",
-          session,
-          approval,
-          {
-            path: logPrefix,
-            state,
-            chatId: recipient.chatId,
-            messageId,
-            elapsedSinceRequestMs: elapsedMs(approval.createdAt, sentAt),
-          },
-          sentAt,
-        );
-        await this.store.addApprovalMessage(approval.requestId, messageId);
-        await this.addRoute(
-          messageId,
-          approval.sessionId,
-          recipient.chatId,
-          "approval",
-          approval.requestId,
-        );
-        const latest = this.store.getApproval(approval.requestId);
-        if (
-          state === "pending" &&
-          latest?.status === "resolved" &&
-          latest.resolution
-        ) {
-          await this.feishu.patchCard(
-            messageId,
-            buildResolvedApprovalCard(session, latest, latest.resolution),
-          );
-        }
-      } catch (error) {
-        this.logApprovalEvent(
-          messageId ? "notification_followup_failed" : "notification_failed",
-          session,
-          approval,
-          {
-            path: logPrefix,
-            state,
-            chatId: recipient.chatId,
-            ...(messageId ? { messageId } : {}),
-            error: errorMessage(error),
-            elapsedSinceRequestMs: elapsedMs(approval.createdAt),
-          },
-        );
-        console.error(
-          `[${logPrefix}] ${messageId ? "Failed to finish approval notification handling" : "Failed to send an approval card"}:`,
-          error,
-        );
-      }
-    }
-    return sentCount;
-  }
-
-  private async completeApproval(
-    requestId: string,
-    resolution: ApprovalResolution,
-    options: ApprovalCompletionOptions,
-  ): Promise<boolean> {
-    const pending = this.store.getApproval(requestId);
-    if (!pending || pending.status !== "pending") {
-      return false;
-    }
-    const sessionBeforeResolution = this.store.getSession(pending.sessionId);
-    if (sessionBeforeResolution) {
-      this.logApprovalEvent("decision_received", sessionBeforeResolution, pending, {
-        resolution,
-        decisionSource: options.source,
-        elapsedSinceRequestMs: elapsedMs(pending.createdAt),
-      });
-    }
-    let forwardedToOpenCode = false;
-    if (
-      options.forwardOpenCode !== false &&
-      pending.opencodePermissionId &&
-      (resolution === "allow" || resolution === "deny")
-    ) {
-      try {
-        if (!this.opencode) {
-          if (sessionBeforeResolution) {
-            this.logApprovalEvent(
-              "decision_forward_failed",
-              sessionBeforeResolution,
-              pending,
-              {
-                resolution,
-                decisionSource: options.source,
-                target: "opencode",
-                error: "OpenCode manager unavailable",
-                elapsedSinceRequestMs: elapsedMs(pending.createdAt),
-              },
-            );
-          }
-          return false;
-        }
-        await this.opencode.replyPermission(
-          pending.sessionId,
-          pending.opencodePermissionId,
-          resolution === "allow" ? "once" : "reject",
-        );
-        forwardedToOpenCode = true;
-      } catch (error) {
-        if (sessionBeforeResolution) {
-          this.logApprovalEvent(
-            "decision_forward_failed",
-            sessionBeforeResolution,
-            pending,
-            {
-              resolution,
-              decisionSource: options.source,
-              target: "opencode",
-              error: errorMessage(error),
-              elapsedSinceRequestMs: elapsedMs(pending.createdAt),
-            },
-          );
-        }
-        console.error("[approval] Failed to forward decision to opencode:", error);
-        return false;
-      }
-    }
-    const approval = await this.store.resolveApproval(requestId, resolution);
-    if (
-      pending.opencodePermissionId &&
-      forwardedToOpenCode
-    ) {
-      this.opencodePermissionClaims.delete(
-        this.opencodeInteractionKey(pending.sessionId, pending.opencodePermissionId),
-      );
-    }
-    if (!approval) {
-      return forwardedToOpenCode && this.store.getApproval(requestId)?.status === "resolved";
-    }
-
-    const waiter = this.approvalWaiters.get(requestId);
-    if (waiter) {
-      clearTimeout(waiter.timer);
-      this.approvalWaiters.delete(requestId);
-    }
-
-    const session = await this.store.upsertSession({
-      sessionId: approval.sessionId,
-      cwd: approval.cwd,
-      turnId: approval.turnId,
-      status:
-        resolution === "allow"
-          ? "running"
-          : resolution === "deny"
-            ? "waiting"
-            : "local_approval",
-    });
-
-    const card = buildResolvedApprovalCard(session, approval, resolution);
-    waiter?.resolve(resolution);
-    void Promise.allSettled(
-      approval.messageIds.map((messageId) => this.feishu.patchCard(messageId, card)),
-    );
-    const resolvedAt = Date.parse(approval.resolvedAt ?? "");
-    const completedAt = Number.isFinite(resolvedAt) ? resolvedAt : Date.now();
-    const notificationTiming = this.approvalNotificationTimings.get(requestId);
-    const notificationSentBeforeResolution = notificationTiming
-      ? notificationTiming.firstSentAt <= completedAt
-      : null;
-    this.logApprovalEvent("resolved", session, approval, {
-      resolution,
-      decisionSource: options.source,
-      elapsedSinceRequestMs: elapsedMs(approval.createdAt, completedAt),
-      notificationFirstSentAt: notificationTiming
-        ? new Date(notificationTiming.firstSentAt).toISOString()
-        : null,
-      notificationLastSentAt: notificationTiming
-        ? new Date(notificationTiming.lastSentAt).toISOString()
-        : null,
-      notificationSentBeforeResolution,
-      elapsedSinceNotificationMs:
-        notificationTiming && notificationSentBeforeResolution
-          ? completedAt - notificationTiming.firstSentAt
-        : null,
-      notificationCount: notificationTiming?.count ?? approval.messageIds.length,
-      forwardedToOpenCode,
-    }, completedAt);
-    this.approvalNotificationTimings.delete(requestId);
-    return true;
-  }
-
-  private logApprovalEvent(
-    event: string,
-    session: SessionRecord,
-    approval: ApprovalRecord,
-    details: Record<string, unknown> = {},
-    timestamp = Date.now(),
-  ): void {
-    const line = `[approval] ${JSON.stringify({
-      event,
-      at: new Date(timestamp).toISOString(),
-      requestId: approval.requestId,
-      runtime: session.runtime ?? "codex",
-      sessionId: approval.sessionId,
-      sessionShortId: session.shortId,
-      tool: truncate(approval.toolName.replace(/\s+/gu, " "), 120),
-      ...details,
-    })}`;
-    console.log(line);
-    const approvalLogPath = this.config.approvalLogPath;
-    if (!approvalLogPath) {
-      return;
-    }
-    this.approvalLogWrite = this.approvalLogWrite
-      .then(() => this.appendApprovalLogLine(approvalLogPath, `${line}\n`))
-      .catch((error) => {
-        console.error("[approval] Failed to persist approval audit log:", error);
-      });
-  }
-
-  private async appendApprovalLogLine(
-    approvalLogPath: string,
-    line: string,
-  ): Promise<void> {
-    const maxBytes = Math.max(
-      1,
-      this.config.approvalLogMaxBytes ?? 5 * 1024 * 1024,
-    );
-    const maxBackups = Math.max(
-      0,
-      this.config.approvalLogMaxBackups ?? 5,
-    );
-    let currentBytes = 0;
-    try {
-      currentBytes = (await stat(approvalLogPath)).size;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw error;
-      }
-    }
-    if (currentBytes > 0 && currentBytes + Buffer.byteLength(line) > maxBytes) {
-      await rotateLogFiles(approvalLogPath, maxBackups);
-    }
-    await appendFile(approvalLogPath, line, "utf8");
-  }
-
-  private listApprovalViews(): Array<Record<string, unknown>> {
-    const now = Date.now();
-    const recentCutoff = now - 10 * 60 * 1000;
-    return this.store
-      .listApprovals()
-      .filter(
-        (approval) =>
-          approval.status === "pending" ||
-          (approval.resolvedAt !== undefined &&
-            Date.parse(approval.resolvedAt) >= recentCutoff),
-      )
-      .map((approval) => {
-        const session = this.store.getSession(approval.sessionId);
-        return {
-          requestId: approval.requestId,
-          sessionId: approval.sessionId,
-          sessionLabel: session
-            ? sessionLabel(session)
-            : "#" + shortSessionId(approval.sessionId),
-          projectName: session?.projectName ?? projectNameFromCwd(approval.cwd),
-          cwd: approval.cwd,
-          toolName: approval.toolName,
-          toolPreview: approval.toolPreview,
-          createdAt: approval.createdAt,
-          expiresAt: approval.expiresAt,
-          status: approval.status,
-          requiresManualApproval: approval.requiresManualApproval !== false,
-          resolution: approval.resolution ?? "",
-          resolvedAt: approval.resolvedAt ?? "",
-        };
-      });
-  }
-
-  private listActiveSessions(): SessionRecord[] {
-    const now = Date.now();
-    const registrations = this.managedTerminals.listOnline(now);
-    const registrationById = new Map(
-      registrations.map((registration) => [registration.terminalId, registration]),
-    );
-    const openSessions = this.store.listOpenSessions();
-    const trackedClients = openSessions.flatMap((session): ClientProcessMetadata[] =>
-      session.clientProcessId
-        ? [{
-            processId: session.clientProcessId,
-            startedAt: session.clientProcessStartedAt,
-            observedAt: session.lastSeenAt,
-          }]
-        : []
-    );
-    const liveClientProcessIds = (
-      this.config.liveClientProcessIds ?? captureLiveTrackedCodexProcessIds
-    )(trackedClients);
-    const sessions = openSessions
-      .flatMap((session): SessionRecord[] => {
-        if (runtimeDefinition(session.runtime).transport === "http_event_stream") {
-          const instance = this.opencode?.findActiveInstanceBySession(session.sessionId);
-          return instance ? [session] : [];
-        }
-        if (!this.managedTerminals.isManaged(session)) {
-          if (session.clientProcessId) {
-            return liveClientProcessIds.has(session.clientProcessId) ? [session] : [];
-          }
-          const fallbackMs = Math.min(
-            this.config.sessionActiveMs,
-            5 * 60 * 1000,
-          );
-          return now - Date.parse(session.lastSeenAt) <= fallbackMs ? [session] : [];
-        }
-        const terminalId = session.managedTerminalId;
-        const registration = terminalId
-          ? registrationById.get(terminalId)
-          : undefined;
-        return registration
-          ? [{ ...session, lastSeenAt: new Date(registration.lastSeenAt).toISOString() }]
-          : [];
-      });
-
-    const representedTerminals = new Set(
-      sessions
-        .map((session) => session.managedTerminalId)
-        .filter((terminalId): terminalId is string => Boolean(terminalId)),
-    );
-    for (const registration of registrations) {
-      if (representedTerminals.has(registration.terminalId)) {
-        continue;
-      }
-      sessions.push({
-        sessionId: managedTerminalSessionId(registration.terminalId),
-        shortId: shortSessionId(registration.terminalId),
-        cwd: registration.cwd,
-        projectName: projectNameFromCwd(registration.cwd),
-        status: registration.ready ? "ready" : "starting",
-        openedAt: new Date(registration.createdAt).toISOString(),
-        lastSeenAt: new Date(registration.lastSeenAt).toISOString(),
-        source: "managed_window",
-        runtime: registration.runtime,
-        managedTerminalId: registration.terminalId,
-        managedTerminalElevated: registration.elevated,
-      });
-    }
-    return sessions.sort(
-      (left, right) => Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt),
-    );
-  }
-
-  private findActiveSessionsByShortToken(token: string): SessionRecord[] {
-    const normalized = token.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-    if (normalized.length < 4) {
-      return [];
-    }
-    return this.listActiveSessions().filter((session) =>
-      session.sessionId
-        .replace(/[^a-zA-Z0-9]/g, "")
-        .toLowerCase()
-        .endsWith(normalized),
-    );
-  }
-
-  private findActiveSessionsByAlias(alias: string): SessionRecord[] {
-    const key = sessionAliasKey(alias);
-    if (!key) {
-      return [];
-    }
-    return this.listActiveSessions().filter(
-      (session) => session.alias && sessionAliasKey(session.alias) === key,
-    );
-  }
-
-  private listAliasReservedSessions(): SessionRecord[] {
-    const sessions = new Map<string, SessionRecord>();
-    for (const session of this.listActiveSessions()) {
-      sessions.set(session.sessionId, session);
-    }
-    for (const session of this.store.listAssistantManagedSessions()) {
-      sessions.set(session.sessionId, session);
-    }
-    return [...sessions.values()];
-  }
-
-  private async updateSessionAlias(
-    session: SessionRecord,
-    rawAlias: string | undefined,
-  ): Promise<SessionAliasResult> {
-    let persistentSession = this.store.getSession(session.sessionId);
-    if (!persistentSession && session.source === "managed_window") {
-      persistentSession = await this.store.upsertSession({
-        sessionId: session.sessionId,
-        cwd: session.cwd,
-        status: "ready",
-        source: session.source,
-        managedTerminalId: session.managedTerminalId,
-        managedTerminalElevated: session.managedTerminalElevated,
-      });
-    }
-    if (!persistentSession) {
-      return { ok: false, error: "会话不存在或已经失效。" };
-    }
-
-    if (rawAlias === undefined || !rawAlias.trim()) {
-      const updated = await this.store.setSessionAlias(
-        persistentSession.sessionId,
-        undefined,
-      );
-      if (updated?.feishuChatId) {
-        await this.renameSessionGroup(updated).catch((error) => {
-          console.warn("[feishu] Could not rename session group:", error);
-        });
-      }
-      return updated
-        ? { ok: true, session: updated }
-        : { ok: false, error: "会话不存在或已经失效。" };
-    }
-
-    const validationError = sessionAliasValidationError(rawAlias);
-    if (validationError) {
-      return { ok: false, error: validationError };
-    }
-    const alias = normalizeSessionAlias(rawAlias);
-    const key = sessionAliasKey(alias);
-    const conflict = this.listAliasReservedSessions().find(
-      (item) =>
-        item.sessionId !== session.sessionId &&
-        item.alias &&
-        sessionAliasKey(item.alias) === key,
-    );
-    if (conflict) {
-      return {
-        ok: false,
-        error: `别名 @${alias} 已被会话 ${conflict.projectName} #${conflict.shortId} 使用。`,
-      };
-    }
-
-    const updated = await this.store.setSessionAlias(persistentSession.sessionId, alias);
-    if (updated?.feishuChatId) {
-      await this.renameSessionGroup(updated).catch((error) => {
-        console.warn("[feishu] Could not rename session group:", error);
-      });
-    }
-    return updated
-      ? { ok: true, session: updated }
-      : { ok: false, error: "会话不存在或已经失效。" };
-  }
-
-  private async handleFeishuAliasCommand(
-    command: AliasCommand,
-    messageId: string,
-    chatId: string,
-  ): Promise<void> {
-    if (!command.targetKind || !command.target) {
-      await this.respond(messageId, chatId, this.formatAliasList());
-      return;
-    }
-
-    const matches = command.targetKind === "short"
-      ? this.findActiveSessionsByShortToken(command.target)
-      : this.findActiveSessionsByAlias(command.target);
-    const address = command.targetKind === "short"
-      ? `#${command.target}`
-      : `@${command.target}`;
-    if (matches.length !== 1) {
-      await this.respond(
-        messageId,
-        chatId,
-        matches.length === 0
-          ? `没有找到 ${address} 对应的活跃会话。发送“会话”查看列表。`
-          : `${address} 匹配到多个会话，请换用完整短 ID。`,
-      );
-      return;
-    }
-
-    const session = matches[0];
-    if (command.alias === undefined) {
-      await this.respond(
-        messageId,
-        chatId,
-        session.alias
-          ? `会话 ${session.projectName} #${session.shortId} 的别名是 @${session.alias}。`
-          : `会话 ${session.projectName} #${session.shortId} 尚未设置别名。`,
-      );
-      return;
-    }
-
-    const clear = ["清除", "删除", "clear", "none"].includes(
-      command.alias.trim().toLowerCase(),
-    );
-    const result = await this.updateSessionAlias(
-      session,
-      clear ? undefined : command.alias,
-    );
-    if (!result.ok || !result.session) {
-      await this.respond(messageId, chatId, result.error ?? "设置别名失败。");
-      return;
-    }
-
-    await this.respond(
-      messageId,
-      chatId,
-      result.session.alias
-        ? `已将 ${result.session.projectName} #${result.session.shortId} 的别名设为 @${result.session.alias}。以后可发送“@${result.session.alias} 回复内容”。`
-        : `已清除 ${result.session.projectName} #${result.session.shortId} 的别名。`,
-    );
-  }
-
-  private activeSessionDefinition(): string {
-    const fallbackMs = Math.min(this.config.sessionActiveMs, 5 * 60 * 1000);
-    return `活跃定义：助手打开的 Codex / Claude Code 窗口从打开到关闭始终算活跃；每个 opencode 窗口只登记当前对话，历史会话不算活跃；外部会话会跟踪真实 CLI 进程，进程关闭后自动移除。无法取得进程信息时仅临时保留 ${formatDuration(fallbackMs)}。`;
-  }
-
-  private formatSessionList(): string {
-    const sessions = this.listActiveSessions();
-    if (sessions.length === 0) {
-      return `当前没有活跃助手会话。\n${this.activeSessionDefinition()}`;
-    }
-    const lines = sessions.slice(0, 20).map(
-      (session, index) => {
-        const kind = runtimeDisplayName(session.runtime);
-        const runtime = runtimeDefinition(session.runtime);
-        const mode = runtime.transport === "http_event_stream"
-          ? ` · ${kind} 窗口`
-          : session.managedTerminalId
-            ? session.managedTerminalElevated
-              ? ` · ${kind} 管理员同步`
-              : ` · ${kind} 窗口同步`
-            : ` · ${kind} 外部会话（仅通知）`;
-        const address = session.alias
-          ? `@${session.alias}  (#${session.shortId})`
-          : sessionAddress(session);
-        const queued = (this.runtimeQueues.get(session.sessionId)?.length ?? 0) +
-          (this.managedQueueDepth.get(session.sessionId) ?? 0);
-        return `${index + 1}. ${address}  ${session.projectName}  · ${statusLabel(session.status)}${mode}${queued > 0 ? ` · 排队 ${queued}` : ""}`;
-      },
-    );
-    return `当前活跃会话：\n${lines.join("\n")}\n\n回复：@别名 内容；排队：排队 @别名 内容；文件回传：发文件 @别名 要求\n${this.activeSessionDefinition()}`;
-  }
-
-  private formatAliasList(): string {
-    const sessions = this.listActiveSessions();
-    if (sessions.length === 0) {
-      return `当前没有可设置别名的活跃会话。\n\n${aliasCommandUsage()}`;
-    }
-    const lines = sessions.slice(0, 20).map(
-      (session, index) =>
-        `${index + 1}. ${session.alias ? `@${session.alias}` : "（未设置）"} · #${session.shortId} · ${session.projectName}`,
-    );
-    return `当前会话别名：\n${lines.join("\n")}\n\n${aliasCommandUsage()}`;
-  }
-
-  private uniqueChatBindings(): Binding[] {
-    const byChat = new Map<string, Binding>();
-    for (const binding of this.store.listBindings()) {
-      byChat.set(binding.chatId, binding);
-    }
-    return [...byChat.values()];
-  }
-
-  private async notificationRecipients(
-    session: SessionRecord,
-  ): Promise<Array<{ chatId: string; binding?: Binding }>> {
-    if (session.managedByAssistant === true) {
-      const ensured = await this.ensureSessionGroup(session.sessionId);
-      if (ensured?.feishuChatId) {
-        return [{ chatId: ensured.feishuChatId }];
-      }
-    }
-    return this.uniqueChatBindings().map((binding) => ({
-      chatId: binding.chatId,
-      binding,
-    }));
-  }
-
-  private async ensureSessionGroup(
-    sessionId: string,
-    forceRetry = false,
-  ): Promise<SessionRecord | undefined> {
-    const session = this.store.getSession(sessionId);
-    if (!session || session.managedByAssistant !== true) {
-      return session;
-    }
-    if (session.feishuChatId) {
-      return session;
-    }
-    // Persisted failures are retried only from the desktop action. This keeps
-    // ordinary Codex notifications from repeatedly calling the create-chat
-    // API while permissions are still missing.
-    if (session.feishuChatError && !forceRetry) {
-      return session;
-    }
-    const ownerOpenId = this.store.getOwnerOpenId();
-    if (!ownerOpenId) {
-      return session;
-    }
-    const pending = this.sessionGroupCreates.get(sessionId);
-    if (pending) {
-      return await pending;
-    }
-    const operation = this.createSessionGroup(session, ownerOpenId);
-    this.sessionGroupCreates.set(sessionId, operation);
-    try {
-      return await operation;
-    } finally {
-      if (this.sessionGroupCreates.get(sessionId) === operation) {
-        this.sessionGroupCreates.delete(sessionId);
-      }
-    }
-  }
-
-  private async createSessionGroup(
-    session: SessionRecord,
-    ownerOpenId: string,
-  ): Promise<SessionRecord | undefined> {
-    const name = this.sessionGroupName(session);
-    const kind = runtimeDisplayName(session.runtime);
-    try {
-      const group = await this.feishu.createSessionGroup(
-        ownerOpenId,
-        name,
-        `${kind} 会话 ${session.shortId} · ${session.cwd}`,
-      );
-      const updated = await this.store.setSessionFeishuChat(session.sessionId, {
-        chatId: group.chatId,
-        chatName: group.name,
-      });
-      if (updated) {
-        try {
-          await this.feishu.sendText(
-            group.chatId,
-            `已连接到 ${sessionLabel(updated)}。以后这个群里的消息都会发送到对应 ${kind} 窗口。`,
-          );
-        } catch (error) {
-          console.warn("[feishu] Session group created, but welcome message failed:", error);
-        }
-      }
-      console.log(`[feishu] Created session group ${group.chatId} for #${session.shortId}.`);
-      return updated ?? session;
-    } catch (error) {
-      const detail = truncate(error instanceof Error ? error.message : String(error), 500);
-      await this.store.setSessionFeishuChatError(session.sessionId, detail);
-      console.warn(`[feishu] Could not create session group for #${session.shortId}: ${detail}`);
-      return this.store.getSession(session.sessionId) ?? session;
-    }
-  }
-
-  private async renameSessionGroup(session: SessionRecord): Promise<void> {
-    if (!session.feishuChatId) {
-      return;
-    }
-    const name = this.sessionGroupName(session);
-    await this.feishu.updateSessionGroupName(session.feishuChatId, name);
-    await this.store.setSessionFeishuChat(session.sessionId, {
-      chatId: session.feishuChatId,
-      chatName: name,
-      createdAt: session.feishuChatCreatedAt,
-    });
-  }
-
-  private sessionGroupName(session: SessionRecord): string {
-    const prefix = runtimeGroupPrefix(session.runtime);
-    return `${prefix}${session.alias || session.projectName || session.shortId}`.slice(0, 60);
-  }
 
   private async respond(
     sourceMessageId: string,
@@ -4934,452 +941,4 @@ export class BridgeController {
       createdAt: new Date().toISOString(),
     });
   }
-}
-
-function parseBindCommand(
-  text: string,
-  command: string,
-): { matched: boolean; code?: string } {
-  if (text === command) {
-    return { matched: true };
-  }
-  const prefix = `${command} `;
-  if (!text.startsWith(prefix)) {
-    return { matched: false };
-  }
-  const code = text.slice(prefix.length).trim();
-  return { matched: true, code: code || undefined };
-}
-
-function parseNewRuntimeCommand(text: string): NewRuntimeCommand | undefined {
-  const match = text.match(
-    /^新建\s+(claude\s+code|open\s+code|codex|claude|claudecode|opencode)\s+([\s\S]+)$/iu,
-  );
-  if (!match?.[1] || !match[2]?.trim()) {
-    return undefined;
-  }
-  const runtimeText = match[1].replace(/\s+/gu, "").toLocaleLowerCase("en-US");
-  const runtime: RuntimeName = runtimeText === "codex"
-    ? "codex"
-    : runtimeText === "opencode"
-    ? "opencode"
-    : "claudecode";
-  return {
-    runtime,
-    projectName: stripMatchingQuotes(match[2].trim()).normalize("NFC"),
-  };
-}
-
-function newRuntimeCommandUsage(): string {
-  return "用法：新建 codex 项目名\n也支持：新建 claude 项目名、新建 opencode 项目名。\n项目会放在电脑端“设置”中的默认工作区；目录不存在时自动创建。";
-}
-
-function stripMatchingQuotes(value: string): string {
-  if (value.length >= 2) {
-    const first = value[0];
-    const last = value.at(-1);
-    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
-      return value.slice(1, -1).trim();
-    }
-  }
-  return value;
-}
-
-function projectDirectoryNameValidationError(value: string): string | undefined {
-  const name = value.trim().normalize("NFC");
-  if (!name) {
-    return "项目名不能为空。";
-  }
-  if (Array.from(name).length > 80) {
-    return "项目名最多 80 个字符。";
-  }
-  if (name === "." || name === "..") {
-    return "不能使用点目录。";
-  }
-  if (/[<>:"/\\|?*\u0000-\u001f]/u.test(name)) {
-    return "不能包含斜杠、盘符或 Windows 文件名保留字符。";
-  }
-  if (/[. ]$/u.test(name)) {
-    return "不能以句点或空格结尾。";
-  }
-  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(name)) {
-    return "不能使用 Windows 保留名称。";
-  }
-  return undefined;
-}
-
-async function prepareProjectDirectory(
-  workspaceRoot: string,
-  projectName: string,
-): Promise<{ cwd: string; created: boolean }> {
-  const root = path.resolve(workspaceRoot);
-  await mkdir(root, { recursive: true });
-  const rootRealPath = await realpath(root);
-  const projectPath = path.join(root, projectName.trim().normalize("NFC"));
-  let created = false;
-  try {
-    await mkdir(projectPath);
-    created = true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-      throw error;
-    }
-  }
-  const projectInfo = await lstat(projectPath);
-  if (!projectInfo.isDirectory() || projectInfo.isSymbolicLink()) {
-    throw new Error("同名路径不是可用的普通文件夹。");
-  }
-  const projectRealPath = await realpath(projectPath);
-  if (!isPathWithinRoot(rootRealPath, projectRealPath)) {
-    throw new Error("项目目录超出了默认工作区。");
-  }
-  return { cwd: projectRealPath, created };
-}
-
-function isPathWithinRoot(root: string, target: string): boolean {
-  const relative = path.relative(root, target);
-  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) &&
-    !path.isAbsolute(relative);
-}
-
-function parsePromptDirectives(text: string): {
-  prompt: string;
-  queue: boolean;
-  fileReturn: boolean;
-} {
-  let prompt = text.trim();
-  let queue = false;
-  let fileReturn = false;
-  for (let index = 0; index < 3; index += 1) {
-    const queueMatch = prompt.match(/^(?:排队|\/queue|queue)\s+([\s\S]+)$/iu);
-    if (queueMatch?.[1]) {
-      queue = true;
-      prompt = queueMatch[1].trim();
-      continue;
-    }
-    const fileMatch = prompt.match(/^(?:发文件|\/sendfile|sendfile)\s+([\s\S]+)$/iu);
-    if (fileMatch?.[1]) {
-      fileReturn = true;
-      prompt = fileMatch[1].trim();
-      continue;
-    }
-    break;
-  }
-  return { prompt, queue, fileReturn };
-}
-
-function parseUserInputAnswers(
-  text: string,
-  questions: UserInputQuestion[],
-): UserInputAnswers | undefined {
-  const parts = questions.length === 1
-    ? [text.trim()]
-    : text.split(/[；;\n]+/).map((part) => part.trim()).filter(Boolean);
-  if (parts.length !== questions.length) {
-    return undefined;
-  }
-  const answers: UserInputAnswers = {};
-  for (const [index, question] of questions.entries()) {
-    const raw = parts[index]?.trim();
-    if (!raw) return undefined;
-    const parsed = parseUserInputAnswer(raw, question);
-    if (!parsed) return undefined;
-    answers[question.id] = parsed;
-  }
-  return answers;
-}
-
-function parseUserInputAnswer(
-  raw: string,
-  question: UserInputQuestion,
-): string[] | undefined {
-  const exact = matchUserInputOption(raw, question);
-  if (exact) {
-    return [exact.label];
-  }
-  if (!question.multiple) {
-    return question.custom === false ? undefined : [truncate(raw, 1_000)];
-  }
-  const tokens = raw.split(/[，,、+]+/u).map((item) => item.trim()).filter(Boolean);
-  if (tokens.length === 0) {
-    return undefined;
-  }
-  const selected: string[] = [];
-  for (const token of tokens) {
-    const option = matchUserInputOption(token, question);
-    if (!option && question.custom === false) {
-      return undefined;
-    }
-    const value = truncate(option?.label ?? token, 1_000);
-    if (!selected.includes(value)) {
-      selected.push(value);
-    }
-  }
-  return selected;
-}
-
-function matchUserInputOption(
-  raw: string,
-  question: UserInputQuestion,
-): UserInputQuestion["options"][number] | undefined {
-  const numeric = Number.parseInt(raw, 10);
-  return /^\d+$/.test(raw) && numeric >= 1
-    ? question.options[numeric - 1]
-    : question.options.find(
-        (candidate) => candidate.label.toLocaleLowerCase("zh-CN") ===
-          raw.toLocaleLowerCase("zh-CN"),
-      );
-}
-
-function inputAnswerUsage(questions: UserInputQuestion[]): string {
-  const hasMultiple = questions.some((question) => question.multiple);
-  const customAllowed = questions.some((question) => question.custom !== false);
-  const detail = `${hasMultiple ? "多选题用逗号分隔选项" : "回复选项编号或文字"}${
-    customAllowed ? "，也可填写自定义答案" : ""
-  }`;
-  return questions.length === 1
-    ? `请引用问题卡片，${detail}。`
-    : `需要按顺序提供 ${questions.length} 个答案，用中文分号“；”分隔；${detail}。`;
-}
-
-function activityEventFromPayload(payload: ActivityHookPayload): ActivityCardEvent {
-  const at = new Date().toISOString();
-  switch (payload.hook_event_name) {
-    case "PreToolUse":
-      return {
-        at,
-        label: `正在调用 ${humanizeToolName(payload.tool_name)}`,
-        detail: payload.tool_preview,
-      };
-    case "PostToolUse":
-      return {
-        at,
-        label: `${humanizeToolName(payload.tool_name)} 已完成`,
-        detail: payload.tool_response_preview,
-      };
-    case "PostToolUseFailure":
-      return {
-        at,
-        label: `${humanizeToolName(payload.tool_name)} 执行失败`,
-        detail: payload.tool_response_preview,
-      };
-    case "PreCompact":
-      return { at, label: "正在压缩上下文" };
-    case "PostCompact":
-      return { at, label: "上下文压缩完成" };
-    case "UserPromptSubmit":
-      return { at, label: `已提交新任务，${runtimeDisplayName(payload.runtime)} 开始处理` };
-  }
-}
-
-function normalizePromptForMatch(value: string): string {
-  return value.normalize("NFC").replace(/\s+/gu, " ").trim();
-}
-
-function externalSessionInputBlockedMessage(session: SessionRecord): string {
-  return notReceivedText(
-    session,
-    "这个窗口不是由 Codex 飞书助手打开，不能从飞书回复。请回到原窗口继续。",
-  );
-}
-
-function codexNotReceived(reason: string): string {
-  return notReceivedText(undefined, reason);
-}
-
-function receivedText(
-  session: { runtime?: RuntimeName } | undefined,
-): string {
-  return runtimeReceivedText(session?.runtime);
-}
-
-function notReceivedText(
-  session: { runtime?: RuntimeName } | undefined,
-  reason: string,
-): string {
-  return `${runtimeDisplayName(session?.runtime)} 未接收：${reason}`;
-}
-
-function humanizeToolName(toolName: string | undefined): string {
-  if (!toolName) return "工具";
-  const known: Record<string, string> = {
-    shell_command: "命令行",
-    apply_patch: "文件修改",
-    view_image: "图片查看",
-    request_user_input: "用户提问",
-  };
-  return known[toolName] ?? toolName.replace(/^mcp__/, "MCP · ");
-}
-
-function parseExplicitSession(
-  text: string,
-): { kind: "short"; token: string; prompt: string } | undefined {
-  const match = text.match(/^#([a-zA-Z0-9]{4,32})\s+([\s\S]+)$/);
-  if (!match?.[1] || !match[2]?.trim()) {
-    return undefined;
-  }
-  return { kind: "short", token: match[1].toLowerCase(), prompt: match[2].trim() };
-}
-
-function parseExplicitAlias(
-  text: string,
-): { kind: "alias"; token: string; prompt: string } | undefined {
-  const match = text.match(/^@([^\s@#]+)\s+([\s\S]+)$/u);
-  if (!match?.[1] || !match[2]?.trim()) {
-    return undefined;
-  }
-  return { kind: "alias", token: match[1], prompt: match[2].trim() };
-}
-
-function parseAliasCommand(text: string): AliasCommand | undefined {
-  if (text === "别名") {
-    return {};
-  }
-  const match = text.match(/^别名\s+([#@])([^\s#@]+)(?:\s+([\s\S]+))?$/u);
-  if (!match?.[1] || !match[2]) {
-    return undefined;
-  }
-  if (match[1] === "#" && !/^[a-zA-Z0-9]{4,32}$/.test(match[2])) {
-    return undefined;
-  }
-  return {
-    targetKind: match[1] === "#" ? "short" : "alias",
-    target: match[1] === "#" ? match[2].toLowerCase() : match[2],
-    alias: match[3]?.trim(),
-  };
-}
-
-function aliasCommandUsage(): string {
-  return "设置：别名 #短ID 名称\n清除：别名 #短ID 清除\n也可用旧别名定位：别名 @旧别名 新名称\n回复：@名称 你的内容\n规则：1–20 个字符，可用中文、字母、数字、下划线和短横线。";
-}
-
-function formatDuration(milliseconds: number): string {
-  const hours = milliseconds / (60 * 60 * 1000);
-  if (Number.isInteger(hours)) {
-    return `${hours} 小时`;
-  }
-  const minutes = Math.max(1, Math.round(milliseconds / (60 * 1000)));
-  return `${minutes} 分钟`;
-}
-
-function normalizeActionValue(value: unknown): Record<string, unknown> | undefined {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  if (typeof value === "string") {
-    try {
-      const parsed: unknown = JSON.parse(value);
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? (parsed as Record<string, unknown>)
-        : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-  return undefined;
-}
-
-function actionToResolution(action: unknown): ApprovalResolution | undefined {
-  switch (action) {
-    case "approval_allow":
-      return "allow";
-    case "approval_deny":
-      return "deny";
-    default:
-      return undefined;
-  }
-}
-
-function approvalResolutionFromText(text: string): ApprovalResolution | undefined {
-  const normalized = text.replace(/[\s，。！!]/g, "").toLowerCase();
-  if (["批准", "允许", "同意", "approve", "allow"].includes(normalized)) {
-    return "allow";
-  }
-  if (["拒绝", "不允许", "deny", "reject"].includes(normalized)) {
-    return "deny";
-  }
-  return undefined;
-}
-
-function approvalText(
-  resolution: ApprovalResolution,
-  session?: { runtime?: RuntimeName },
-): string {
-  const runtime = runtimeDisplayName(session?.runtime);
-  switch (resolution) {
-    case "allow":
-      return `已批准，${runtime} 将继续执行。`;
-    case "deny":
-      return "已拒绝这次操作。";
-    case "local":
-      return `已转回电脑端，请在原 ${runtime} 窗口确认。`;
-    case "timeout":
-      return "审批已超时，已转回电脑端。";
-  }
-}
-
-function sessionGroupActivityTime(session: SessionRecord): number {
-  return Math.max(
-    parseTimestamp(session.lastSeenAt),
-    parseTimestamp(session.feishuChatCreatedAt),
-  );
-}
-
-function parseTimestamp(value: string | undefined): number {
-  const parsed = value ? Date.parse(value) : Number.NaN;
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function turnNotificationWasSent(
-  session: SessionRecord | undefined,
-  turnId: string,
-): boolean {
-  return session?.lastNotificationTurnId === turnId &&
-    session.lastNotificationStatus !== "pending";
-}
-
-function turnNotificationIdempotencyKey(
-  sessionId: string,
-  turnId: string,
-  kind: "stop" | "error",
-  chatId: string,
-  cardIndex: number,
-): string {
-  return createHash("sha256")
-    .update(`${sessionId}\u0000${turnId}\u0000${kind}\u0000${chatId}\u0000${cardIndex}`)
-    .digest("hex")
-    .slice(0, 32);
-}
-
-async function rotateLogFiles(logPath: string, maxBackups: number): Promise<void> {
-  if (maxBackups === 0) {
-    await rm(logPath, { force: true });
-    return;
-  }
-  for (let index = maxBackups; index >= 1; index -= 1) {
-    const source = index === 1 ? logPath : `${logPath}.${index - 1}`;
-    const destination = `${logPath}.${index}`;
-    await rm(destination, { force: true });
-    try {
-      await rename(source, destination);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw error;
-      }
-    }
-  }
-}
-
-function elapsedMs(startAt: string | undefined, endAt = Date.now()): number | null {
-  const start = startAt ? Date.parse(startAt) : Number.NaN;
-  return Number.isFinite(start) ? Math.max(0, endAt - start) : null;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function normalizeRuntimeCwd(cwd: string): string {
-  const resolved = path.resolve(cwd);
-  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }

@@ -1,8 +1,3 @@
-import { execFile } from "node:child_process";
-import { createServer } from "node:net";
-import path from "node:path";
-import { promisify } from "node:util";
-
 import { OpenCodeClient } from "./opencode-client.js";
 import type {
   OpenCodeEventHandlers,
@@ -11,8 +6,11 @@ import type {
   OpenCodeQuestionRequest,
   OpenCodeSession,
 } from "./opencode-client.js";
-
-const execFileAsync = promisify(execFile);
+import { OpenCodeDiscoveryCoordinator } from "./opencode-discovery-coordinator.js";
+import {
+  enumerateLocalOpenCodePorts,
+  isLocalOpenCodePortAvailable,
+} from "./opencode-port-utils.js";
 
 export interface OpenCodeInstance {
   port: number;
@@ -57,18 +55,14 @@ export class OpenCodeManager {
   private readonly pendingQuestionKeys = new Set<string>();
   private readonly connectingPorts = new Set<number>();
   private readonly discoveryMisses = new Map<number, number>();
+  private readonly discovery: OpenCodeDiscoveryCoordinator;
   private readonly basePort: number;
   private readonly maxPort: number;
-  private readonly autoDiscover: boolean;
-  private readonly scanIntervalMs: number;
   private readonly subscriptionRetryBaseMs: number;
   private readonly subscriptionRetryMaxMs: number;
   private readonly subscriptionStableMs: number;
   private readonly enumerateLocalPorts: () => Promise<number[]>;
   private readonly isLocalPortAvailable: (port: number) => Promise<boolean>;
-  private discoverTimer: ReturnType<typeof setTimeout> | undefined;
-  private discoverRunning = false;
-  private discoveryActive = false;
 
   constructor(
     private readonly handlers: OpenCodeManagerHandlers,
@@ -86,13 +80,39 @@ export class OpenCodeManager {
   ) {
     this.basePort = options.basePort ?? 5100;
     this.maxPort = options.maxPort ?? 5999;
-    this.autoDiscover = options.autoDiscover ?? true;
-    this.scanIntervalMs = options.scanIntervalMs ?? 20_000;
     this.subscriptionRetryBaseMs = options.subscriptionRetryBaseMs ?? 1_000;
     this.subscriptionRetryMaxMs = options.subscriptionRetryMaxMs ?? 30_000;
     this.subscriptionStableMs = options.subscriptionStableMs ?? 30_000;
-    this.enumerateLocalPorts = options.enumerateLocalPorts ?? defaultEnumerateLocalPorts;
-    this.isLocalPortAvailable = options.isLocalPortAvailable ?? defaultIsLocalPortAvailable;
+    this.enumerateLocalPorts =
+      options.enumerateLocalPorts ?? enumerateLocalOpenCodePorts;
+    this.isLocalPortAvailable =
+      options.isLocalPortAvailable ?? isLocalOpenCodePortAvailable;
+    this.discovery = new OpenCodeDiscoveryCoordinator({
+      enabled: options.autoDiscover ?? true,
+      scanIntervalMs: options.scanIntervalMs ?? 20_000,
+      misses: this.discoveryMisses,
+      enumerateLocalPorts: this.enumerateLocalPorts,
+      knownPorts: () =>
+        new Set<number>([
+          ...this.instances.keys(),
+          ...this.pendingPorts,
+        ]),
+      listInstances: () => [...this.instances.values()],
+      isCurrentClient: (port, client) =>
+        this.instances.get(port)?.client === client,
+      tryBeginConnection: (port) => {
+        if (this.connectingPorts.has(port)) {
+          return false;
+        }
+        this.connectingPorts.add(port);
+        return true;
+      },
+      endConnection: (port) => {
+        this.connectingPorts.delete(port);
+      },
+      connect: (port, cwd) => this.connect(port, cwd),
+      unregister: (port) => this.unregister(port),
+    });
   }
 
   listInstances(): OpenCodeInstance[] {
@@ -671,93 +691,11 @@ export class OpenCodeManager {
   }
 
   startAutoDiscovery(): void {
-    if (!this.autoDiscover || this.discoveryActive) {
-      return;
-    }
-    this.discoveryActive = true;
-    const schedule = (): void => {
-      if (!this.discoveryActive || this.discoverTimer) {
-        return;
-      }
-      this.discoverTimer = setTimeout(() => {
-        this.discoverTimer = undefined;
-        if (!this.discoveryActive) {
-          return;
-        }
-        void this.runDiscoveryPass().finally(() => {
-          if (this.discoveryActive) {
-            schedule();
-          }
-        });
-      }, this.scanIntervalMs);
-      this.discoverTimer.unref?.();
-    };
-    schedule();
+    this.discovery.start();
   }
 
   stopAutoDiscovery(): void {
-    this.discoveryActive = false;
-    if (this.discoverTimer) {
-      clearTimeout(this.discoverTimer);
-      this.discoverTimer = undefined;
-    }
-  }
-
-  private async runDiscoveryPass(): Promise<void> {
-    if (this.discoverRunning) {
-      return;
-    }
-    this.discoverRunning = true;
-    try {
-      const ports = await this.enumerateLocalPorts();
-      const knownPorts = new Set<number>([...this.instances.keys(), ...this.pendingPorts]);
-      for (const port of ports) {
-        if (knownPorts.has(port) || this.connectingPorts.has(port)) {
-          continue;
-        }
-        this.connectingPorts.add(port);
-        void this.connectDiscovered(port).finally(() => this.connectingPorts.delete(port));
-      }
-
-      for (const instance of [...this.instances.values()]) {
-        const healthy = await instance.client.probeHealth();
-        if (healthy.healthy) {
-          this.discoveryMisses.delete(instance.port);
-          continue;
-        }
-        const misses = (this.discoveryMisses.get(instance.port) ?? 0) + 1;
-        if (misses >= 3) {
-          this.discoveryMisses.delete(instance.port);
-          console.warn(`[opencode] 端口 ${instance.port} 已停止响应，自动移除。`);
-          await this.unregister(instance.port);
-        } else {
-          this.discoveryMisses.set(instance.port, misses);
-        }
-      }
-    } catch (error) {
-      console.warn("[opencode] 自动发现一轮扫描失败：", error);
-    } finally {
-      this.discoverRunning = false;
-    }
-  }
-
-  private async connectDiscovered(port: number): Promise<void> {
-    try {
-      const client = new OpenCodeClient(`http://127.0.0.1:${port}`);
-      const health = await client.probeHealth();
-      if (!health.healthy) {
-        return;
-      }
-      const sessions = await client.listSessions();
-      if (!Array.isArray(sessions)) {
-        return;
-      }
-      const cwd = (await client.currentDirectory()) ?? "";
-      await this.connect(port, cwd);
-      console.log(`[opencode] 自动发现并连接端口 ${port} 的 opencode 实例。`);
-    } catch {
-      // 失败时留到下一轮扫描重试。
-    }
+    this.discovery.stop();
   }
 
   private async handleInstanceSubscriptionClosed(
@@ -831,66 +769,6 @@ export class OpenCodeManager {
   }
 }
 
-const listeningForeignAddresses = new Set(["0.0.0.0:0", "[::]:0", "*:*"]);
-const localListenHosts = new Set(["127.0.0.1", "0.0.0.0", "[::]", "[::1]"]);
-
-async function defaultEnumerateLocalPorts(): Promise<number[]> {
-  try {
-    const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
-    const netstat = path.join(systemRoot, "System32", "netstat.exe");
-    const { stdout } = await execFileAsync(netstat, ["-ano", "-p", "tcp"], {
-      timeout: 10_000,
-      windowsHide: true,
-      maxBuffer: 1024 * 1024,
-    });
-    const ports = new Set<number>();
-    for (const rawLine of stdout.split(/\r?\n/)) {
-      const line = rawLine.trim();
-      if (!/^TCP\b/i.test(line)) {
-        continue;
-      }
-      const fields = line.split(/\s+/);
-      const local = fields[1];
-      const foreign = fields[2];
-      if (!local || !foreign || !listeningForeignAddresses.has(foreign)) {
-        continue;
-      }
-      const pid = Number(fields[fields.length - 1]);
-      if (!Number.isSafeInteger(pid) || pid <= 0) {
-        continue;
-      }
-      const lastColon = local.lastIndexOf(":");
-      const host = lastColon > 0 ? local.slice(0, lastColon) : "";
-      const port = Number(lastColon >= 0 ? local.slice(lastColon + 1) : "");
-      if (!localListenHosts.has(host)) {
-        continue;
-      }
-      if (Number.isSafeInteger(port) && port > 0 && port <= 65535) {
-        ports.add(port);
-      }
-    }
-    return [...ports];
-  } catch {
-    return [];
-  }
-}
-
-async function defaultIsLocalPortAvailable(port: number): Promise<boolean> {
-  return await new Promise<boolean>((resolve) => {
-    const server = createServer();
-    let settled = false;
-    const finish = (available: boolean): void => {
-      if (settled) return;
-      settled = true;
-      resolve(available);
-    };
-    server.unref();
-    server.once("error", () => finish(false));
-    server.listen({ host: "127.0.0.1", port, exclusive: true }, () => {
-      server.close((error) => finish(!error));
-    });
-  });
-}
 
 function isForegroundSession(session: OpenCodeSession, instanceCwd: string): boolean {
   if (session.parentID) {

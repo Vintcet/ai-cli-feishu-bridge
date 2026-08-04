@@ -362,6 +362,58 @@ test("an opencode permission is sent to Feishu and allow forwards once", async (
   }
 });
 
+test("concurrent opposite OpenCode decisions forward only the claimed resolution", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-race-"));
+  const ctx = await setup(directory);
+  try {
+    await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
+    const permissionId = "per_concurrent_decision";
+    await ctx.controller.handleOpenCodePermissionUpdated({
+      id: permissionId,
+      sessionID: "session-alpha",
+      permission: "bash",
+      patterns: ["npm test"],
+      metadata: { command: "npm test" },
+      always: [],
+    });
+    const approval = ctx.store
+      .listApprovals()
+      .find((item) => item.opencodePermissionId === permissionId);
+    assert.ok(approval);
+
+    const [desktopResult, cardResult] = await Promise.all([
+      ctx.controller.handleLocalApproval({
+        requestId: approval.requestId,
+        resolution: "allow",
+      }),
+      ctx.controller.handleCardAction({
+        operator: { open_id: "owner" },
+        action: {
+          value: JSON.stringify({
+            action: "approval_deny",
+            requestId: approval.requestId,
+            sessionId: "session-alpha",
+          }),
+        },
+      }),
+    ]);
+
+    assert.equal((desktopResult as { ok?: boolean }).ok, true);
+    assert.equal(cardResult.toast.type, "warning");
+    const replies = ctx.fakeOpenCode.permissionReplyHistory.filter(
+      (reply) => reply.permissionId === permissionId,
+    );
+    assert.deepEqual(replies, [{ permissionId, reply: "once" }]);
+    assert.equal(ctx.fakeOpenCode.permissionReplyResponses[permissionId], "once");
+    assert.equal(ctx.store.getApproval(approval.requestId)?.resolution, "allow");
+  } finally {
+    await ctx.opencode.unregister(ctx.port);
+    await ctx.fakeOpenCode.close();
+    await ctx.store.flushPending();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("automatic OpenCode V2 approval is silent and uses the shared bridge settings", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-auto-"));
   const ctx = await setup(directory);

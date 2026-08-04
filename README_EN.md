@@ -28,7 +28,7 @@ Main features:
 
 - Send Feishu notifications when a turn completes, fails, or needs more information.
 - Show Codex, Claude Code, and OpenCode approval requests as interactive Feishu cards.
-- Approve or reject from Feishu or the local approval window, with status synchronized between both sides.
+- Approve or reject in Feishu first, with an explicit action to transfer the request to the PC approval window.
 - Interrupt a running managed session from Feishu, or explicitly queue a message for the next turn.
 - Answer Codex `request_user_input`, Claude Code `AskUserQuestion`, and OpenCode questions from Feishu.
 - Optionally show a live progress card and mirror prompts entered on the computer.
@@ -206,9 +206,9 @@ If you want a desktop entry, manually create a shortcut named `Codex飞书助手
 
 Clicking the window's X button uses a native collapse animation and hides the panel in the bottom-right system tray; ordinary minimize remains in the taskbar. Double-clicking the tray icon restores the window directly to the foreground, while only Exit from the tray menu terminates the panel process. Starting the EXE again also brings the existing panel forward. Exiting the panel still does not automatically stop an already running background bridge service.
 
-Temporary-error retry handles recognizable 400/408/409/429/5xx, high-demand, busy-service, and timeout failures that are safe to replay. Configure 1–20 retries per consecutive failure batch, a 1–600 second base delay, and 0–120 seconds of random jitter. Codex, Claude Code, and OpenCode ask the same session to retry its previous task. Any successful completion immediately resets the batch, so a later failure starts again at attempt 1 even when it happens moments later. Codex sampling failures may write `task_complete.error` without running the `Stop` hook, so the bridge polls each active transcript from its current end and processes only newly appended errors.
+Temporary-error retry handles recognizable 400/408/409/429/5xx, high-demand, busy-service, and timeout failures that are safe to replay. Configure 1–20 retries per consecutive failure batch, a 1–600 second base delay, and 0–120 seconds of random jitter. Codex, Claude Code, and OpenCode ask the same session to retry its previous task. Retry error cards include **Stop automatic retry**; if an attempt has already started, the action stops every later attempt in that batch. Any successful completion immediately resets the batch, so a later failure starts again at attempt 1 even when it happens moments later. Codex sampling failures may write `task_complete.error` without running the `Stop` hook, so the bridge polls each active transcript from its current end and processes only newly appended errors.
 
-Low-risk automatic approval uses the same risk rules for Codex, Claude Code, and OpenCode and is disabled by default. Requests involving deletion, destructive Git operations, dependency installation or publishing, network or cloud actions, permission or system changes, sensitive paths, or paths outside the project remain manual. Successful low-risk approvals are silent by default; enable the separate audit-card setting to send one resolved information card without action buttons. Failed or timed-out automatic processing falls back to manual or local confirmation and never silently allows the operation.
+Low-risk automatic approval uses the same risk rules for Codex, Claude Code, and OpenCode and is disabled by default. Only explicitly recognized tools whose complete input can be inspected are eligible. Unknown tools, oversized or incomplete input, deletion, destructive Git operations, dependency installation or publishing, network or cloud actions, permission or system changes, sensitive paths, and paths outside the project remain manual. Manual requests appear in Feishu first; the PC dialog opens only after **Transfer to PC approval** is selected, or automatically when Feishu delivery is unavailable. Successful low-risk approvals are silent by default; enable the separate audit-card setting to send one resolved information card without action buttons. Automatic processing never silently allows an uncertain operation.
 
 ## Launch a synchronized Codex window
 
@@ -391,7 +391,7 @@ The bot currently uses the following Chinese commands. Send management commands 
 
 Aliases are 1–20 characters and may contain Chinese characters, letters, digits, underscores, and hyphens, but no spaces. Active aliases must be unique and Latin letters are case-insensitive.
 
-Approval cards also accept quoted replies `批准` (approve), `拒绝` (reject), or `本机确认` (decide locally). Follow-up cards accept option buttons or quoted option numbers/text. Separate multiple selections with commas, such as `1,3`, and multiple questions with Chinese semicolons, such as `1；2,3；custom answer`.
+Approval cards also accept quoted replies `批准` (approve), `拒绝` (reject), or `本机确认` (transfer to the PC approval window without deciding). Follow-up cards accept option buttons or quoted option numbers/text. Separate multiple selections with commas, such as `1,3`, and multiple questions with Chinese semicolons, such as `1；2,3；custom answer`.
 
 For attachments, send the image or file in a per-session group and then send `analyze this attachment` directly. In the bot DM with several active sessions, follow the attachment with `@alias analyze this attachment`. A minimal file-return test is `发文件 生成一个 test.txt 并发回来` in a session group, or `发文件 @alias 生成一个 test.txt 并发回来` in the bot DM. Staged files are stored under `data/uploads/<month>/`, limited to 25 MiB each by default, and cleaned after seven days.
 

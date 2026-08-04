@@ -14,6 +14,26 @@ test("recognizes high-demand errors as explicit retryable failures", () => {
   assert.equal(isRetryableRuntimeError("provider failed", "internal_server_error"), true);
 });
 
+test("recognizes common 502 gateway error formats", () => {
+  const messages = [
+    "API Error: 502 Bad Gateway",
+    "Request failed with status code 502",
+    "Bad Gateway (502)",
+    "HTTP/1.1 502 Bad Gateway",
+  ];
+  for (const message of messages) {
+    assert.equal(codexErrorFromMessage(message), message);
+    assert.equal(isRetryableRuntimeError(message), true);
+  }
+  assert.equal(isRetryableRuntimeError("provider failed", "bad_gateway_502"), true);
+});
+
+test("recognizes retry exhaustion after a Codex terminal status marker", () => {
+  const message = "■ exceeded retry limit, last status: 429 Too Many Requests";
+  assert.equal(codexErrorFromMessage(message), message);
+  assert.equal(isRetryableRuntimeError(message), true);
+});
+
 test("does not classify explanatory prose as a runtime error", () => {
   assert.equal(
     codexErrorFromMessage(

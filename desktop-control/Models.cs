@@ -65,6 +65,9 @@ internal sealed class BridgeStatus
     [JsonPropertyName("pendingApprovals")]
     public int PendingApprovals { get; set; }
 
+    [JsonPropertyName("pendingDesktopApprovals")]
+    public int PendingDesktopApprovals { get; set; }
+
     [JsonPropertyName("pendingInputs")]
     public int PendingInputs { get; set; }
 
@@ -362,6 +365,9 @@ internal sealed class BridgeApproval
 
     [JsonPropertyName("requiresManualApproval")]
     public bool RequiresManualApproval { get; set; } = true;
+
+    [JsonPropertyName("desktopApprovalRequested")]
+    public bool DesktopApprovalRequested { get; set; } = true;
 
     [JsonPropertyName("resolution")]
     public string Resolution { get; set; } = "";

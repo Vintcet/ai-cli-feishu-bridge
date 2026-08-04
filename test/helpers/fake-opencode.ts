@@ -24,6 +24,7 @@ export class FakeOpenCodeServer {
   ];
   activeSessionIds: string[] = ["session-alpha"];
   permissionReplyResponses: Record<string, string> = {};
+  permissionReplyHistory: Array<{ permissionId: string; reply: string }> = [];
   questionReplyAnswers: Record<string, string[][]> = {};
   questionRejections: string[] = [];
   permissions: Array<Record<string, unknown>> = [];
@@ -205,6 +206,7 @@ export class FakeOpenCodeServer {
           ? String((body as { reply?: string }).reply)
           : "";
       this.permissionReplyResponses[permissionId] = reply;
+      this.permissionReplyHistory.push({ permissionId, reply });
       if (this.v2PermissionReplyStatus === 204) {
         response.writeHead(204).end();
       } else {
@@ -220,6 +222,7 @@ export class FakeOpenCodeServer {
           ? String((body as { response?: string }).response)
           : "";
       this.permissionReplyResponses[permissionId] = reply;
+      this.permissionReplyHistory.push({ permissionId, reply });
       this.sendJson(response, 200, true);
       return;
     }
@@ -235,6 +238,7 @@ export class FakeOpenCodeServer {
           ? String((body as { reply?: string }).reply)
           : "";
       this.permissionReplyResponses[permissionId] = reply;
+      this.permissionReplyHistory.push({ permissionId, reply });
       this.sendJson(response, 200, true);
       return;
     }

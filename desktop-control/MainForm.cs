@@ -428,7 +428,7 @@ internal sealed partial class MainForm : Form
         toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
-        operationLabel.Text = "桥接状态会每 2 秒自动刷新";
+        operationLabel.Text = "桥接状态会每 15 秒自动刷新";
         operationLabel.AutoSize = false;
         operationLabel.AutoEllipsis = true;
         operationLabel.Dock = DockStyle.Fill;
@@ -1215,10 +1215,15 @@ internal sealed partial class MainForm : Form
             SetHeaderStatus("飞书未连接", Danger);
         }
 
-        if (status.PendingApprovals > 0)
+        if (status.PendingDesktopApprovals > 0)
         {
             operationLabel.Text =
-                $"有 {status.PendingApprovals} 个操作等待审批，可在本机或飞书处理";
+                $"有 {status.PendingDesktopApprovals} 个操作已转回本机审批";
+        }
+        else if (status.PendingApprovals > 0)
+        {
+            operationLabel.Text =
+                $"有 {status.PendingApprovals} 个操作正在飞书等待审批";
         }
         else if (status.PendingInputs > 0)
         {
@@ -1249,7 +1254,7 @@ internal sealed partial class MainForm : Form
         newClaudeCodeButton.Enabled = !operating;
         newOpenCodeButton.Enabled = !operating;
         approvalButton.Enabled =
-            !operating && status.PendingApprovals > 0;
+            !operating && status.PendingDesktopApprovals > 0;
         refreshButton.Enabled = !operating;
         settingsButton.Enabled = !operating;
 
@@ -1389,7 +1394,10 @@ internal sealed partial class MainForm : Form
         approvalButton.Enabled =
             !value &&
             (lastStatus?.Approvals.Count(
-                item => item.Status == "pending" && item.RequiresManualApproval) ?? 0) > 0;
+                item =>
+                    item.Status == "pending" &&
+                    item.RequiresManualApproval &&
+                    item.DesktopApprovalRequested) ?? 0) > 0;
         UpdateSessionActionState();
         refreshButton.Enabled = !value;
         settingsButton.Enabled = !value;
@@ -1444,7 +1452,10 @@ internal sealed partial class MainForm : Form
     private void SyncApprovalDialog(BridgeStatus status)
     {
         var pending = status.Approvals
-            .Where(item => item.Status == "pending" && item.RequiresManualApproval)
+            .Where(item =>
+                item.Status == "pending" &&
+                item.RequiresManualApproval &&
+                item.DesktopApprovalRequested)
             .OrderBy(item => ParseTime(item.CreatedAt))
             .ToList();
         approvalButton.Text = pending.Count > 0
@@ -1550,6 +1561,11 @@ internal sealed partial class MainForm : Form
                 current.Resolution = result.Resolution;
                 current.ResolvedAt = DateTime.UtcNow.ToString("O");
                 lastStatus.PendingApprovals = Math.Max(0, lastStatus.PendingApprovals - 1);
+                if (current.DesktopApprovalRequested)
+                {
+                    lastStatus.PendingDesktopApprovals =
+                        Math.Max(0, lastStatus.PendingDesktopApprovals - 1);
+                }
             }
         }
         operationLabel.Text = result.AlreadyResolved

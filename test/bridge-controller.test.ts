@@ -983,6 +983,49 @@ test("visible history aliases reserve their names until hidden", async () => {
   }
 });
 
+test("concurrent alias updates cannot reserve the same visible name", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-alias-race-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const sessionIds = [
+      "019faef0-d0bb-7703-af82-17ee9b45397b",
+      "019faef0-d0bb-7703-af82-17ee9b45398c",
+    ];
+    for (const sessionId of sessionIds) {
+      await store.upsertSession({
+        sessionId,
+        cwd: directory,
+        status: "ended",
+        managedByAssistant: true,
+      });
+    }
+    const controller = new BridgeController(
+      store,
+      new FakeFeishu() as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+
+    const results = await Promise.all(
+      sessionIds.map((sessionId) =>
+        controller.handleSessionAliasUpdate({ sessionId, alias: "并发别名" })
+      ),
+    );
+    assert.equal(results.filter((result) => result.ok === true).length, 1);
+    assert.equal(results.filter((result) => result.ok === false).length, 1);
+    assert.match(String(results.find((result) => result.ok === false)?.error), /已被会话/);
+    assert.equal(
+      sessionIds.filter((sessionId) => store.getSession(sessionId)?.alias === "并发别名").length,
+      1,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("retry settings accept bounded integers and reject invalid values", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-settings-"));
   try {
@@ -1298,6 +1341,197 @@ test("local and Feishu approval resolutions share one atomic result", async () =
   }
 });
 
+test("manual approvals stay Feishu-first and fall back to PC when delivery fails", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-feishu-first-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+
+    const firstHook = controller.handlePermissionHook({
+      hook_event_name: "PermissionRequest",
+      session_id: "feishu-first-session",
+      turn_id: "feishu-first-turn",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      transcript_path: null,
+    });
+    while (feishu.cards.length === 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const firstApproval = store.listApprovals()[0];
+    assert.ok(firstApproval);
+    const initialHealth = controller.health() as {
+      pendingApprovals: number;
+      pendingDesktopApprovals: number;
+      approvals: Array<{ requestId: string; desktopApprovalRequested: boolean }>;
+    };
+    assert.equal(initialHealth.pendingApprovals, 1);
+    assert.equal(initialHealth.pendingDesktopApprovals, 0);
+    assert.equal(initialHealth.approvals[0]?.desktopApprovalRequested, false);
+    assert.match(JSON.stringify(feishu.cards[0]?.card), /"action":"approval_desktop"/);
+
+    const transferResult = await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: {
+        value: {
+          action: "approval_desktop",
+          requestId: firstApproval.requestId,
+          sessionId: firstApproval.sessionId,
+        },
+      },
+    });
+    assert.equal(transferResult.toast.type, "success");
+    assert.equal(store.getApproval(firstApproval.requestId)?.status, "pending");
+    assert.equal(
+      (controller.health() as { pendingDesktopApprovals: number }).pendingDesktopApprovals,
+      1,
+    );
+    assert.match(JSON.stringify(feishu.patchedCards.at(-1)?.card), /已转回 PC 审批/);
+
+    await controller.handleFeishuMessage(
+      messageEvent(
+        "approval-local-text",
+        "owner",
+        "本机确认",
+        "p2p",
+        feishu.cards[0]!.messageId,
+      ),
+    );
+    assert.match(feishu.replies.at(-1)?.text ?? "", /已转回 PC 审批/);
+    await controller.handleLocalApproval({
+      requestId: firstApproval.requestId,
+      resolution: "allow",
+    });
+    assert.match(JSON.stringify(await firstHook), /"behavior":"allow"/);
+
+    feishu.failCardSendAttempts.add(2);
+    const fallbackHook = controller.handlePermissionHook({
+      hook_event_name: "PermissionRequest",
+      session_id: "desktop-fallback-session",
+      turn_id: "desktop-fallback-turn",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      transcript_path: null,
+    });
+    while (
+      (controller.health() as { pendingDesktopApprovals: number })
+          .pendingDesktopApprovals !== 1
+    ) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const fallbackApproval = store
+      .listApprovals()
+      .find((approval) => approval.sessionId === "desktop-fallback-session");
+    assert.equal(fallbackApproval?.desktopApprovalRequested, true);
+    await controller.handleLocalApproval({
+      requestId: fallbackApproval!.requestId,
+      resolution: "deny",
+    });
+    assert.match(JSON.stringify(await fallbackHook), /"behavior":"deny"/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("closing the controller returns pending approval and input hooks to the local CLI", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-close-hooks-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const controller = new BridgeController(
+      store,
+      new FakeFeishu() as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+
+    const approvalHook = controller.handlePermissionHook({
+      hook_event_name: "PermissionRequest",
+      session_id: "shutdown-approval-session",
+      turn_id: "shutdown-approval-turn",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      transcript_path: null,
+    });
+    const inputHook = controller.handleRequestUserInputHook({
+      hook_event_name: "PreToolUse",
+      session_id: "shutdown-input-session",
+      turn_id: "shutdown-input-turn",
+      cwd: directory,
+      model: "gpt-5",
+      tool_name: "request_user_input",
+      tool_input: {
+        questions: [
+          {
+            header: "方式",
+            id: "shutdown_mode",
+            question: "选择处理方式",
+            options: [
+              { label: "继续", description: "继续执行" },
+              { label: "停止", description: "停止执行" },
+            ],
+          },
+        ],
+      },
+    });
+
+    while (
+      controller.health().pendingApprovals !== 1 ||
+      controller.health().pendingInputs !== 1
+    ) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    await controller.close();
+
+    assert.deepEqual(await approvalHook, {});
+    assert.deepEqual(await inputHook, {});
+    assert.equal(controller.health().pendingApprovals, 0);
+    assert.equal(controller.health().pendingInputs, 0);
+    assert.equal(store.listApprovals()[0]?.resolution, "local");
+    assert.equal(store.getSession("shutdown-approval-session")?.status, "local_approval");
+    assert.equal(store.getSession("shutdown-input-session")?.status, "waiting");
+    await store.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("an approval completed in Feishu is visible to the desktop and logs its source", async (t) => {
   const approvalLogs: string[] = [];
   t.mock.method(console, "log", (...args: unknown[]) => {
@@ -1446,15 +1680,17 @@ test("approval audit logs rotate within the configured size and backup limit", a
       messageIds: [],
     };
     const internal = controller as unknown as {
-      logApprovalEvent: (
-        event: string,
-        session: SessionRecord,
-        approval: ApprovalRecord,
-        details?: Record<string, unknown>,
-      ) => void;
+      approvals: {
+        logEvent: (
+          event: string,
+          session: SessionRecord,
+          approval: ApprovalRecord,
+          details?: Record<string, unknown>,
+        ) => void;
+      };
     };
     for (let index = 0; index < 10; index += 1) {
-      internal.logApprovalEvent(`rotation_${index}`, session, approval, {
+      internal.approvals.logEvent(`rotation_${index}`, session, approval, {
         payload: "x".repeat(160),
       });
     }
@@ -2058,9 +2294,11 @@ test("multi-recipient selections remain isolated per Feishu chat", async () => {
       controllerConfig(directory),
     );
     const internal = controller as unknown as {
-      notificationRecipients: () => Promise<Array<{ chatId: string }>>;
+      sessionGroups: {
+        notificationRecipients: () => Promise<Array<{ chatId: string }>>;
+      };
     };
-    internal.notificationRecipients = async () => [
+    internal.sessionGroups.notificationRecipients = async () => [
       { chatId: "chat-recipient-a" },
       { chatId: "chat-recipient-b" },
     ];
@@ -2153,10 +2391,14 @@ test("a failed final answer rolls every recorded question back to interactive", 
       controllerConfig(directory),
     );
     const internal = controller as unknown as {
-      answerUserInput: () => Promise<boolean>;
-      inputWaiters: Map<string, { answers: Record<string, string[]> }>;
+      inputs: {
+        answer: () => Promise<boolean>;
+        get: (requestId: string) =>
+          | { answers: Record<string, string[]> }
+          | undefined;
+      };
     };
-    internal.answerUserInput = async () => false;
+    internal.inputs.answer = async () => false;
     const hookResultPromise = controller.handleRequestUserInputHook({
       hook_event_name: "PreToolUse",
       session_id: "codex-session-input-rollback",
@@ -2201,7 +2443,7 @@ test("a failed final answer rolls every recorded question back to interactive", 
       action: { value: JSON.stringify(secondAction) },
     });
     assert.equal(failed.toast.type, "warning");
-    const waiter = [...internal.inputWaiters.values()][0];
+    const waiter = internal.inputs.get(String(firstAction.requestId));
     assert.deepEqual(waiter?.answers, {});
     for (const card of feishu.cards) {
       const patched = feishu.patchedCards
@@ -2726,7 +2968,7 @@ test("a pending turn notification is recovered without creating a duplicate card
   }
 });
 
-test("a managed temporary error is notified and retried when enabled", async () => {
+test("a managed 502 gateway error is notified and retried when enabled", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-retry-"));
   try {
     const store = new BridgeStore(directory);
@@ -2759,8 +3001,8 @@ test("a managed temporary error is notified and retried when enabled", async () 
         turn_id: "turn-retry-1",
         last_agent_message: null,
         error: {
-          message: "We're currently experiencing high demand, which may cause temporary errors.",
-          codex_error_info: "internal_server_error",
+          message: "API Error: 502 Bad Gateway",
+          codex_error_info: "bad_gateway_502",
         },
       },
     }));
@@ -2791,6 +3033,182 @@ test("a managed temporary error is notified and retried when enabled", async () 
     assert.equal(terminals.sends.length, 1);
     assert.match(terminals.sends[0]!.prompt, /重试上一项任务/);
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a pending automatic retry can be stopped from its Feishu card", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-stop-retry-"));
+  let controller: BridgeController | undefined;
+  let store: BridgeStore | undefined;
+  try {
+    store = new BridgeStore(directory);
+    await store.init();
+    await store.updateSettings({
+      autoRetryErrors: true,
+      retryMaxAttempts: 3,
+      retryJitterSeconds: 0,
+    });
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const sessionId = "codex-session-stop-retry";
+    const terminalId = "terminal-stop-retry";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "running",
+      source: "startup",
+      runtime: "codex",
+      managedTerminalId: terminalId,
+    });
+    const feishu = new FakeFeishu();
+    const terminals = new FakeManagedTerminals(terminalId, directory, sessionId);
+    controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      terminals as unknown as ManagedTerminalRouter,
+      undefined,
+      {
+        ...controllerConfig(directory),
+        retryBaseDelayMs: 200,
+      },
+    );
+
+    await controller.handleStopHook({
+      hook_event_name: "Stop",
+      session_id: sessionId,
+      turn_id: "turn-stop-retry",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      last_assistant_message: "API Error: 502 Bad Gateway",
+      stop_hook_active: true,
+      transcript_path: null,
+      runtime: "codex",
+    });
+
+    assert.equal(feishu.cards.length, 1);
+    const stopAction = findCardAction(feishu.cards[0]!.card, "retry_stop");
+    assert.ok(stopAction);
+    const stopped = await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: { value: JSON.stringify(stopAction) },
+    });
+    assert.equal(stopped.toast.type, "success");
+    assert.match(stopped.toast.content, /停止自动重试/);
+    assert.doesNotMatch(JSON.stringify(stopped.card), /"action":"retry_stop"/);
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(terminals.sends.length, 0);
+    const patched = feishu.patchedCards
+      .filter((item) => item.messageId === feishu.cards[0]!.messageId)
+      .at(-1)?.card;
+    assert.match(JSON.stringify(patched), /已停止自动重试/);
+    assert.doesNotMatch(JSON.stringify(patched), /"action":"retry_stop"/);
+  } finally {
+    await controller?.close();
+    await store?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("stopping a running retry prevents every later automatic attempt", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-stop-running-retry-"));
+  let controller: BridgeController | undefined;
+  let store: BridgeStore | undefined;
+  try {
+    store = new BridgeStore(directory);
+    await store.init();
+    await store.updateSettings({
+      autoRetryErrors: true,
+      retryMaxAttempts: 3,
+      retryJitterSeconds: 0,
+    });
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const sessionId = "codex-session-stop-running-retry";
+    const terminalId = "terminal-stop-running-retry";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "running",
+      source: "startup",
+      runtime: "codex",
+      managedTerminalId: terminalId,
+    });
+    const feishu = new FakeFeishu();
+    const terminals = new FakeManagedTerminals(terminalId, directory, sessionId);
+    controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      terminals as unknown as ManagedTerminalRouter,
+      undefined,
+      {
+        ...controllerConfig(directory),
+        retryBaseDelayMs: 10,
+      },
+    );
+
+    await controller.handleStopHook({
+      hook_event_name: "Stop",
+      session_id: sessionId,
+      turn_id: "turn-running-retry-1",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      last_assistant_message: "API Error: 502 Bad Gateway",
+      stop_hook_active: true,
+      transcript_path: null,
+      runtime: "codex",
+    });
+    for (let attempt = 0; attempt < 20 && terminals.sends.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(terminals.sends.length, 1);
+    const stopAction = findCardAction(feishu.cards[0]!.card, "retry_stop");
+    assert.ok(stopAction);
+    const stopped = await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: { value: JSON.stringify(stopAction) },
+    });
+    assert.equal(stopped.toast.type, "success");
+    assert.match(stopped.toast.content, /已经发送.*停止后续自动重试/);
+
+    await controller.handleStopHook({
+      hook_event_name: "Stop",
+      session_id: sessionId,
+      turn_id: "turn-running-retry-2",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      last_assistant_message: "API Error: 502 Bad Gateway",
+      stop_hook_active: true,
+      transcript_path: null,
+      runtime: "codex",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(terminals.sends.length, 1);
+    assert.doesNotMatch(
+      JSON.stringify(feishu.cards.at(-1)?.card),
+      /"action":"retry_stop"/,
+    );
+  } finally {
+    await controller?.close();
+    await store?.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

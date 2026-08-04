@@ -245,11 +245,52 @@ const shutdown = (): void => {
   wsClient.close({ force: true });
   opencode.stopAutoDiscovery();
   clearInterval(sessionGroupCleanupTimer);
-  hookServer.close(() => {
-    void Promise.allSettled([controller.close(), codex.close(), store.close()])
-      .finally(() => process.exit(0));
-  });
+  const forcedExitTimer = setTimeout(() => {
+    console.error("[shutdown] Graceful shutdown exceeded 4 seconds; forcing exit.");
+    hookServer.closeAllConnections();
+    process.exit(1);
+  }, 4_000);
+  const serverClosed = closeHookServer(hookServer, 2_000);
+  void Promise.allSettled([controller.close(), codex.close()])
+    .then(() => serverClosed)
+    .then(() => store.close())
+    .then(() => {
+      clearTimeout(forcedExitTimer);
+      process.exit(0);
+    })
+    .catch((error) => {
+      console.error("[shutdown] Graceful shutdown failed:", error);
+      clearTimeout(forcedExitTimer);
+      process.exit(1);
+    });
 };
+
+function closeHookServer(
+  server: typeof hookServer,
+  forceAfterMs: number,
+): Promise<void> {
+  return new Promise((resolve) => {
+    let completed = false;
+    const finish = (): void => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(forceTimer);
+      clearTimeout(fallbackTimer);
+      resolve();
+    };
+    const forceTimer = setTimeout(() => {
+      console.warn("[shutdown] Closing remaining HTTP connections.");
+      server.closeAllConnections();
+    }, forceAfterMs);
+    const fallbackTimer = setTimeout(finish, forceAfterMs + 500);
+    server.close((error) => {
+      if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") {
+        console.warn("[shutdown] HTTP server close reported an error:", error);
+      }
+      finish();
+    });
+  });
+}
 
 process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);

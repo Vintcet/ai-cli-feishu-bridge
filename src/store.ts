@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 
 import type {
@@ -16,7 +16,20 @@ import type {
   SessionStatus,
   SessionStore,
 } from "./domain.js";
-import { projectNameFromCwd, shortSessionId, stringifyModel } from "./domain.js";
+import {
+  projectNameFromCwd,
+  sessionAliasKey,
+  shortSessionId,
+  stringifyModel,
+} from "./domain.js";
+import { JsonFilePersistence } from "./json-file-persistence.js";
+import {
+  isApprovalStoreValue,
+  isBindingStoreValue,
+  isPlainRecord,
+  isRouteStoreValue,
+  isSessionStoreValue,
+} from "./store-schema.js";
 
 const emptyBindings = (): BindingStore => ({ users: {} });
 const emptySessions = (): SessionStore => ({ sessions: {} });
@@ -74,16 +87,11 @@ export class BridgeStore {
   private approvals: ApprovalStore = emptyApprovals();
   private settings: BridgeSettings = defaultSettings();
   private mutationQueue: Promise<void> = Promise.resolve();
+  private readonly approvalClaims = new Set<string>();
 
-  private readonly persistDebounceMs: number;
   private readonly endedSessionRetentionMs: number;
   private readonly defaultWorkspaceRoot: string;
-  private readonly dirtyFiles = new Set<string>();
-  private flushTimer: ReturnType<typeof setTimeout> | undefined;
-  private safetyTimer: ReturnType<typeof setInterval> | undefined;
-  private flushChain: Promise<void> | undefined;
-  private closePromise: Promise<void> | undefined;
-  private closed = false;
+  private readonly persistence: JsonFilePersistence;
 
   constructor(
     private readonly dataDirectory: string,
@@ -95,12 +103,20 @@ export class BridgeStore {
     this.approvalFile = path.join(dataDirectory, "approvals.json");
     this.controlTokenFile = path.join(dataDirectory, "control-token.json");
     this.settingsFile = path.join(dataDirectory, "settings.json");
-    this.persistDebounceMs = options.persistDebounceMs ?? defaultPersistDebounceMs;
     this.endedSessionRetentionMs =
       options.endedSessionRetentionMs ?? defaultEndedSessionRetentionMs;
     this.defaultWorkspaceRoot = options.defaultWorkspaceRoot
       ? path.resolve(options.defaultWorkspaceRoot)
       : "";
+    this.persistence = new JsonFilePersistence({
+      dataDirectory,
+      persistDebounceMs:
+        options.persistDebounceMs ?? defaultPersistDebounceMs,
+      stateForFile: (filePath) => this.inMemoryState(filePath),
+      runMutation: (operation) => this.mutate(operation),
+      awaitMutations: () => this.mutationQueue,
+      onSafetyFlush: () => this.performSafetyMaintenance(),
+    });
   }
 
   async init(): Promise<void> {
@@ -730,6 +746,37 @@ export class BridgeStore {
     });
   }
 
+  async setUniqueSessionAlias(
+    sessionId: string,
+    alias: string,
+    reservedSessionIds: readonly string[],
+  ): Promise<{
+    session?: SessionRecord;
+    conflict?: SessionRecord;
+  }> {
+    return this.mutate(async () => {
+      const session = this.sessions.sessions[sessionId];
+      if (!session) {
+        return {};
+      }
+      const reserved = new Set(reservedSessionIds);
+      const aliasKey = sessionAliasKey(alias);
+      const conflict = Object.values(this.sessions.sessions).find(
+        (candidate) =>
+          candidate.sessionId !== sessionId &&
+          reserved.has(candidate.sessionId) &&
+          candidate.alias !== undefined &&
+          sessionAliasKey(candidate.alias) === aliasKey,
+      );
+      if (conflict) {
+        return { conflict };
+      }
+      session.alias = alias;
+      await this.writeJson(this.sessionFile, this.sessions);
+      return { session };
+    });
+  }
+
   async completeTurnNotification(sessionId: string, turnId: string): Promise<void> {
     await this.mutate(async () => {
       const session = this.sessions.sessions[sessionId];
@@ -853,18 +900,63 @@ export class BridgeStore {
     });
   }
 
-  async resolveApproval(
+  async requestDesktopApproval(
     requestId: string,
-    resolution: ApprovalResolution,
   ): Promise<ApprovalRecord | undefined> {
     return this.mutate(async () => {
       const approval = this.approvals.requests[requestId];
       if (!approval || approval.status !== "pending") {
         return undefined;
       }
+      if (approval.desktopApprovalRequested !== true) {
+        approval.desktopApprovalRequested = true;
+        const pruneChanges = this.pruneInMemory(Date.now());
+        this.schedulePersist(this.approvalFile);
+        this.schedulePrunedFiles(pruneChanges);
+      }
+      return approval;
+    });
+  }
+
+  async claimApproval(requestId: string): Promise<ApprovalRecord | undefined> {
+    return this.mutate(async () => {
+      const approval = this.approvals.requests[requestId];
+      if (
+        !approval ||
+        approval.status !== "pending" ||
+        this.approvalClaims.has(requestId)
+      ) {
+        return undefined;
+      }
+      this.approvalClaims.add(requestId);
+      return approval;
+    });
+  }
+
+  async releaseApprovalClaim(requestId: string): Promise<void> {
+    await this.mutate(async () => {
+      this.approvalClaims.delete(requestId);
+    });
+  }
+
+  async resolveClaimedApproval(
+    requestId: string,
+    resolution: ApprovalResolution,
+  ): Promise<ApprovalRecord | undefined> {
+    return this.mutate(async () => {
+      const approval = this.approvals.requests[requestId];
+      if (
+        !approval ||
+        approval.status !== "pending" ||
+        !this.approvalClaims.has(requestId)
+      ) {
+        this.approvalClaims.delete(requestId);
+        return undefined;
+      }
       approval.status = "resolved";
       approval.resolution = resolution;
       approval.resolvedAt = new Date().toISOString();
+      this.approvalClaims.delete(requestId);
       const pruneChanges = this.pruneInMemory(Date.now());
       this.schedulePersist(this.approvalFile);
       this.schedulePrunedFiles(pruneChanges);
@@ -896,6 +988,7 @@ export class BridgeStore {
       const referenceTime = approval.resolvedAt ?? approval.createdAt;
       if (Date.parse(referenceTime) < approvalCutoff) {
         delete this.approvals.requests[requestId];
+        this.approvalClaims.delete(requestId);
         approvalsChanged = true;
       }
     }
@@ -907,79 +1000,11 @@ export class BridgeStore {
     fallback: T,
     validate: (value: unknown) => boolean,
   ): Promise<T> {
-    let text: string;
-    try {
-      text = await readFile(filePath, "utf8");
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") {
-        return fallback;
-      }
-      throw error;
-    }
-
-    try {
-      const value: unknown = JSON.parse(text);
-      if (!validate(value)) {
-        throw new Error("JSON structure does not match the expected store schema.");
-      }
-      return value as T;
-    } catch (error) {
-      const suffix = `${Date.now()}-${randomBytes(3).toString("hex")}`;
-      const quarantinePath = `${filePath}.corrupt-${suffix}`;
-      try {
-        await rename(filePath, quarantinePath);
-      } catch (quarantineError) {
-        throw new Error(
-          `Could not preserve corrupt ${path.basename(filePath)} before recovery.`,
-          { cause: quarantineError },
-        );
-      }
-      console.warn(
-        `[store] Preserved invalid ${path.basename(filePath)} as ${path.basename(quarantinePath)}; using defaults.`,
-      );
-      await this.writeJson(filePath, fallback);
-      return fallback;
-    }
+    return await this.persistence.read(filePath, fallback, validate);
   }
 
   private async writeJson(filePath: string, value: unknown): Promise<void> {
-    const trackedState = this.inMemoryState(filePath) !== undefined;
-    if (trackedState) {
-      this.dirtyFiles.add(filePath);
-    }
-    await mkdir(this.dataDirectory, { recursive: true });
-    const temporaryPath = `${filePath}.${process.pid}.tmp`;
-    try {
-      const temporary = await open(temporaryPath, "w");
-      try {
-        await temporary.writeFile(`${JSON.stringify(value)}\n`, "utf8");
-        await temporary.sync();
-      } finally {
-        await temporary.close();
-      }
-      await rename(temporaryPath, filePath);
-      const committed = await open(filePath, "r+");
-      try {
-        await committed.sync();
-      } finally {
-        await committed.close();
-      }
-      if (process.platform !== "win32") {
-        const directory = await open(path.dirname(filePath), "r");
-        try {
-          await directory.sync();
-        } finally {
-          await directory.close();
-        }
-      }
-      if (trackedState) {
-        this.dirtyFiles.delete(filePath);
-      }
-    } catch (error) {
-      await rm(temporaryPath, { force: true }).catch(() => undefined);
-      throw error;
-    }
+    await this.persistence.write(filePath, value);
   }
 
   private mutate<T>(operation: () => Promise<T>): Promise<T> {
@@ -992,20 +1017,7 @@ export class BridgeStore {
   }
 
   private schedulePersist(filePath: string): void {
-    if (this.closed) {
-      throw new Error("BridgeStore is closed.");
-    }
-    this.dirtyFiles.add(filePath);
-    if (this.flushTimer) {
-      return;
-    }
-    this.flushTimer = setTimeout(() => {
-      this.flushTimer = undefined;
-      void this.flushPending().catch((error) => {
-        console.error("[store] Background flush failed:", error);
-      });
-    }, this.persistDebounceMs);
-    this.flushTimer.unref?.();
+    this.persistence.schedule(filePath);
   }
 
   private schedulePrunedFiles(
@@ -1022,55 +1034,12 @@ export class BridgeStore {
 
   /** 立即把待写文件全部落盘。适用于进程退出前的收尾和测试。 */
   async flushPending(): Promise<void> {
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = undefined;
-    }
-    if (this.flushChain) {
-      return this.flushChain;
-    }
-    const run = async (): Promise<void> => {
-      while (this.dirtyFiles.size > 0) {
-        const files = [...this.dirtyFiles];
-        await this.mutate(async () => {
-          for (const filePath of files) {
-            if (!this.dirtyFiles.has(filePath)) {
-              continue;
-            }
-            await this.writeJson(filePath, this.inMemoryState(filePath));
-          }
-        });
-      }
-    };
-    this.flushChain = run().finally(() => {
-      this.flushChain = undefined;
-    });
-    return this.flushChain;
+    await this.persistence.flushPending();
   }
 
   /** 停止后台定时器并确保所有排队写入已经落盘。 */
   async close(): Promise<void> {
-    if (this.closePromise) {
-      return this.closePromise;
-    }
-    const attempt = (async () => {
-      if (this.safetyTimer) {
-        clearInterval(this.safetyTimer);
-        this.safetyTimer = undefined;
-      }
-      if (this.flushTimer) {
-        clearTimeout(this.flushTimer);
-        this.flushTimer = undefined;
-      }
-      await this.mutationQueue;
-      await this.flushPending();
-      this.closed = true;
-    })();
-    this.closePromise = attempt.catch((error) => {
-      this.closePromise = undefined;
-      throw error;
-    });
-    return this.closePromise;
+    await this.persistence.close();
   }
 
   private inMemoryState(filePath: string): unknown {
@@ -1111,104 +1080,16 @@ export class BridgeStore {
   }
 
   private startSafetyFlush(): void {
-    if (this.safetyTimer || this.closed) {
-      return;
+    this.persistence.startSafetyFlush();
+  }
+
+  private performSafetyMaintenance(): void {
+    const pruneChanges = this.pruneInMemory(Date.now());
+    this.schedulePrunedFiles(pruneChanges);
+    if (this.pruneEndedSessions(Date.now())) {
+      this.schedulePersist(this.sessionFile);
     }
-    this.safetyTimer = setInterval(() => {
-      const pruneChanges = this.pruneInMemory(Date.now());
-      this.schedulePrunedFiles(pruneChanges);
-      if (this.pruneEndedSessions(Date.now())) {
-        this.schedulePersist(this.sessionFile);
-      }
-      void this.flushPending().catch((error) => {
-        console.error("[store] Safety flush failed:", error);
-      });
-    }, 5_000);
-    this.safetyTimer.unref?.();
   }
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function isOptionalString(value: unknown): boolean {
-  return value === undefined || typeof value === "string";
-}
-
-function isBindingStoreValue(value: unknown): boolean {
-  if (!isPlainRecord(value) || !isPlainRecord(value.users)) {
-    return false;
-  }
-  if (!isOptionalString(value.ownerOpenId) || !isOptionalString(value.pairingCode)) {
-    return false;
-  }
-  return Object.values(value.users).every(
-    (binding) =>
-      isPlainRecord(binding) &&
-      typeof binding.openId === "string" &&
-      typeof binding.chatId === "string" &&
-      typeof binding.chatType === "string" &&
-      typeof binding.boundAt === "string",
-  );
-}
-
-function isSessionStoreValue(value: unknown): boolean {
-  if (!isPlainRecord(value) || !isPlainRecord(value.sessions)) {
-    return false;
-  }
-  return Object.values(value.sessions).every(
-    (session) =>
-      isPlainRecord(session) &&
-      typeof session.sessionId === "string" &&
-      typeof session.cwd === "string" &&
-      typeof session.status === "string" &&
-      typeof session.lastSeenAt === "string",
-  );
-}
-
-function isRouteStoreValue(value: unknown): boolean {
-  if (!isPlainRecord(value)) {
-    return false;
-  }
-  if (value.messages !== undefined && !isPlainRecord(value.messages)) {
-    return false;
-  }
-  if (value.processedInbound !== undefined && !isPlainRecord(value.processedInbound)) {
-    return false;
-  }
-  const messages = isPlainRecord(value.messages) ? value.messages : {};
-  const processedInbound = isPlainRecord(value.processedInbound) ? value.processedInbound : {};
-  return Object.values(messages).every(
-    (route) =>
-      isPlainRecord(route) &&
-      typeof route.messageId === "string" &&
-      typeof route.sessionId === "string" &&
-      typeof route.chatId === "string" &&
-      typeof route.kind === "string" &&
-      typeof route.createdAt === "string",
-  ) && Object.values(processedInbound).every((timestamp) => typeof timestamp === "string");
-}
-
-function isApprovalStoreValue(value: unknown): boolean {
-  if (!isPlainRecord(value) || !isPlainRecord(value.requests)) {
-    return false;
-  }
-  return Object.values(value.requests).every(
-    (approval) =>
-      isPlainRecord(approval) &&
-      typeof approval.requestId === "string" &&
-      typeof approval.sessionId === "string" &&
-      typeof approval.turnId === "string" &&
-      typeof approval.cwd === "string" &&
-      typeof approval.toolName === "string" &&
-      typeof approval.toolPreview === "string" &&
-      typeof approval.createdAt === "string" &&
-      typeof approval.expiresAt === "string" &&
-      typeof approval.status === "string" &&
-      Array.isArray(approval.messageIds) &&
-      approval.messageIds.every((messageId) => typeof messageId === "string"),
-  );
 }
 
 function createPairingCode(): string {

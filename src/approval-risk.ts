@@ -16,10 +16,14 @@ interface ApprovalRiskInput {
 interface CollectedInput {
   text: string[];
   paths: string[];
+  commands: string[];
   length: number;
+  nodes: number;
+  incompleteReason?: string;
 }
 
 const maximumCollectedLength = 64 * 1024;
+const maximumCollectedNodes = 10_000;
 
 const highRiskToolPatterns: Array<[RegExp, string]> = [
   [
@@ -30,11 +34,44 @@ const highRiskToolPatterns: Array<[RegExp, string]> = [
     /(?:publish|deploy|release|upload|send[_-]?(?:message|mail)|purchase|payment)/iu,
     "工具会产生明显的外部副作用",
   ],
+  [
+    /(?:external[_-]?directory|web[_-]?(?:fetch|search)|network)/iu,
+    "工具会访问项目目录之外的位置或网络",
+  ],
 ];
+
+const assessableToolNames = new Set([
+  "bash",
+  "shell",
+  "shell_command",
+  "powershell",
+  "pwsh",
+  "cmd",
+  "read",
+  "write",
+  "edit",
+  "multiedit",
+  "apply_patch",
+  "patch",
+  "glob",
+  "grep",
+  "search",
+  "list",
+  "ls",
+]);
+
+const shellToolNames = new Set([
+  "bash",
+  "shell",
+  "shell_command",
+  "powershell",
+  "pwsh",
+  "cmd",
+]);
 
 const highRiskContentPatterns: Array<[RegExp, string]> = [
   [
-    /(?:^|[\s;&|])(?:rm|rmdir|del|erase|remove-item|clear-content|shred|unlink)(?:\s|$)/iu,
+    /(?:^|[\s;&|("'`])(?:rm|rmdir|del|erase|remove-item|clear-content|shred|unlink)(?=$|[\s;&|)"'`])/iu,
     "命令包含删除文件或目录操作",
   ],
   [
@@ -104,7 +141,20 @@ export function assessApprovalRisk(
     }
   }
 
-  const collected: CollectedInput = { text: [], paths: [], length: 0 };
+  if (!assessableToolNames.has(input.toolName.trim().toLowerCase())) {
+    return {
+      level: "high",
+      reason: "工具不在可自动审批的明确白名单中",
+    };
+  }
+
+  const collected: CollectedInput = {
+    text: [],
+    paths: [],
+    commands: [],
+    length: 0,
+    nodes: 0,
+  };
   collectInput(input.toolInput, undefined, collected, new Set(), 0);
   const searchable = `${input.toolName}\n${collected.text.join("\n")}`;
   for (const [pattern, reason] of highRiskContentPatterns) {
@@ -122,6 +172,25 @@ export function assessApprovalRisk(
     }
   }
 
+  if (collected.incompleteReason) {
+    return {
+      level: "high",
+      reason: collected.incompleteReason,
+    };
+  }
+
+  if (shellToolNames.has(input.toolName.trim().toLowerCase())) {
+    if (
+      collected.commands.length === 0 ||
+      collected.commands.some((command) => !isExplicitlyLowRiskCommand(command))
+    ) {
+      return {
+        level: "high",
+        reason: "Shell 命令不在可自动审批的明确白名单中",
+      };
+    }
+  }
+
   return { level: "low", reason: "未命中高风险命令或路径规则" };
 }
 
@@ -132,16 +201,30 @@ function collectInput(
   seen: Set<object>,
   depth: number,
 ): void {
-  if (depth > 12 || collected.length >= maximumCollectedLength) {
+  collected.nodes += 1;
+  if (collected.nodes > maximumCollectedNodes) {
+    collected.incompleteReason ??= "请求参数过多，无法完整确认其安全性";
+    return;
+  }
+  if (depth > 12) {
+    collected.incompleteReason ??= "请求参数嵌套过深，无法完整确认其安全性";
     return;
   }
   if (typeof value === "string") {
     const remaining = maximumCollectedLength - collected.length;
+    if (value.length > remaining) {
+      collected.incompleteReason ??= "请求参数过长，无法完整确认其安全性";
+    }
     const text = value.slice(0, remaining);
-    collected.text.push(text);
+    if (text) {
+      collected.text.push(text);
+    }
     collected.length += text.length;
     if (key && isPathKey(key)) {
       collected.paths.push(value);
+    }
+    if (key && isCommandKey(key)) {
+      collected.commands.push(value);
     }
     return;
   }
@@ -160,9 +243,82 @@ function collectInput(
   }
 }
 
+function isCommandKey(key: string): boolean {
+  const normalized = key
+    .replace(/([a-z\d])([A-Z])/gu, "$1_$2")
+    .replace(/[^a-z\d]+/giu, "_")
+    .toLowerCase();
+  return /(?:^|_)(?:command|cmd|script|resource|resources|pattern|patterns)$/u
+    .test(normalized);
+}
+
+function isExplicitlyLowRiskCommand(value: string): boolean {
+  const command = value.trim();
+  if (
+    !command ||
+    command.length > 8_192 ||
+    /[\r\n;&|<>`]/u.test(command) ||
+    /\$\(|\$\{|%comspec%/iu.test(command)
+  ) {
+    return false;
+  }
+  const words = command.split(/\s+/u);
+  const executable = words[0]?.toLowerCase();
+  const subcommand = words[1]?.toLowerCase();
+  switch (executable) {
+    case "npm":
+    case "pnpm":
+    case "yarn":
+      return subcommand === "test" ||
+        (subcommand === "run" &&
+          /^(?:test|check|lint|build|typecheck|format(?::check)?)$/iu.test(
+            words[2] ?? "",
+          ));
+    case "cargo":
+      return ["test", "check", "build", "clippy"].includes(subcommand ?? "") ||
+        (subcommand === "fmt" && words.includes("--check"));
+    case "dotnet":
+      return ["test", "build"].includes(subcommand ?? "");
+    case "go":
+      return subcommand === "test";
+    case "python":
+    case "python3":
+      return subcommand === "-m" && words[2]?.toLowerCase() === "pytest";
+    case "pytest":
+    case "node":
+    case "tsx":
+      return executable === "pytest" || subcommand === "--test";
+    case "tsc":
+      return words.includes("--noemit");
+    case "git":
+      return ["status", "diff", "log", "show", "rev-parse", "ls-files"].includes(
+        subcommand ?? "",
+      );
+    case "rg":
+      return !words.some((word) => /^--pre(?:=|$)/iu.test(word));
+    case "get-content":
+    case "get-childitem":
+    case "get-child-item":
+    case "get-location":
+    case "select-string":
+    case "ls":
+    case "dir":
+    case "type":
+    case "pwd":
+    case "echo":
+      return true;
+    default:
+      return false;
+  }
+}
+
 function isPathKey(key: string): boolean {
-  return /(?:^|_)(?:path|file|filename|directory|dir|cwd|target|destination|source)$/iu
-    .test(key);
+  const normalized = key
+    .replace(/([a-z\d])([A-Z])/gu, "$1_$2")
+    .replace(/[^a-z\d]+/giu, "_")
+    .toLowerCase();
+  return /(?:^|_)(?:path|file|filename|directory|dir|cwd|target|destination|source|resource|resources)$/u
+    .test(normalized);
 }
 
 function isPathOutsideWorkspace(candidate: string, cwd: string): boolean {

@@ -83,7 +83,7 @@ export function buildApprovalCard(
         elements: [
           {
             tag: "plain_text",
-            content: "只批准这一次。也可以在飞书助手的本机审批窗口处理，先处理的一端生效。",
+            content: "审批默认只在飞书等待；需要电脑端窗口时，请点击“转回 PC 审批”。",
           },
         ],
       },
@@ -110,7 +110,40 @@ export function buildApprovalCard(
               sessionId: approval.sessionId,
             },
           },
+          {
+            tag: "button",
+            type: "default",
+            text: { tag: "plain_text", content: "转回 PC 审批" },
+            value: {
+              action: "approval_desktop",
+              requestId: approval.requestId,
+              sessionId: approval.sessionId,
+            },
+          },
         ],
+      },
+    ],
+  };
+}
+
+export function buildDesktopApprovalCard(
+  session: SessionRecord,
+  approval: ApprovalRecord,
+): Card {
+  const runtime = runtimeDisplayName(session.runtime);
+  return {
+    config: { wide_screen_mode: true, update_multi: true },
+    header: {
+      template: "blue",
+      title: { tag: "plain_text", content: `${runtime} 已转回 PC 审批` },
+    },
+    elements: [
+      {
+        tag: "div",
+        text: {
+          tag: "lark_md",
+          content: `**会话：** ${sessionLabel(session)}\n**工具：** ${approval.toolName}\n\n已通知 Codex 飞书助手，请在电脑端审批窗口处理。`,
+        },
       },
     ],
   };
@@ -486,7 +519,16 @@ export function buildErrorCard(session: SessionRecord, error: string): Card {
   return buildErrorCards(session, error)[0]!;
 }
 
-export function buildErrorCards(session: SessionRecord, error: string): Card[] {
+export interface ErrorCardRetryState {
+  cycleId: string;
+  state: "scheduled" | "running" | "stopped";
+}
+
+export function buildErrorCards(
+  session: SessionRecord,
+  error: string,
+  retry?: ErrorCardRetryState,
+): Card[] {
   const runtime = runtimeDisplayName(session.runtime);
   const chunks = splitTextForFeishu(redactSensitiveText(error), 2_800);
   return (chunks.length > 0 ? chunks : ["未知错误"]).map((chunk, index) =>
@@ -498,6 +540,28 @@ export function buildErrorCards(session: SessionRecord, error: string): Card[] {
       sectionTitle: "错误信息",
       partIndex: index,
       partCount: Math.max(1, chunks.length),
+      actions:
+        index === Math.max(1, chunks.length) - 1 && retry && retry.state !== "stopped"
+          ? [{
+              tag: "button",
+              type: "danger",
+              text: {
+                tag: "plain_text",
+                content: retry?.state === "running"
+                  ? "停止后续自动重试"
+                  : "停止自动重试",
+              },
+              value: {
+                action: "retry_stop",
+                sessionId: session.sessionId,
+                retryCycleId: retry?.cycleId,
+              },
+            }]
+          : undefined,
+      footer:
+        index === Math.max(1, chunks.length) - 1 && retry?.state === "stopped"
+          ? "已停止自动重试。你仍可以从飞书或电脑端重新发送任务。"
+          : undefined,
     })
   );
 }
@@ -511,6 +575,7 @@ function buildMessageCard(options: {
   partIndex: number;
   partCount: number;
   footer?: string;
+  actions?: Record<string, unknown>[];
 }): Card {
   const messageElements = markdownToFeishuCardElements(options.text, {
     maxCharacters: Math.max(3_200, options.text.length + 1),
@@ -556,6 +621,9 @@ function buildMessageCard(options: {
             tag: "note",
             elements: [{ tag: "plain_text", content: options.footer }],
           }]
+        : []),
+      ...(options.actions && options.actions.length > 0
+        ? [{ tag: "action", actions: options.actions }]
         : []),
     ],
   };

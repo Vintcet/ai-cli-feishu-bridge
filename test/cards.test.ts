@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   buildActivityCard,
+  buildApprovalCard,
+  buildErrorCards,
   buildStopCard,
   buildStopCards,
   buildUserInputCards,
@@ -10,7 +12,7 @@ import {
   buildUserPromptCards,
 } from "../src/cards.js";
 import { splitTextForFeishu } from "../src/feishu-markdown.js";
-import type { SessionRecord } from "../src/domain.js";
+import type { ApprovalRecord, SessionRecord } from "../src/domain.js";
 
 const session: SessionRecord = {
   sessionId: "019faef0-d0bb-7703-af82-17ee9b45397b",
@@ -23,6 +25,51 @@ const session: SessionRecord = {
   openedAt: "2026-07-31T08:00:00.000Z",
   lastSeenAt: "2026-07-31T08:05:00.000Z",
 };
+
+test("approval cards keep PC approval behind an explicit transfer action", () => {
+  const approval: ApprovalRecord = {
+    requestId: "approval-request",
+    sessionId: session.sessionId,
+    turnId: "turn-1",
+    cwd: session.cwd,
+    toolName: "Bash",
+    toolPreview: '{"command":"npm test"}',
+    createdAt: "2026-08-04T00:00:00.000Z",
+    expiresAt: "2026-08-04T00:20:00.000Z",
+    status: "pending",
+    messageIds: [],
+    requiresManualApproval: true,
+    desktopApprovalRequested: false,
+    riskLevel: "low",
+  };
+  const rendered = JSON.stringify(buildApprovalCard(session, approval));
+
+  assert.match(rendered, /批准一次/);
+  assert.match(rendered, /拒绝/);
+  assert.match(rendered, /转回 PC 审批/);
+  assert.match(rendered, /"action":"approval_desktop"/);
+});
+
+test("retryable error cards expose a stop action only while retrying", () => {
+  const scheduled = JSON.stringify(
+    buildErrorCards(session, "API Error: 502 Bad Gateway", {
+      cycleId: "retry-cycle-1",
+      state: "scheduled",
+    }),
+  );
+  assert.match(scheduled, /停止自动重试/);
+  assert.match(scheduled, /"action":"retry_stop"/);
+  assert.match(scheduled, /"retryCycleId":"retry-cycle-1"/);
+
+  const stopped = JSON.stringify(
+    buildErrorCards(session, "API Error: 502 Bad Gateway", {
+      cycleId: "retry-cycle-1",
+      state: "stopped",
+    }),
+  );
+  assert.doesNotMatch(stopped, /"action":"retry_stop"/);
+  assert.match(stopped, /已停止自动重试/);
+});
 
 test("completion cards convert Markdown blocks into Feishu card elements", () => {
   const card = buildStopCard(

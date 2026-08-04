@@ -3,7 +3,7 @@ import type { BridgeSettings } from "./domain.js";
 export function isRetryableRuntimeError(value: string, errorCode?: string): boolean {
   if (
     errorCode &&
-    /(?:internal.server|server.error|rate.limit|overload|high.demand|temporar|timeout)/i.test(
+    /(?:internal.server|server.error|bad.gateway|gateway.timeout|rate.limit|overload|high.demand|temporar|timeout|(?:^|[_-])(?:408|409|429|500|502|503|504)(?:$|[_-]))/i.test(
       errorCode,
     )
   ) {
@@ -34,18 +34,32 @@ export function codexErrorFromMessage(
     return undefined;
   }
 
+  // Codex renders some terminal failures with a decorative status marker
+  // (for example, "■ exceeded retry limit ..."). The marker is presentation,
+  // not part of the provider error, so ignore it only while classifying the line.
+  const classificationLine = firstLine.replace(
+    /^(?:[■●▪•◆◇✖✕×⚠]\s*)+/u,
+    "",
+  );
+
   const startsLikeError = /^(?:error\b|failed\b|failure\b|exception\b|unable\b|request failed\b|unexpected status\b|exceeded retry limit\b|(?:错误|失败|异常|服务繁忙|请求过多|连接超时|暂时不可用)(?:\s*[:：]|\s|$))/iu.test(
-    firstLine,
+    classificationLine,
   );
   const startsWithRetryableStatus = /^(?:http\s*)?(?:400|408|409|429|500|502|503|504)(?:\s*[:：-]\s*|\s+(?:bad\b|too many\b|internal\b|service\b|request\b|gateway\b|error\b|错误|失败|异常))/iu.test(
-    firstLine,
+    classificationLine,
+  );
+  const explicitGatewayFailure = /^(?:(?:api|server|gateway|upstream|provider)\s+error\b|request\s+failed\s+with\s+(?:http\s+)?status(?:\s+code)?\b|bad\s+gateway\b|http\/\d(?:\.\d)?\s+(?:400|408|409|429|500|502|503|504)\b)/iu.test(
+    classificationLine,
   );
   const knownServiceFailure = /^(?:we(?:'re| are) currently experiencing high demand\b|too many requests\b|service unavailable\b|rate.?limit(?:ed| exceeded)?\b|request timed out\b|timed out\b)/iu.test(
-    firstLine,
+    classificationLine,
   );
   if (
-    !(startsLikeError || startsWithRetryableStatus || knownServiceFailure) ||
-    !isRetryableRuntimeError(firstLine)
+    !(startsLikeError ||
+      startsWithRetryableStatus ||
+      explicitGatewayFailure ||
+      knownServiceFailure) ||
+    !isRetryableRuntimeError(classificationLine)
   ) {
     return undefined;
   }

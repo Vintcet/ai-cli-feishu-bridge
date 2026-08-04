@@ -164,6 +164,7 @@ export interface ApprovalRecord {
   resolvedAt?: string;
   messageIds: string[];
   requiresManualApproval?: boolean;
+  desktopApprovalRequested?: boolean;
   riskLevel?: ApprovalRiskLevel;
   riskReason?: string;
   opencodePermissionId?: string;
