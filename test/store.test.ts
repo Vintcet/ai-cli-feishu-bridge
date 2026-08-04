@@ -8,7 +8,7 @@ import type { Binding } from "../src/domain.js";
 import { BridgeStore } from "../src/store.js";
 
 async function temporaryDirectory(): Promise<string> {
-  return mkdtemp(path.join(os.tmpdir(), "codex-feishu-store-"));
+  return mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-store-"));
 }
 
 function binding(openId: string, boundAt = new Date().toISOString()): Binding {
@@ -105,7 +105,7 @@ test("creates one persistent local control token", async () => {
 });
 
 test("persists notification and automation settings", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-settings-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-settings-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();

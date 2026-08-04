@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title description">
-  <title id="title">Codex 飞书助手</title>
+  <title id="title">AI CLI 飞书助手</title>
   <desc id="description">深色圆角方形中的白色对话框，包含蓝色终端提示符和绿色连接状态线。</desc>
   <rect x="8" y="8" width="240" height="240" rx="56" fill="#0F172A"/>
   <path d="M76 164v58l58-44z" fill="#F8FAFC"/>

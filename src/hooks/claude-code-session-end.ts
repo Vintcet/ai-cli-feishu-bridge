@@ -14,6 +14,6 @@ try {
   const result = await postHook("/hooks/session-end", enriched, 5000);
   writeHookOutput(result);
 } catch (error) {
-  console.error(`[codex-feishu] Claude Code SessionEnd was skipped: ${String(error)}`);
+  console.error(`[ai-cli-feishu] Claude Code SessionEnd was skipped: ${String(error)}`);
   writeHookOutput({});
 }

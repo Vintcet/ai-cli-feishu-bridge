@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 internal sealed class ModelStringConverter : JsonConverter<string>
 {
@@ -90,10 +90,10 @@ internal sealed class BridgeStatus
     public FeishuStatus Feishu { get; set; } = new();
 
     [JsonPropertyName("sessions")]
-    public List<CodexSession> Sessions { get; set; } = [];
+    public List<AssistantSession> Sessions { get; set; } = [];
 
     [JsonPropertyName("historySessions")]
-    public List<CodexSession> HistorySessions { get; set; } = [];
+    public List<AssistantSession> HistorySessions { get; set; } = [];
 
     [JsonPropertyName("approvals")]
     public List<BridgeApproval> Approvals { get; set; } = [];
@@ -162,7 +162,7 @@ internal sealed class FeishuStatus
     public int ReconnectAttempts { get; set; }
 }
 
-internal sealed class CodexSession
+internal sealed class AssistantSession
 {
     [JsonPropertyName("sessionId")]
     public string SessionId { get; set; } = "";

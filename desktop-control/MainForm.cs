@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 internal sealed partial class MainForm : Form
 {
@@ -79,7 +79,7 @@ internal sealed partial class MainForm : Form
         {
             AppLog.Error("面板启动日志初始化异常", error);
         }
-        Text = "Codex 飞书助手";
+        Text = "AI CLI 飞书助手";
         Icon = LoadApplicationIcon();
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(1280, 760);
@@ -159,7 +159,7 @@ internal sealed partial class MainForm : Form
 
     private void ConfigureTrayIcon()
     {
-        var openItem = new ToolStripMenuItem("打开 Codex 飞书助手");
+        var openItem = new ToolStripMenuItem("打开 AI CLI 飞书助手");
         openItem.Font = new Font(openItem.Font, FontStyle.Bold);
         openItem.Click += (_, _) => RestoreFromTray();
         var exitItem = new ToolStripMenuItem("退出");
@@ -169,7 +169,7 @@ internal sealed partial class MainForm : Form
         trayMenu.Items.Add(exitItem);
 
         trayIcon.Icon = Icon ?? SystemIcons.Application;
-        trayIcon.Text = "Codex 飞书助手";
+        trayIcon.Text = "AI CLI 飞书助手";
         trayIcon.ContextMenuStrip = trayMenu;
         trayIcon.Visible = true;
         trayIcon.DoubleClick += (_, _) => RestoreFromTray();
@@ -190,7 +190,7 @@ internal sealed partial class MainForm : Form
             trayHintShown = true;
             trayIcon.ShowBalloonTip(
                 2500,
-                "Codex 飞书助手仍在运行",
+                "AI CLI 飞书助手仍在运行",
                 "双击托盘图标可重新打开；右键选择“退出”才会完全关闭。",
                 ToolTipIcon.Info);
         }
@@ -344,7 +344,7 @@ internal sealed partial class MainForm : Form
         var title = new Label
         {
             AutoSize = true,
-            Text = "Codex 飞书助手",
+            Text = "AI CLI 飞书助手",
             ForeColor = Color.White,
             Font = new Font("Microsoft YaHei UI", 20F, FontStyle.Bold),
             Location = new Point(26, 16),
@@ -787,8 +787,8 @@ internal sealed partial class MainForm : Form
     private async Task EditSelectedAliasAsync()
     {
         var session = sessionTabs.SelectedIndex == 1
-            ? historyGrid.CurrentRow?.Tag as CodexSession
-            : sessionGrid.CurrentRow?.Tag as CodexSession;
+            ? historyGrid.CurrentRow?.Tag as AssistantSession
+            : sessionGrid.CurrentRow?.Tag as AssistantSession;
         if (operating || session is null)
         {
             return;
@@ -833,8 +833,8 @@ internal sealed partial class MainForm : Form
             return;
         }
         var session = sessionTabs.SelectedIndex == 1
-            ? historyGrid.CurrentRow?.Tag as CodexSession
-            : sessionGrid.CurrentRow?.Tag as CodexSession;
+            ? historyGrid.CurrentRow?.Tag as AssistantSession
+            : sessionGrid.CurrentRow?.Tag as AssistantSession;
         if (session is null)
         {
             return;
@@ -857,7 +857,7 @@ internal sealed partial class MainForm : Form
 
     private async Task RetrySelectedSessionGroupAsync()
     {
-        if (operating || sessionGrid.CurrentRow?.Tag is not CodexSession session)
+        if (operating || sessionGrid.CurrentRow?.Tag is not AssistantSession session)
         {
             return;
         }
@@ -1187,9 +1187,9 @@ internal sealed partial class MainForm : Form
                 $"history={status.HistorySessions.Count}");
         }
         var selectedSessionId =
-            (sessionGrid.CurrentRow?.Tag as CodexSession)?.SessionId;
+            (sessionGrid.CurrentRow?.Tag as AssistantSession)?.SessionId;
         var selectedHistorySessionId =
-            (historyGrid.CurrentRow?.Tag as CodexSession)?.SessionId;
+            (historyGrid.CurrentRow?.Tag as AssistantSession)?.SessionId;
         var sessionScrollIndex = sessionGrid.Rows.Count > 0
             ? sessionGrid.FirstDisplayedScrollingRowIndex
             : -1;
@@ -1421,26 +1421,26 @@ internal sealed partial class MainForm : Form
         aliasButton.Enabled =
             !operating &&
             (historySelected
-                ? historyGrid.CurrentRow?.Tag is CodexSession
-                : sessionGrid.CurrentRow?.Tag is CodexSession);
+                ? historyGrid.CurrentRow?.Tag is AssistantSession
+                : sessionGrid.CurrentRow?.Tag is AssistantSession);
         retryGroupButton.Enabled =
             !operating &&
             !historySelected &&
-            sessionGrid.CurrentRow?.Tag is CodexSession session &&
+            sessionGrid.CurrentRow?.Tag is AssistantSession session &&
             session.ManagedByAssistant &&
             session.FeishuChatStatus != "connected";
         resumeSessionButton.Enabled =
             !operating &&
             historySelected &&
-            historyGrid.CurrentRow?.Tag is CodexSession;
+            historyGrid.CurrentRow?.Tag is AssistantSession;
         deleteHistoryButton.Enabled = resumeSessionButton.Enabled;
         folderButton.Enabled = !operating &&
             (historySelected
-                ? historyGrid.CurrentRow?.Tag is CodexSession
-                : sessionGrid.CurrentRow?.Tag is CodexSession);
+                ? historyGrid.CurrentRow?.Tag is AssistantSession
+                : sessionGrid.CurrentRow?.Tag is AssistantSession);
     }
 
-    private static string FeishuGroupLabel(CodexSession session) =>
+    private static string FeishuGroupLabel(AssistantSession session) =>
         session.FeishuChatStatus switch
         {
             "connected" when !string.IsNullOrWhiteSpace(session.FeishuChatName) =>
@@ -1590,7 +1590,7 @@ internal sealed partial class MainForm : Form
         _ => "这条审批已在另一端处理",
     };
 
-    private static string SessionDisplayName(CodexSession session) =>
+    private static string SessionDisplayName(AssistantSession session) =>
         string.IsNullOrWhiteSpace(session.Alias)
             ? $"{session.ProjectName} #{session.ShortId}"
             : $"@{session.Alias}";
@@ -1608,7 +1608,7 @@ internal sealed partial class MainForm : Form
         {
             foreach (DataGridViewRow row in grid.Rows)
             {
-                if (row.Tag is CodexSession session &&
+                if (row.Tag is AssistantSession session &&
                     session.SessionId == selectedSessionId)
                 {
                     selectedRow = row;
@@ -1664,7 +1664,7 @@ internal sealed partial class MainForm : Form
         _ => "未连接",
     };
 
-    private static string SessionModeLabel(CodexSession session)
+    private static string SessionModeLabel(AssistantSession session)
     {
         var profile = RuntimeCatalog.FromId(session.Runtime);
         var runtime = profile.ShortName;

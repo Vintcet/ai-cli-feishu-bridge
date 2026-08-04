@@ -5,7 +5,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 internal sealed class BridgeClient : IDisposable
 {
@@ -41,7 +41,7 @@ internal sealed class BridgeClient : IDisposable
                 HttpMethod.Get,
                 forceRefresh ? "health?refresh=1" : "health");
             request.Headers.Add(
-                "X-Codex-Feishu-Control-Token",
+                "X-AI-CLI-Feishu-Control-Token",
                 controlToken);
             using var response = await httpClient.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
@@ -117,7 +117,7 @@ internal sealed class BridgeClient : IDisposable
             Content = JsonContent.Create(new { }),
         };
         request.Headers.Add(
-            "X-Codex-Feishu-Control-Token",
+            "X-AI-CLI-Feishu-Control-Token",
             ReadControlToken(BridgeRoot));
         using var response = await httpClient.SendAsync(request, cancellationToken);
         if (response.StatusCode == HttpStatusCode.NotFound)
@@ -165,7 +165,7 @@ internal sealed class BridgeClient : IDisposable
             Content = JsonContent.Create(new { sessionId, alias }),
         };
         request.Headers.Add(
-            "X-Codex-Feishu-Control-Token",
+            "X-AI-CLI-Feishu-Control-Token",
             ReadControlToken(BridgeRoot));
         using var response = await httpClient.SendAsync(request, cancellationToken);
         AliasUpdateResult? result = null;
@@ -197,7 +197,7 @@ internal sealed class BridgeClient : IDisposable
             Content = JsonContent.Create(new { sessionId }),
         };
         request.Headers.Add(
-            "X-Codex-Feishu-Control-Token",
+            "X-AI-CLI-Feishu-Control-Token",
             ReadControlToken(BridgeRoot));
         using var response = await httpClient.SendAsync(request, cancellationToken);
         SessionGroupRetryResult? result = null;
@@ -235,7 +235,7 @@ internal sealed class BridgeClient : IDisposable
             Content = JsonContent.Create(new { requestId, resolution }),
         };
         request.Headers.Add(
-            "X-Codex-Feishu-Control-Token",
+            "X-AI-CLI-Feishu-Control-Token",
             ReadControlToken(BridgeRoot));
         using var response = await httpClient.SendAsync(request, cancellationToken);
         ApprovalResolveResult? result = null;
@@ -273,7 +273,7 @@ internal sealed class BridgeClient : IDisposable
             Content = JsonContent.Create(new { sessionId }),
         };
         request.Headers.Add(
-            "X-Codex-Feishu-Control-Token",
+            "X-AI-CLI-Feishu-Control-Token",
             ReadControlToken(BridgeRoot));
         using var response = await httpClient.SendAsync(request, cancellationToken);
         HistoryHideResult? result = null;
@@ -304,7 +304,7 @@ internal sealed class BridgeClient : IDisposable
             Content = JsonContent.Create(new { }),
         };
         request.Headers.Add(
-            "X-Codex-Feishu-Control-Token",
+            "X-AI-CLI-Feishu-Control-Token",
             ReadControlToken(BridgeRoot));
         using var response = await httpClient.SendAsync(request, cancellationToken);
         RuntimeLaunchClaimResult? result = null;
@@ -338,7 +338,7 @@ internal sealed class BridgeClient : IDisposable
             Content = JsonContent.Create(new { requestId, success, error }),
         };
         request.Headers.Add(
-            "X-Codex-Feishu-Control-Token",
+            "X-AI-CLI-Feishu-Control-Token",
             ReadControlToken(BridgeRoot));
         using var response = await httpClient.SendAsync(request, cancellationToken);
         RuntimeLaunchCompleteResult? result = null;
@@ -380,7 +380,7 @@ internal sealed class BridgeClient : IDisposable
             }),
         };
         request.Headers.Add(
-            "X-Codex-Feishu-Control-Token",
+            "X-AI-CLI-Feishu-Control-Token",
             ReadControlToken(BridgeRoot));
         using var response = await httpClient.SendAsync(request, cancellationToken);
         SettingsUpdateResult? result = null;
@@ -458,14 +458,14 @@ internal sealed class BridgeClient : IDisposable
         if (!File.Exists(controlExecutable))
         {
             await ReleaseOpenCodePortAsync(port, CancellationToken.None);
-            throw new FileNotFoundException("找不到 Codex 飞书助手程序。", controlExecutable);
+            throw new FileNotFoundException("找不到 AI CLI 飞书助手程序。", controlExecutable);
         }
         var terminalHost = FindTerminalHost(controlExecutable);
         if (!File.Exists(terminalHost))
         {
             await ReleaseOpenCodePortAsync(port, CancellationToken.None);
             throw new FileNotFoundException(
-                "找不到 Windows Terminal 同步宿主，请重新安装或更新 Codex 飞书助手。",
+                "找不到 Windows Terminal 同步宿主，请重新安装或更新 AI CLI 飞书助手。",
                 terminalHost);
         }
         var windowsTerminal = FindWindowsTerminal();
@@ -515,13 +515,13 @@ internal sealed class BridgeClient : IDisposable
         var controlExecutable = Application.ExecutablePath;
         if (!File.Exists(controlExecutable))
         {
-            throw new FileNotFoundException("找不到 Codex 飞书助手程序。", controlExecutable);
+            throw new FileNotFoundException("找不到 AI CLI 飞书助手程序。", controlExecutable);
         }
         var terminalHost = FindTerminalHost(controlExecutable);
         if (!File.Exists(terminalHost))
         {
             throw new FileNotFoundException(
-                "找不到 Windows Terminal 同步宿主，请重新安装或更新 Codex 飞书助手。",
+                "找不到 Windows Terminal 同步宿主，请重新安装或更新 AI CLI 飞书助手。",
                 terminalHost);
         }
 
@@ -578,7 +578,7 @@ internal sealed class BridgeClient : IDisposable
             Content = JsonContent.Create(payload),
         };
         request.Headers.Add(
-            "X-Codex-Feishu-Control-Token",
+            "X-AI-CLI-Feishu-Control-Token",
             ReadControlToken(BridgeRoot));
         using var response = await httpClient.SendAsync(request, cancellationToken);
         OpenCodeLaunchResult? result = null;
@@ -612,7 +612,7 @@ internal sealed class BridgeClient : IDisposable
                 Content = JsonContent.Create(new { port }),
             };
             request.Headers.Add(
-                "X-Codex-Feishu-Control-Token",
+                "X-AI-CLI-Feishu-Control-Token",
                 ReadControlToken(BridgeRoot));
             using var response = await httpClient.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
@@ -842,13 +842,13 @@ internal sealed class BridgeClient : IDisposable
         {
             var versionedPath = Path.Combine(
                 directory,
-                $"CodexFeishuTerminalHost-{version.Major}.{version.Minor}.{version.Build}.exe");
+                $"AiCliFeishuTerminalHost-{version.Major}.{version.Minor}.{version.Build}.exe");
             if (File.Exists(versionedPath))
             {
                 return versionedPath;
             }
         }
-        return Path.Combine(directory, "CodexFeishuTerminalHost.exe");
+        return Path.Combine(directory, "AiCliFeishuTerminalHost.exe");
     }
 
     private async Task<BridgeProbe?> ProbeBridgeAsync(
@@ -1029,7 +1029,8 @@ internal sealed class BridgeClient : IDisposable
             }
         }
 
-        var configuredPath = Environment.GetEnvironmentVariable("CODEX_FEISHU_BRIDGE_ROOT");
+        var configuredPath = Environment.GetEnvironmentVariable(
+            "AI_CLI_FEISHU_BRIDGE_ROOT");
         if (!string.IsNullOrWhiteSpace(configuredPath) &&
             Directory.Exists(configuredPath) &&
             File.Exists(Path.Combine(configuredPath, "package.json")) &&
@@ -1037,7 +1038,7 @@ internal sealed class BridgeClient : IDisposable
         {
             return Path.GetFullPath(configuredPath);
         }
-        throw new DirectoryNotFoundException("找不到 Codex 飞书桥接器目录。");
+        throw new DirectoryNotFoundException("找不到 AI CLI 飞书助手目录。");
     }
 
     private static int ReadBridgePort(string bridgeRoot)
@@ -1092,7 +1093,7 @@ internal sealed class BridgeClient : IDisposable
             return token;
         }
         throw new InvalidOperationException(
-            "找不到本机控制令牌。请先点击“连接”，再重新打开 Codex 飞书助手。");
+            "找不到本机控制令牌。请先点击“连接”，再重新打开 AI CLI 飞书助手。");
     }
 
     public void Dispose() => httpClient.Dispose();

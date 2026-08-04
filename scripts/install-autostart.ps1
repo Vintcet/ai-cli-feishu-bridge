@@ -2,9 +2,12 @@
 param()
 
 $ErrorActionPreference = "Stop"
-$taskName = "CodexFeishuBridge"
+$taskName = "AiCliFeishuBridge"
 $projectDirectory = Split-Path -Parent $PSScriptRoot
-$controlExecutable = Join-Path $projectDirectory "Codex飞书助手.exe"
+$controlExecutable = Join-Path $projectDirectory "AI CLI飞书助手.exe"
+if (-not (Test-Path -LiteralPath $controlExecutable)) {
+    throw "AI CLI Feishu Assistant executable was not found."
+}
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
 $actionArguments = "--bridge-service"

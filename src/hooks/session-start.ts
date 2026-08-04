@@ -12,6 +12,6 @@ try {
   );
   writeHookOutput(await postHook("/hooks/session-start", input, 5_000));
 } catch (error) {
-  console.error(`[codex-feishu] Session start registration was skipped: ${String(error)}`);
+  console.error(`[ai-cli-feishu] Session start registration was skipped: ${String(error)}`);
   writeHookOutput({});
 }

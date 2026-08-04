@@ -1,12 +1,18 @@
-# Codex / Claude Code / OpenCode Feishu Bridge
+# AI CLI Feishu Assistant
 
 [简体中文](README.md) | [English](README_EN.md)
 
-Current version: `0.18.2`
+Current version: `0.19.0`
 
-This is an unofficial Windows-local bridge that connects Codex CLI, Claude Code, and OpenCode sessions to your own Feishu custom app. Each assistant session can have a private Feishu group, so you can receive completion and error notifications, handle approval or follow-up prompts, and continue the original CLI conversation while away from the computer.
+AI CLI Feishu Assistant is an unofficial Windows-local bridge that connects Codex CLI, Claude Code, and OpenCode sessions to your own Feishu custom app. Each assistant session can have a private Feishu group, so you can receive completion and error notifications, handle approval or follow-up prompts, and continue the original CLI conversation while away from the computer.
 
 The bridge service, session index, credentials, and settings stay on your computer. This project does not provide a cloud relay and does not bundle Codex CLI, Claude Code, OpenCode, or a Feishu app. You install and sign in to the CLI tools yourself and create your own Feishu custom app.
+
+## What's new in 0.19.0
+
+- The project is now AI CLI Feishu Assistant, with the repository and npm package renamed to `ai-cli-feishu-bridge` and all three runtimes presented as first-class integrations.
+- Desktop, tray, Feishu card, log, release archive, and script-facing product text now uses the new name.
+- Windows binaries, projects, named pipes, authentication headers, and environment variables now consistently use `AiCliFeishu*` and `AI_CLI_FEISHU_*`; legacy names are no longer included.
 
 ## What's new in 0.18.2
 
@@ -73,28 +79,28 @@ Main features:
 
 ### Use the Release ZIP
 
-Windows users can download `codex-feishu-bridge-v0.18.2-windows-x64.zip` from [GitHub Releases](https://github.com/Vintcet/codex-feishu-bridge/releases). The archive includes the compiled bridge, production dependencies, and both desktop executables. Extract the complete archive instead of copying only the main executable. Before the first run, copy `.env.example` to `.env`, add your Feishu app settings, then launch `Codex飞书助手.exe` from the archive root.
+Windows users can download `ai-cli-feishu-bridge-v0.19.0-windows-x64.zip` from [GitHub Releases](https://github.com/Vintcet/ai-cli-feishu-bridge/releases). The archive includes the compiled bridge, production dependencies, and both desktop executables. Extract the complete archive instead of copying only the main executable. Before the first run, copy `.env.example` to `.env`, add your Feishu app settings, then launch `AI CLI飞书助手.exe` from the archive root.
 
 ### Build from source
 
 To build from source instead, run:
 
 ```powershell
-git clone https://github.com/Vintcet/codex-feishu-bridge.git
-cd .\codex-feishu-bridge
+git clone https://github.com/Vintcet/ai-cli-feishu-bridge.git
+cd .\ai-cli-feishu-bridge
 npm install
 Copy-Item .\.env.example .\.env
 npm run build
-dotnet publish .\desktop-control\CodexFeishuControl.csproj -c Release -o .\desktop-control\publish
+dotnet publish .\desktop-control\AiCliFeishuControl.csproj -c Release -o .\desktop-control\publish
 ```
 
 Edit `.env`, then run the source-built application:
 
 ```powershell
-.\desktop-control\publish\CodexFeishuControl.exe
+.\desktop-control\publish\AiCliFeishuControl.exe
 ```
 
-`CodexFeishuControl.exe` is the desktop panel produced by a source build. Keep `CodexFeishuTerminalHost.exe` in the same directory. A packaged build may display the main executable as `Codex飞书助手.exe`; it is the same application. Create a desktop shortcut to whichever main executable you actually use.
+`AiCliFeishuControl.exe` is the desktop panel produced by a source build. Keep `AiCliFeishuTerminalHost.exe` in the same directory. A packaged build may display the main executable as `AI CLI飞书助手.exe`; it is the same application. Create a desktop shortcut to whichever main executable you actually use.
 
 ## Create and configure the Feishu bot
 
@@ -141,7 +147,7 @@ Open Events & Callbacks (some console versions call it Event Subscriptions), sel
 | Event | Receive message v2.0 | `im.message.receive_v1` | Direct messages, group messages, images, and files |
 | Callback | Card action callback | `card.action.trigger` | Approval buttons and follow-up answer choices |
 
-When you save long-connection mode for the first time, the Feishu console normally checks that a client is already online. After putting the App ID and App Secret in `.env`, start the packaged `Codex飞书助手.exe` or the source-build output `desktop-control\publish\CodexFeishuControl.exe`, click `连接` (Connect), then return to the developer console and save long-connection mode. You do not need to bind a Feishu account or launch a CLI session yet. After permissions, events, and the app version have been published, disconnect and reconnect once from the desktop panel.
+When you save long-connection mode for the first time, the Feishu console normally checks that a client is already online. After putting the App ID and App Secret in `.env`, start the packaged `AI CLI飞书助手.exe` or the source-build output `desktop-control\publish\AiCliFeishuControl.exe`, click `连接` (Connect), then return to the developer console and save long-connection mode. You do not need to bind a Feishu account or launch a CLI session yet. After permissions, events, and the app version have been published, disconnect and reconnect once from the desktop panel.
 
 If your console shows events and callbacks on separate tabs, add one item on each tab. The local bridge initiates the long connection to Feishu; do not switch this project to webhook mode or enter a public request URL. See Feishu's [long-connection guide](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/event-subscription-guide/long-connection-mode) for the platform-level behavior and limits.
 
@@ -158,7 +164,7 @@ This is the most common setup mistake: **saving permission or event changes as a
 
 The current desktop UI is Chinese. This guide shows the exact Chinese label first and an English explanation when useful.
 
-1. Run the packaged `Codex飞书助手.exe` or the source-build output `desktop-control\publish\CodexFeishuControl.exe`, click `连接` (Connect), and wait for the Feishu status to show `已连接` (Connected).
+1. Run the packaged `AI CLI飞书助手.exe` or the source-build output `desktop-control\publish\AiCliFeishuControl.exe`, click `连接` (Connect), and wait for the Feishu status to show `已连接` (Connected).
 2. Find the published bot in Feishu and open a direct chat with it.
 3. Send the binding command displayed by the desktop panel. The first command is usually `绑定 <random-code>`. Once bound, only that Feishu account can manage this local bridge.
 4. Launch a Codex, Claude Code, or OpenCode session from the desktop panel and wait for it to appear under `活跃会话` (Active Sessions).
@@ -180,7 +186,7 @@ If group creation fails, the local CLI still works and notifications temporarily
 The recommended workflow is one private Feishu group for every managed Codex, Claude Code, or OpenCode window. Only you and the bot are in the group, and messages from that group can enter only its bound assistant session.
 
 1. Complete the Feishu bot, permission, event/callback, availability, and publishing steps above.
-2. Run the desktop executable you built/downloaded, or a `Codex飞书助手` shortcut you created for it. Click `连接` (Connect) and wait for Feishu to show as connected.
+2. Run the desktop executable you built/downloaded, or an `AI CLI飞书助手` shortcut you created for it. Click `连接` (Connect) and wait for Feishu to show as connected.
 3. Send the displayed binding command to the bot in a direct chat.
 4. Confirm the default workspace in `设置` (Settings). Use `新建 Codex`, `新建 Claude`, or `新建 opencode` to select a directory, send a `新建 ...` command in the bot DM, or resume a saved conversation from `历史记录` (History).
 5. Select the target under `活跃会话` (Active Sessions) and click `创建飞书群` if a group was not created automatically.
@@ -205,11 +211,11 @@ Before use, confirm that the bot capability is enabled, all required scopes are 
 For everyday use, no command line is required. The current panel UI is Chinese; key labels are translated below. Run whichever main executable exists in your copy:
 
 ```text
-Packaged build: .\Codex飞书助手.exe
-Source build:   .\desktop-control\publish\CodexFeishuControl.exe
+Packaged build: .\AI CLI飞书助手.exe
+Source build:   .\desktop-control\publish\AiCliFeishuControl.exe
 ```
 
-If you want a desktop entry, manually create a shortcut named `Codex飞书助手` to the executable you use. The panel provides:
+If you want a desktop entry, manually create a shortcut named `AI CLI飞书助手` to the executable you use. The panel provides:
 
 - `连接` / `断开` (Connect/Disconnect) using one status-aware button.
 - `新建 Codex`, `新建 Claude`, and `新建 opencode` launchers with a project-directory picker.
@@ -352,11 +358,11 @@ CODEX_COMMAND=codex
 
 When `DEFAULT_WORKSPACE_ROOT` is empty, the default is the parent directory of the bridge. You can select any real directory in desktop `设置` (Settings); do not copy a drive-specific path from another computer.
 
-Codex and Claude Code hook scripts connect to `http://127.0.0.1:8765` by default. If you change the port, set `CODEX_FEISHU_BRIDGE_URL` in the CLI launch environment or update the hook configuration accordingly.
+Codex and Claude Code hook scripts connect to `http://127.0.0.1:8765` by default. If you change the port, set `AI_CLI_FEISHU_BRIDGE_URL` in the CLI launch environment or update the hook configuration accordingly.
 
 ## Installation and startup
 
-Windows login startup is not installed by default. For normal use, run the desktop executable or your shortcut and click Connect. The desktop executable starts Node.js directly and uses an authenticated local endpoint for graceful shutdown, without VBS or bridge lifecycle PowerShell wrappers. For automation without opening the panel, use `Codex飞书助手.exe --bridge-start` and `Codex飞书助手.exe --bridge-stop`.
+Windows login startup is not installed by default. For normal use, run the desktop executable or your shortcut and click Connect. The desktop executable starts Node.js directly and uses an authenticated local endpoint for graceful shutdown, without VBS or bridge lifecycle PowerShell wrappers. For automation without opening the panel, use `AI CLI飞书助手.exe --bridge-start` and `AI CLI飞书助手.exe --bridge-stop`.
 
 The Release ZIP includes optional login-startup scripts. They create a limited, current-user scheduled task and do not elevate the bridge:
 
@@ -370,7 +376,7 @@ To run or debug only the Node.js bridge service:
 The following commands do not provide the desktop panel. For managed windows, History, and automatic recovery, also build and run the desktop app as described in “Get the desktop app and run it for the first time”.
 
 ```powershell
-cd <project-directory>\codex-feishu-bridge
+cd <project-directory>\ai-cli-feishu-bridge
 npm install
 npm run build
 npm start
@@ -389,8 +395,8 @@ npm run lint
 npm run format:check
 npm test
 npm run build
-dotnet test .\desktop-control\tests\CodexFeishuTerminalHost.Tests.csproj -c Release
-dotnet build .\desktop-control\CodexFeishuControl.csproj -c Release
+dotnet test .\desktop-control\tests\AiCliFeishuTerminalHost.Tests.csproj -c Release
+dotnet build .\desktop-control\AiCliFeishuControl.csproj -c Release
 ```
 
 `npm run format:check` is a zero-dependency text hygiene check for trailing whitespace and final newlines. The Windows CI workflow runs the same Node.js and .NET validation.
@@ -400,10 +406,10 @@ The bridge starts a Feishu WebSocket connection, a hook HTTP server bound only t
 ### Rebuild the desktop executables
 
 ```powershell
-dotnet publish .\desktop-control\CodexFeishuControl.csproj -c Release -o .\desktop-control\publish
+dotnet publish .\desktop-control\AiCliFeishuControl.csproj -c Release -o .\desktop-control\publish
 ```
 
-The output contains `CodexFeishuControl.exe` and `CodexFeishuTerminalHost.exe`. Keep both in the same directory. They use the locally installed .NET 8 Windows Desktop Runtime. You may copy or rename the main UI executable to `Codex飞书助手.exe` for the documented shortcut name, but do not rename or omit the terminal host.
+The output contains `AiCliFeishuControl.exe` and `AiCliFeishuTerminalHost.exe`. Keep both in the same directory. They use the locally installed .NET 8 Windows Desktop Runtime. You may copy or rename the main UI executable to `AI CLI飞书助手.exe` for the documented shortcut name, but do not rename or omit the terminal host.
 
 ## Codex hooks
 

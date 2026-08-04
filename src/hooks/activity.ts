@@ -10,6 +10,6 @@ try {
   const input = addManagedTerminalMetadata(await readHookInput());
   writeHookOutput(await postHook("/hooks/activity", compactActivityPayload(input), 2_000));
 } catch (error) {
-  console.error(`[codex-feishu] Activity update was skipped: ${String(error)}`);
+  console.error(`[ai-cli-feishu] Activity update was skipped: ${String(error)}`);
   writeHookOutput({});
 }

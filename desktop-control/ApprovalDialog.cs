@@ -1,6 +1,6 @@
 using System.Media;
 
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 internal sealed class ApprovalDialog : Form
 {

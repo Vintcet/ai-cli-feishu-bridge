@@ -7,12 +7,15 @@
     <Nullable>enable</Nullable>
     <NuGetAudit>false</NuGetAudit>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationIcon>assets\codex-feishu.ico</ApplicationIcon>
-    <AssemblyName>CodexFeishuControl</AssemblyName>
-    <RootNamespace>CodexFeishuControl</RootNamespace>
-    <Version>0.18.2</Version>
-    <AssemblyVersion>0.18.2.0</AssemblyVersion>
-    <FileVersion>0.18.2.0</FileVersion>
+    <ApplicationIcon>assets\ai-cli-feishu.ico</ApplicationIcon>
+    <AssemblyName>AiCliFeishuControl</AssemblyName>
+    <RootNamespace>AiCliFeishuControl</RootNamespace>
+    <Product>AI CLI Feishu Assistant</Product>
+    <Title>AI CLI Feishu Assistant</Title>
+    <Description>Windows desktop bridge for Codex, Claude Code, OpenCode, and Feishu.</Description>
+    <Version>0.19.0</Version>
+    <AssemblyVersion>0.19.0.0</AssemblyVersion>
+    <FileVersion>0.19.0.0</FileVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -23,7 +26,7 @@
   <ItemGroup>
     <Compile Remove="terminal-host\**\*.cs" />
     <Compile Remove="tests\**\*.cs" />
-    <ProjectReference Include="terminal-host\CodexFeishuTerminalHost.csproj"
+    <ProjectReference Include="terminal-host\AiCliFeishuTerminalHost.csproj"
                       ReferenceOutputAssembly="false" />
   </ItemGroup>
 
@@ -32,7 +35,7 @@
       <TerminalHostOutputDirectory>$(MSBuildThisFileDirectory)terminal-host\bin\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)</TerminalHostOutputDirectory>
     </PropertyGroup>
     <ItemGroup>
-      <TerminalHostOutputFiles Include="$(TerminalHostOutputDirectory)\CodexFeishuTerminalHost.*" />
+      <TerminalHostOutputFiles Include="$(TerminalHostOutputDirectory)\AiCliFeishuTerminalHost.*" />
     </ItemGroup>
     <Copy SourceFiles="@(TerminalHostOutputFiles)"
           DestinationFolder="$(OutDir)"
@@ -44,11 +47,11 @@
     <PropertyGroup>
       <TerminalHostPublishDirectory>$(MSBuildThisFileDirectory)terminal-host\bin\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish-sidecar\</TerminalHostPublishDirectory>
     </PropertyGroup>
-    <MSBuild Projects="$(MSBuildThisFileDirectory)terminal-host\CodexFeishuTerminalHost.csproj"
+    <MSBuild Projects="$(MSBuildThisFileDirectory)terminal-host\AiCliFeishuTerminalHost.csproj"
              Targets="Publish"
              Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);PublishDir=$(TerminalHostPublishDirectory);PublishSingleFile=true;SelfContained=false" />
-    <Copy SourceFiles="$(TerminalHostPublishDirectory)CodexFeishuTerminalHost.exe"
+    <Copy SourceFiles="$(TerminalHostPublishDirectory)AiCliFeishuTerminalHost.exe"
           DestinationFolder="$(PublishDir)" />
-    <Delete Files="$(PublishDir)CodexFeishuTerminalHost.dll;$(PublishDir)CodexFeishuTerminalHost.deps.json;$(PublishDir)CodexFeishuTerminalHost.runtimeconfig.json" />
+    <Delete Files="$(PublishDir)AiCliFeishuTerminalHost.dll;$(PublishDir)AiCliFeishuTerminalHost.deps.json;$(PublishDir)AiCliFeishuTerminalHost.runtimeconfig.json" />
   </Target>
 </Project>

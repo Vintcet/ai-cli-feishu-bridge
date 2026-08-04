@@ -73,7 +73,7 @@ test("shutdown endpoint requires the control token and responds before stopping"
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-codex-feishu-control-token": token,
+        "x-ai-cli-feishu-control-token": token,
       },
       body: "{}",
     });
@@ -111,7 +111,7 @@ test("local approval endpoint requires the persistent control token", async () =
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-codex-feishu-control-token": token,
+        "x-ai-cli-feishu-control-token": token,
       },
       body: JSON.stringify({ requestId: "request-1", resolution: "allow" }),
     });
@@ -145,7 +145,7 @@ test("settings endpoint requires the persistent control token", async () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-codex-feishu-control-token": token,
+        "x-ai-cli-feishu-control-token": token,
       },
       body: JSON.stringify({ autoApprove: true, notifyAutoApprovals: true }),
     });
@@ -183,7 +183,7 @@ test("history hide endpoint requires the persistent control token", async () => 
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-codex-feishu-control-token": token,
+        "x-ai-cli-feishu-control-token": token,
       },
       body: JSON.stringify({ sessionId: "session-1" }),
     });
@@ -220,7 +220,7 @@ test("runtime launch endpoints require the persistent control token", async () =
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-codex-feishu-control-token": token,
+        "x-ai-cli-feishu-control-token": token,
       },
       body: "{}",
     });
@@ -235,7 +235,7 @@ test("runtime launch endpoints require the persistent control token", async () =
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-codex-feishu-control-token": token,
+        "x-ai-cli-feishu-control-token": token,
       },
       body: JSON.stringify({ requestId: "launch-1", success: true }),
     });
@@ -274,7 +274,7 @@ test("opencode control endpoints require the persistent control token", async ()
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-codex-feishu-control-token": token,
+        "x-ai-cli-feishu-control-token": token,
       },
       body: JSON.stringify({ cwd: "C:/demo" }),
     });
@@ -292,7 +292,7 @@ test("opencode control endpoints require the persistent control token", async ()
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-codex-feishu-control-token": token,
+        "x-ai-cli-feishu-control-token": token,
       },
       body: JSON.stringify({ port: 5101, cwd: "C:/demo" }),
     });
@@ -303,7 +303,7 @@ test("opencode control endpoints require the persistent control token", async ()
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-codex-feishu-control-token": token,
+        "x-ai-cli-feishu-control-token": token,
       },
       body: JSON.stringify({ port: 5101 }),
     });
@@ -352,7 +352,7 @@ test("health returns only liveness data to unauthenticated callers", async () =>
     assert.equal(anonymousBody.activeSessions, undefined);
 
     const authorized = await fetch(`${base}/health?refresh=1`, {
-      headers: { "x-codex-feishu-control-token": token },
+      headers: { "x-ai-cli-feishu-control-token": token },
     });
     const authorizedBody = await authorized.json() as { pairingCode?: string };
     assert.equal(authorizedBody.pairingCode, "SECRET1234");
@@ -421,7 +421,7 @@ test("hook posts require JSON, same-site metadata, and the persistent token", as
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-codex-feishu-control-token": token,
+        "x-ai-cli-feishu-control-token": token,
       },
       body: JSON.stringify(payload),
     });

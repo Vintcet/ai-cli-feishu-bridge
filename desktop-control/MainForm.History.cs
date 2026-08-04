@@ -1,4 +1,4 @@
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 internal sealed partial class MainForm
 {
@@ -58,7 +58,7 @@ internal sealed partial class MainForm
         historyGrid.CellDoubleClick += (_, eventArgs) =>
         {
             if (eventArgs.RowIndex < 0 ||
-                historyGrid.Rows[eventArgs.RowIndex].Tag is not CodexSession)
+                historyGrid.Rows[eventArgs.RowIndex].Tag is not AssistantSession)
             {
                 return;
             }
@@ -68,7 +68,7 @@ internal sealed partial class MainForm
     }
 
     private void PopulateHistoryGrid(
-        IReadOnlyList<CodexSession> sessions,
+        IReadOnlyList<AssistantSession> sessions,
         string? selectedSessionId,
         int scrollIndex)
     {
@@ -102,7 +102,7 @@ internal sealed partial class MainForm
 
     private async void ContinueSelectedHistory()
     {
-        if (operating || historyGrid.CurrentRow?.Tag is not CodexSession session)
+        if (operating || historyGrid.CurrentRow?.Tag is not AssistantSession session)
         {
             return;
         }
@@ -149,7 +149,7 @@ internal sealed partial class MainForm
 
     private async Task DeleteSelectedHistoryAsync()
     {
-        if (operating || historyGrid.CurrentRow?.Tag is not CodexSession session)
+        if (operating || historyGrid.CurrentRow?.Tag is not AssistantSession session)
         {
             return;
         }
@@ -188,9 +188,9 @@ internal sealed partial class MainForm
         }
     }
 
-    private static string HistoryModeLabel(CodexSession session) =>
+    private static string HistoryModeLabel(AssistantSession session) =>
         $"{RuntimeShortLabel(session)} {(session.ManagedTerminalElevated ? "管理员" : "普通")}";
 
-    private static string RuntimeShortLabel(CodexSession session) =>
+    private static string RuntimeShortLabel(AssistantSession session) =>
         RuntimeCatalog.FromId(session.Runtime).ShortName;
 }

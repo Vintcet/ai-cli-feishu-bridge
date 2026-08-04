@@ -142,7 +142,8 @@ export function addManagedTerminalMetadata(input: unknown): unknown {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     return input;
   }
-  const managedTerminalId = process.env.CODEX_FEISHU_MANAGED_TERMINAL_ID?.trim();
+  const managedTerminalId =
+    process.env.AI_CLI_FEISHU_MANAGED_TERMINAL_ID?.trim();
   if (!managedTerminalId) {
     return input;
   }
@@ -150,7 +151,7 @@ export function addManagedTerminalMetadata(input: unknown): unknown {
     ...(input as Record<string, unknown>),
     managed_terminal_id: managedTerminalId,
     managed_terminal_elevated:
-      process.env.CODEX_FEISHU_MANAGED_TERMINAL_ELEVATED === "1",
+      process.env.AI_CLI_FEISHU_MANAGED_TERMINAL_ELEVATED === "1",
   };
 }
 
@@ -159,7 +160,7 @@ export async function addClientProcessMetadata(input: unknown): Promise<unknown>
     !input ||
     typeof input !== "object" ||
     Array.isArray(input) ||
-    process.env.CODEX_FEISHU_MANAGED_TERMINAL_ID?.trim()
+    process.env.AI_CLI_FEISHU_MANAGED_TERMINAL_ID?.trim()
   ) {
     return input;
   }
@@ -179,16 +180,16 @@ export async function postHook(
   payload: unknown,
   timeoutMs: number,
 ): Promise<Record<string, unknown>> {
-  const baseUrl = (process.env.CODEX_FEISHU_BRIDGE_URL || defaultBridgeUrl).replace(
-    /\/$/,
-    "",
-  );
+  const baseUrl = (
+    process.env.AI_CLI_FEISHU_BRIDGE_URL ||
+    defaultBridgeUrl
+  ).replace(/\/$/, "");
   const controlToken = await readControlToken();
   const response = await fetch(`${baseUrl}${pathname}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-codex-feishu-control-token": controlToken,
+      "x-ai-cli-feishu-control-token": controlToken,
     },
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(timeoutMs),
@@ -206,7 +207,7 @@ export async function postHook(
 }
 
 async function readControlToken(): Promise<string> {
-  const environmentToken = process.env.CODEX_FEISHU_CONTROL_TOKEN?.trim();
+  const environmentToken = process.env.AI_CLI_FEISHU_CONTROL_TOKEN?.trim();
   if (environmentToken && /^[a-f0-9]{64}$/i.test(environmentToken)) {
     return environmentToken;
   }

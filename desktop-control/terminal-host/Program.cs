@@ -1,4 +1,4 @@
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 internal static class Program
 {

@@ -261,7 +261,7 @@ export class ManagedTerminalRouter {
     submitMode: TerminalSubmitMode,
   ): Promise<void> {
     const terminalId = expected.terminalId;
-    const pipePath = `\\\\.\\pipe\\CodexFeishu.${terminalId}`;
+    const pipePath = `\\\\.\\pipe\\AiCliFeishu.${terminalId}`;
     await new Promise<void>((resolve, reject) => {
       const socket = net.createConnection(pipePath);
       let settled = false;

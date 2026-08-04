@@ -225,7 +225,7 @@ test("external completion cards do not suggest Feishu replies", () => {
   const rendered = JSON.stringify(card);
 
   assert.doesNotMatch(rendered, /引用回复/);
-  assert.match(rendered, /不是由 Codex 飞书助手打开.*不能从飞书回复/);
+  assert.match(rendered, /不是由 AI CLI 飞书助手打开.*不能从飞书回复/);
 });
 
 test("activity detail uses the same Markdown conversion", () => {

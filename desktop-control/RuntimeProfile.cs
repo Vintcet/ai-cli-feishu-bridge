@@ -1,4 +1,4 @@
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 internal enum RuntimeTransport
 {

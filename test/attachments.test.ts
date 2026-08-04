@@ -76,7 +76,7 @@ test("attachment paths are added to the Codex prompt", () => {
 });
 
 test("attachment filenames remain Windows-safe after truncation", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-attachments-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-attachments-"));
   try {
     const store = new LocalAttachmentStore(
       directory,
@@ -105,7 +105,7 @@ test("attachment filenames remain Windows-safe after truncation", async () => {
 });
 
 test("attachment store enforces global file and byte limits", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-attachments-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-attachments-"));
   const monthDirectory = path.join(directory, new Date().toISOString().slice(0, 7));
   try {
     await mkdir(monthDirectory, { recursive: true });
@@ -141,7 +141,7 @@ test("attachment store enforces global file and byte limits", async () => {
 });
 
 test("file return directives are stripped and constrained to the project", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-files-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-files-"));
   const project = path.join(directory, "project");
   const outside = path.join(directory, "outside.txt");
   try {

@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 internal static class Program
 {
@@ -28,8 +28,8 @@ internal static class Program
         }
 
         var instanceScope = CurrentDesktopScope();
-        var mutexName = $"CodexFeishuControl.SingleInstance.{instanceScope}";
-        var activateEventName = $"CodexFeishuControl.Activate.{instanceScope}";
+        var mutexName = $"AiCliFeishuControl.SingleInstance.{instanceScope}";
+        var activateEventName = $"AiCliFeishuControl.Activate.{instanceScope}";
         using var mutex = new Mutex(true, mutexName, out var createdNew);
         if (!createdNew)
         {

@@ -2,9 +2,9 @@
 param()
 
 $ErrorActionPreference = "Stop"
-$taskName = "CodexFeishuBridge"
+$taskName = "AiCliFeishuBridge"
 $projectDirectory = Split-Path -Parent $PSScriptRoot
-$controlExecutable = Join-Path $projectDirectory "Codex飞书助手.exe"
+$controlExecutable = Join-Path $projectDirectory "AI CLI飞书助手.exe"
 
 if (Test-Path -LiteralPath $controlExecutable) {
     $stopProcess = Start-Process `

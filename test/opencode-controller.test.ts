@@ -197,7 +197,7 @@ async function setup(directory: string) {
 }
 
 test("opencode sessions are registered, grouped, and routable from Feishu", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-"));
   const ctx = await setup(directory);
   try {
     await waitFor(() => ctx.store.getSession("session-alpha") !== undefined);
@@ -233,7 +233,7 @@ test("opencode sessions are registered, grouped, and routable from Feishu", asyn
 });
 
 test("opencode idle marks the session waiting and notifies the group", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-"));
   const ctx = await setup(directory);
   try {
     await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
@@ -252,7 +252,7 @@ test("opencode idle marks the session waiting and notifies the group", async () 
 });
 
 test("opencode retry attempts reset after a successful idle event", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-retry-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-retry-"));
   const ctx = await setup(directory);
   try {
     await ctx.store.updateSettings({
@@ -291,7 +291,7 @@ test("opencode retry attempts reset after a successful idle event", async () => 
 });
 
 test("opencode queued prompts use the shared runtime queue and fail visibly on close", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-"));
   const ctx = await setup(directory);
   try {
     await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
@@ -319,7 +319,7 @@ test("opencode queued prompts use the shared runtime queue and fail visibly on c
 });
 
 test("an opencode permission is sent to Feishu and allow forwards once", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-"));
   const ctx = await setup(directory);
   try {
     await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
@@ -363,7 +363,7 @@ test("an opencode permission is sent to Feishu and allow forwards once", async (
 });
 
 test("concurrent opposite OpenCode decisions forward only the claimed resolution", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-race-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-race-"));
   const ctx = await setup(directory);
   try {
     await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
@@ -415,7 +415,7 @@ test("concurrent opposite OpenCode decisions forward only the claimed resolution
 });
 
 test("automatic OpenCode V2 approval is silent and uses the shared bridge settings", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-auto-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-auto-"));
   const ctx = await setup(directory);
   try {
     await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
@@ -453,7 +453,7 @@ test("automatic OpenCode V2 approval is silent and uses the shared bridge settin
 });
 
 test("high-risk OpenCode permission remains pending with automatic approval enabled", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-risk-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-risk-"));
   const ctx = await setup(directory);
   try {
     await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
@@ -487,7 +487,7 @@ test("high-risk OpenCode permission remains pending with automatic approval enab
 });
 
 test("failed automatic OpenCode approval falls back to a manual card and can retry", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-fallback-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-fallback-"));
   const ctx = await setup(directory);
   try {
     await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
@@ -533,7 +533,7 @@ test("failed automatic OpenCode approval falls back to a manual card and can ret
 });
 
 test("duplicate OpenCode interaction events create only one Feishu card", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-"));
   const ctx = await setup(directory);
   try {
     await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
@@ -582,7 +582,7 @@ test("duplicate OpenCode interaction events create only one Feishu card", async 
 });
 
 test("opencode single-choice buttons reply through the question API", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-"));
   const ctx = await setup(directory);
   try {
     await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
@@ -624,7 +624,7 @@ test("opencode single-choice buttons reply through the question API", async () =
 });
 
 test("opencode multi-choice quoted replies preserve string[][] answers", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-"));
   const ctx = await setup(directory);
   try {
     await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
@@ -669,7 +669,7 @@ test("opencode multi-choice quoted replies preserve string[][] answers", async (
 });
 
 test("an opencode question answered locally closes the Feishu card", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-"));
   const ctx = await setup(directory);
   try {
     await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
@@ -707,7 +707,7 @@ test("an opencode question answered locally closes the Feishu card", async () =>
 });
 
 test("turning an OpenCode question back to the computer keeps it pending", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-"));
   const ctx = await setup(directory);
   try {
     await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
@@ -743,7 +743,7 @@ test("turning an OpenCode question back to the computer keeps it pending", async
 });
 
 test("OpenCode replies update session state even when no Feishu waiter exists", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-"));
   const ctx = await setup(directory);
   try {
     await waitFor(() => ctx.store.getSession("session-alpha") !== undefined);
@@ -767,7 +767,7 @@ test("OpenCode replies update session state even when no Feishu waiter exists", 
 });
 
 test("a disconnected opencode instance ends its sessions", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-"));
   const ctx = await setup(directory);
   try {
     await waitFor(() => ctx.store.getSession("session-alpha") !== undefined);

@@ -10,7 +10,7 @@ import type { SessionGroupCoordinator } from "../src/session-group-coordinator.j
 import { BridgeStore } from "../src/store.js";
 
 test("forced refresh waits for a fresh external process snapshot", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-refresh-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-refresh-"));
   const store = new BridgeStore(directory);
   try {
     await store.init();

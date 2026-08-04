@@ -322,7 +322,7 @@ function groupMessageEvent(
 }
 
 test("only a private-chat owner can bind and duplicate messages are ignored", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-controller-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-controller-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -365,7 +365,7 @@ test("only a private-chat owner can bind and duplicate messages are ignored", as
 });
 
 test("creates one private session group and routes group replies to that session", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-session-group-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-session-group-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -450,7 +450,7 @@ test("creates one private session group and routes group replies to that session
 });
 
 test("numbers same-name session groups and preserves the number on resume", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-group-number-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-group-number-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -523,7 +523,7 @@ test("numbers same-name session groups and preserves the number on resume", asyn
 });
 
 test("dissolves assistant session groups after one inactive week", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-group-cleanup-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-group-cleanup-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -577,7 +577,7 @@ test("dissolves assistant session groups after one inactive week", async () => {
 });
 
 test("a session group message auto-opens and resumes a closed managed session", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-auto-resume-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-auto-resume-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -666,7 +666,7 @@ test("a session group message auto-opens and resumes a closed managed session", 
 });
 
 test("a closed opencode group prompt waits for the resumed HTTP session", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-auto-resume-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-auto-resume-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -731,7 +731,7 @@ test("a closed opencode group prompt waits for the resumed HTTP session", async 
 });
 
 test("OpenCode history remains routable metadata but only the foreground session is active", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-active-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-opencode-active-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -775,7 +775,7 @@ test("OpenCode history remains routable metadata but only the foreground session
 });
 
 test("private Feishu commands create workspace projects and queue new runtimes", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-new-runtime-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-new-runtime-"));
   const dataDirectory = path.join(directory, "data");
   const workspaceRoot = path.join(directory, "workspace");
   try {
@@ -874,7 +874,7 @@ test("private Feishu commands create workspace projects and queue new runtimes",
 });
 
 test("a failed session group create waits for an explicit desktop retry", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-group-retry-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-group-retry-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -928,7 +928,7 @@ test("a failed session group create waits for an explicit desktop retry", async 
 });
 
 test("history removal hides managed and externally tracked sessions", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-history-hide-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-history-hide-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -986,7 +986,7 @@ test("history removal hides managed and externally tracked sessions", async () =
 });
 
 test("history aliases keep the same session and Feishu group binding", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-history-alias-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-history-alias-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -1036,7 +1036,7 @@ test("history aliases keep the same session and Feishu group binding", async () 
 });
 
 test("visible history aliases reserve their names until hidden", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-alias-conflict-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-alias-conflict-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -1080,7 +1080,7 @@ test("visible history aliases reserve their names until hidden", async () => {
 });
 
 test("concurrent alias updates cannot reserve the same visible name", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-alias-race-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-alias-race-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -1123,7 +1123,7 @@ test("concurrent alias updates cannot reserve the same visible name", async () =
 });
 
 test("retry settings accept bounded integers and reject invalid values", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-settings-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-settings-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -1173,7 +1173,7 @@ test("retry settings accept bounded integers and reject invalid values", async (
 });
 
 test("health keeps active sessions in opening order when activity changes", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-order-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-order-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -1221,7 +1221,7 @@ test("health keeps active sessions in opening order when activity changes", asyn
 });
 
 test("an external session rejects ordinary Feishu replies without a background resume", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-lock-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-lock-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -1272,8 +1272,8 @@ test("an external session rejects ordinary Feishu replies without a background r
     assert.deepEqual(
       feishu.replies.map((item) => item.text),
       [
-        "Codex 未接收：这个窗口不是由 Codex 飞书助手打开，不能从飞书回复。请回到原窗口继续。",
-        "Codex 未接收：这个窗口不是由 Codex 飞书助手打开，不能从飞书回复。请回到原窗口继续。",
+        "Codex 未接收：这个窗口不是由 AI CLI 飞书助手打开，不能从飞书回复。请回到原窗口继续。",
+        "Codex 未接收：这个窗口不是由 AI CLI 飞书助手打开，不能从飞书回复。请回到原窗口继续。",
       ],
     );
     assert.equal(controller.health().queuedPrompts, 0);
@@ -1291,7 +1291,7 @@ test("an external session rejects ordinary Feishu replies without a background r
 });
 
 test("a managed session steers by default and queues explicitly", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-steer-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-steer-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -1345,7 +1345,7 @@ test("a managed session steers by default and queues explicitly", async () => {
 });
 
 test("local and Feishu approval resolutions share one atomic result", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-approval-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-approval-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -1438,7 +1438,7 @@ test("local and Feishu approval resolutions share one atomic result", async () =
 });
 
 test("manual approvals stay Feishu-first and fall back to PC when delivery fails", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-feishu-first-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-feishu-first-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -1553,7 +1553,7 @@ test("manual approvals stay Feishu-first and fall back to PC when delivery fails
 });
 
 test("closing the controller returns pending approval and input hooks to the local CLI", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-close-hooks-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-close-hooks-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -1633,7 +1633,7 @@ test("an approval completed in Feishu is visible to the desktop and logs its sou
   t.mock.method(console, "log", (...args: unknown[]) => {
     approvalLogs.push(args.map((value) => String(value)).join(" "));
   });
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-approval-sync-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-approval-sync-"));
   const approvalLogPath = path.join(directory, "approval-events.log");
   try {
     const store = new BridgeStore(directory);
@@ -1740,7 +1740,7 @@ test("an approval completed in Feishu is visible to the desktop and logs its sou
 });
 
 test("approval audit logs rotate within the configured size and backup limit", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-approval-rotation-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-approval-rotation-"));
   const approvalLogPath = path.join(directory, "approval-events.log");
   try {
     const store = new BridgeStore(directory);
@@ -1806,7 +1806,7 @@ test("automatic Codex approval is silent by default and logs an automatic decisi
   t.mock.method(console, "log", (...args: unknown[]) => {
     approvalLogs.push(args.map((value) => String(value)).join(" "));
   });
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-auto-approval-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-auto-approval-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -1862,7 +1862,7 @@ test("automatic Codex approval is silent by default and logs an automatic decisi
 });
 
 test("automatic Claude Code approval uses the same silent bridge flow", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-claude-auto-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-claude-auto-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -1897,7 +1897,7 @@ test("automatic Claude Code approval uses the same silent bridge flow", async ()
 });
 
 test("high-risk commands remain manual when automatic approval is enabled", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-risk-approval-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-risk-approval-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -1953,7 +1953,7 @@ test("high-risk commands remain manual when automatic approval is enabled", asyn
 });
 
 test("high-risk approval timeout returns control to the local runtime", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-risk-timeout-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-risk-timeout-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -1988,7 +1988,7 @@ test("high-risk approval timeout returns control to the local runtime", async ()
 });
 
 test("automatic approval can send only a resolved audit card", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-auto-audit-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-auto-audit-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -2034,7 +2034,7 @@ test("automatic approval can send only a resolved audit card", async () => {
 });
 
 test("request_user_input can be answered by replying to the Feishu card", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-input-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-input-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -2106,7 +2106,7 @@ test("request_user_input can be answered by replying to the Feishu card", async 
 });
 
 test("multiple request_user_input questions use separate clickable cards", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-input-cards-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-input-cards-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -2202,7 +2202,7 @@ test("multiple request_user_input questions use separate clickable cards", async
 });
 
 test("request_user_input falls back locally when any question has no delivered card", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-input-partial-send-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-input-partial-send-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -2283,7 +2283,7 @@ test("request_user_input falls back locally when any question has no delivered c
 });
 
 test("multi-choice request_user_input cards toggle and submit selected options", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-input-multi-cards-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-input-multi-cards-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -2368,7 +2368,7 @@ test("multi-choice request_user_input cards toggle and submit selected options",
 });
 
 test("multi-recipient selections remain isolated per Feishu chat", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-input-recipients-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-input-recipients-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -2465,7 +2465,7 @@ test("multi-recipient selections remain isolated per Feishu chat", async () => {
 });
 
 test("a failed final answer rolls every recorded question back to interactive", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-input-rollback-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-input-rollback-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -2560,7 +2560,7 @@ test("a failed final answer rolls every recorded question back to interactive", 
 });
 
 test("Claude AskUserQuestion answers are returned as updatedInput", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-claude-input-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-claude-input-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -2661,7 +2661,7 @@ test("Claude AskUserQuestion answers are returned as updatedInput", async () => 
 });
 
 test("Claude SessionEnd releases pending hooks without reviving the ended session", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-claude-end-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-claude-end-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -2754,7 +2754,7 @@ test("Claude SessionEnd releases pending hooks without reviving the ended sessio
 });
 
 test("activity hooks reuse one progress card and complete it on Stop", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-activity-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-activity-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -2827,7 +2827,7 @@ test("activity hooks reuse one progress card and complete it on Stop", async () 
 });
 
 test("PC prompts can be synchronized to the managed session group without remote echo", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-prompt-sync-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-prompt-sync-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -2906,7 +2906,7 @@ test("PC prompts can be synchronized to the managed session group without remote
 });
 
 test("a transcript task error is notified even when Codex skips the Stop hook", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-transcript-error-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-transcript-error-"));
   const transcriptPath = path.join(directory, "rollout.jsonl");
   let store: BridgeStore | undefined;
   let controller: BridgeController | undefined;
@@ -2977,7 +2977,7 @@ test("a transcript task error is notified even when Codex skips the Stop hook", 
 });
 
 test("a pending turn notification is recovered without creating a duplicate card", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-notification-recovery-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-notification-recovery-"));
   const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397d";
   const turnId = "turn-notification-recovery";
   const feishu = new FakeFeishu();
@@ -3065,7 +3065,7 @@ test("a pending turn notification is recovered without creating a duplicate card
 });
 
 test("a managed 502 gateway error is notified and retried when enabled", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-retry-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-retry-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -3134,7 +3134,7 @@ test("a managed 502 gateway error is notified and retried when enabled", async (
 });
 
 test("a pending automatic retry can be stopped from its Feishu card", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-stop-retry-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-stop-retry-"));
   let controller: BridgeController | undefined;
   let store: BridgeStore | undefined;
   try {
@@ -3216,7 +3216,7 @@ test("a pending automatic retry can be stopped from its Feishu card", async () =
 });
 
 test("stopping a running retry prevents every later automatic attempt", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-stop-running-retry-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-stop-running-retry-"));
   let controller: BridgeController | undefined;
   let store: BridgeStore | undefined;
   try {
@@ -3311,7 +3311,7 @@ test("stopping a running retry prevents every later automatic attempt", async ()
 
 for (const runtime of ["codex", "claudecode"] as const) {
   test(`${runtime} retry attempts reset after a successful turn`, async () => {
-    const directory = await mkdtemp(path.join(os.tmpdir(), `codex-feishu-${runtime}-reset-`));
+    const directory = await mkdtemp(path.join(os.tmpdir(), `ai-cli-feishu-${runtime}-reset-`));
     let controller: BridgeController | undefined;
     let store: BridgeStore | undefined;
     try {
@@ -3412,7 +3412,7 @@ for (const runtime of ["codex", "claudecode"] as const) {
 }
 
 test("a structured permanent Codex error is notified without automatic retry", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-permanent-error-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-permanent-error-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -3481,7 +3481,7 @@ test("a structured permanent Codex error is notified without automatic retry", a
 });
 
 test("normal explanatory replies containing status codes and error words are not error cards", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-error-detection-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-error-detection-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -3530,7 +3530,7 @@ test("normal explanatory replies containing status codes and error words are not
 });
 
 test("compact service error lines still produce an error card", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-error-line-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-error-line-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -3579,7 +3579,7 @@ test("compact service error lines still produce an error card", async () => {
 });
 
 test("an explicit file request returns only project files and hides the protocol line", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-return-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-return-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -3644,7 +3644,7 @@ test("an explicit file request returns only project files and hides the protocol
 });
 
 test("a Feishu image is staged and attached to the next routed prompt", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-upload-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-upload-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -3701,7 +3701,7 @@ test("a Feishu image is staged and attached to the next routed prompt", async ()
 });
 
 test("an explicit managed terminal id wins when two windows share a cwd", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-claim-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-claim-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -3771,7 +3771,7 @@ test("an explicit managed terminal id wins when two windows share a cwd", async 
 });
 
 test("resuming outside the helper keeps history but clears managed-window metadata", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-external-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-external-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();
@@ -3835,7 +3835,7 @@ test("resuming outside the helper keeps history but clears managed-window metada
     );
     assert.match(
       feishu.replies.at(-1)?.text ?? "",
-      /不是由 Codex 飞书助手打开.*不能从飞书回复/,
+      /不是由 AI CLI 飞书助手打开.*不能从飞书回复/,
     );
     assert.equal(
       (controller.handleRuntimeLaunchClaim() as { request?: unknown }).request,
@@ -3862,7 +3862,7 @@ test("resuming outside the helper keeps history but clears managed-window metada
 });
 
 test("external sessions follow their real process and untracked records expire quickly", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-external-life-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-external-life-"));
   try {
     const store = new BridgeStore(directory);
     await store.init();

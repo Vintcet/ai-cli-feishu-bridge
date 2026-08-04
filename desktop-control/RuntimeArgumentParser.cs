@@ -1,7 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 internal static class RuntimeArgumentParser
 {

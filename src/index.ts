@@ -14,7 +14,7 @@ type FeishuEvent = Record<string, any>;
 
 if (!bridgeConfig.appId || !bridgeConfig.appSecret) {
   console.error(
-    "Missing FEISHU_APP_ID or FEISHU_APP_SECRET. Fill codex-feishu-bridge/.env first.",
+    "Missing FEISHU_APP_ID or FEISHU_APP_SECRET. Fill ai-cli-feishu-bridge/.env first.",
   );
   process.exit(1);
 }

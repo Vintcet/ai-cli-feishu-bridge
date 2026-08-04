@@ -120,7 +120,7 @@ export class FeishuMessageHandler {
         await this.respond(
           messageId,
           chatId,
-          `绑定码不正确。请在电脑端 Codex 飞书助手中查看本机绑定命令，再发送“${this.dependencies.bindCommand} 绑定码”。`,
+          `绑定码不正确。请在电脑端 AI CLI 飞书助手中查看本机绑定命令，再发送“${this.dependencies.bindCommand} 绑定码”。`,
         );
         return;
       }
@@ -538,7 +538,7 @@ export class FeishuMessageHandler {
 function externalSessionInputBlockedMessage(session: SessionRecord): string {
   return notReceivedText(
     session,
-    "这个窗口不是由 Codex 飞书助手打开，不能从飞书回复。请回到原窗口继续。",
+    "这个窗口不是由 AI CLI 飞书助手打开，不能从飞书回复。请回到原窗口继续。",
   );
 }
 

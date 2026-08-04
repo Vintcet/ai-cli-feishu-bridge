@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 internal enum TerminalSubmitMode
 {

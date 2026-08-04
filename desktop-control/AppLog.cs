@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 internal static class AppLog
 {

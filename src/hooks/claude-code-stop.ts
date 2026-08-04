@@ -14,6 +14,6 @@ try {
   const result = await postHook("/hooks/stop", enriched, 20000);
   writeHookOutput(result);
 } catch (error) {
-  console.error(`[codex-feishu] Claude Code Stop was skipped: ${String(error)}`);
+  console.error(`[ai-cli-feishu] Claude Code Stop was skipped: ${String(error)}`);
   writeHookOutput({});
 }

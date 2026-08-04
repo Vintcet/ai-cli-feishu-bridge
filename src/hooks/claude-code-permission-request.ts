@@ -22,6 +22,6 @@ try {
     : await postHook("/hooks/permission", enriched, 1_500_000);
   writeHookOutput(result);
 } catch (error) {
-  console.error(`[codex-feishu] Claude Code PermissionRequest was skipped: ${String(error)}`);
+  console.error(`[ai-cli-feishu] Claude Code PermissionRequest was skipped: ${String(error)}`);
   writeHookOutput({});
 }

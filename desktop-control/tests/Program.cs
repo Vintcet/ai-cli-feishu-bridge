@@ -1,7 +1,7 @@
 using System.Text.Json;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 [TestClass]
 public sealed class RuntimeAndTerminalTests
@@ -144,7 +144,7 @@ public sealed class RuntimeAndTerminalTests
     {
         var sentinel = Path.Combine(
             Path.GetTempPath(),
-            $"codex-feishu-parser-{Guid.NewGuid():N}.txt");
+            $"ai-cli-feishu-parser-{Guid.NewGuid():N}.txt");
         AssertSequence(
             ["resume", "abc12345", "$(Get-Date)", ";", "New-Item", sentinel],
             RuntimeArgumentParser.Parse(
@@ -184,7 +184,7 @@ public sealed class RuntimeAndTerminalTests
     {
         var bridgeRoot = Path.Combine(
             Path.GetTempPath(),
-            $"codex-feishu-control-token-{Guid.NewGuid():N}");
+            $"ai-cli-feishu-control-token-{Guid.NewGuid():N}");
         var dataDirectory = Path.Combine(bridgeRoot, "data");
         var token = new string('a', 64);
         Directory.CreateDirectory(dataDirectory);

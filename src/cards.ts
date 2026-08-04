@@ -142,7 +142,7 @@ export function buildDesktopApprovalCard(
         tag: "div",
         text: {
           tag: "lark_md",
-          content: `**会话：** ${sessionLabel(session)}\n**工具：** ${approval.toolName}\n\n已通知 Codex 飞书助手，请在电脑端审批窗口处理。`,
+          content: `**会话：** ${sessionLabel(session)}\n**工具：** ${approval.toolName}\n\n已通知 AI CLI 飞书助手，请在电脑端审批窗口处理。`,
         },
       },
     ],
@@ -485,7 +485,7 @@ export function buildStopCards(
   const waitingForReply = looksLikeQuestion(safeMessage);
   const continuationHint = session.managedByAssistant === true
     ? "下一轮请直接发送消息。"
-    : "这个窗口不是由 Codex 飞书助手打开，不能从飞书回复。";
+    : "这个窗口不是由 AI CLI 飞书助手打开，不能从飞书回复。";
   const chunks = splitTextForFeishu(safeMessage || `${runtime} 已结束本轮处理。`, 2_800);
   return chunks.map((chunk, index) => buildMessageCard({
     session,

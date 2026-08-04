@@ -43,7 +43,7 @@ jobs:
         run: npm run build
 
       - name: Run desktop tests
-        run: dotnet test .\desktop-control\tests\CodexFeishuTerminalHost.Tests.csproj -c Release
+        run: dotnet test .\desktop-control\tests\AiCliFeishuTerminalHost.Tests.csproj -c Release
 
       - name: Build desktop application
-        run: dotnet build .\desktop-control\CodexFeishuControl.csproj -c Release
+        run: dotnet build .\desktop-control\AiCliFeishuControl.csproj -c Release

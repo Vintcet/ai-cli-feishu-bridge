@@ -390,7 +390,7 @@ function hasValidControlToken(
   request: IncomingMessage,
   expectedToken: string,
 ): boolean {
-  const header = request.headers["x-codex-feishu-control-token"];
+  const header = request.headers["x-ai-cli-feishu-control-token"];
   const token = Array.isArray(header) ? header[0] : header;
   if (typeof token !== "string") {
     return false;

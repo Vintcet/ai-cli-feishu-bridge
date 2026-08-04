@@ -1,12 +1,18 @@
-# Codex / Claude Code / OpenCode 飞书桥接器
+# AI CLI 飞书助手
 
 [简体中文](README.md) | [English](README_EN.md)
 
-当前版本：`0.18.2`
+当前版本：`0.19.0`
 
-这是一个运行在 Windows 本机的非官方桥接器，把 Codex CLI、Claude Code 和 OpenCode 会话连接到你自己的飞书企业自建应用。每个助手会话可以绑定一个独立私有群，让你在电脑外接收完成或错误通知、处理权限审批和补充问题，并继续向原会话发送消息。
+AI CLI 飞书助手是一个运行在 Windows 本机的非官方桥接器，把 Codex CLI、Claude Code 和 OpenCode 会话连接到你自己的飞书企业自建应用。每个助手会话可以绑定一个独立私有群，让你在电脑外接收完成或错误通知、处理权限审批和补充问题，并继续向原会话发送消息。
 
 桥接服务、会话索引和配置都保存在本机；项目不提供云端中转服务，也不捆绑 Codex CLI、Claude Code、OpenCode 或飞书应用。使用者需要自行安装并登录目标 CLI，并自行创建飞书应用。
+
+## 0.19.0 更新摘要
+
+- 项目正式更名为“AI CLI 飞书助手”，仓库与 npm 包改为 `ai-cli-feishu-bridge`，三种运行时作为同等入口展示；
+- 桌面窗口、托盘、飞书卡片、日志、发布包及脚本中的产品文字全部使用新名称；
+- Windows 程序、项目、命名管道、鉴权头和环境变量统一改为 `AiCliFeishu*` / `AI_CLI_FEISHU_*`，不再保留旧名称。
 
 ## 0.18.2 更新摘要
 
@@ -79,28 +85,28 @@
 
 ### 使用 Release ZIP
 
-Windows 用户可以从 [GitHub Releases](https://github.com/Vintcet/codex-feishu-bridge/releases) 下载 `codex-feishu-bridge-v0.18.2-windows-x64.zip`。压缩包已包含编译后的桥接服务、生产依赖和两个桌面 EXE；请完整解压后使用，不要只拿主程序一个文件。首次运行前，把 `.env.example` 复制为 `.env` 并填写飞书应用配置，然后双击根目录的 `Codex飞书助手.exe`。
+Windows 用户可以从 [GitHub Releases](https://github.com/Vintcet/ai-cli-feishu-bridge/releases) 下载 `ai-cli-feishu-bridge-v0.19.0-windows-x64.zip`。压缩包已包含编译后的桥接服务、生产依赖和两个桌面 EXE；请完整解压后使用，不要只拿主程序一个文件。首次运行前，把 `.env.example` 复制为 `.env` 并填写飞书应用配置，然后双击根目录的 `AI CLI飞书助手.exe`。
 
 ### 从源码构建
 
 从源码构建时执行：
 
 ```powershell
-git clone https://github.com/Vintcet/codex-feishu-bridge.git
-cd .\codex-feishu-bridge
+git clone https://github.com/Vintcet/ai-cli-feishu-bridge.git
+cd .\ai-cli-feishu-bridge
 npm install
 Copy-Item .\.env.example .\.env
 npm run build
-dotnet publish .\desktop-control\CodexFeishuControl.csproj -c Release -o .\desktop-control\publish
+dotnet publish .\desktop-control\AiCliFeishuControl.csproj -c Release -o .\desktop-control\publish
 ```
 
 然后编辑 `.env`，并运行源码构建出的程序：
 
 ```powershell
-.\desktop-control\publish\CodexFeishuControl.exe
+.\desktop-control\publish\AiCliFeishuControl.exe
 ```
 
-`CodexFeishuControl.exe` 是源码构建出的桌面面板，`CodexFeishuTerminalHost.exe` 必须与它保留在同一目录。已打包版本可以把主程序显示为 `Codex飞书助手.exe`，功能相同。需要桌面入口时，可为实际使用的主程序手动创建快捷方式。
+`AiCliFeishuControl.exe` 是源码构建出的桌面面板，`AiCliFeishuTerminalHost.exe` 必须与它保留在同一目录。已打包版本可以把主程序显示为 `AI CLI飞书助手.exe`，功能相同。需要桌面入口时，可为实际使用的主程序手动创建快捷方式。
 
 ## 飞书机器人：从创建到可用
 
@@ -147,7 +153,7 @@ App Secret 等同于应用密码：不要发到群里、截图公开或提交到
 | 事件 | 接收消息 v2.0 | `im.message.receive_v1` | 接收私聊、群聊、图片和文件消息 |
 | 回调 | 卡片回调交互 | `card.action.trigger` | 接收审批按钮和补充信息选项 |
 
-第一次保存长连接订阅方式时，飞书控制台通常会检查是否已经有客户端在线。前面把 App ID / App Secret 写入 `.env` 后，可以先启动打包版 `Codex飞书助手.exe`，或源码构建产物 `desktop-control\publish\CodexFeishuControl.exe`，再点击“连接”；看到桥接服务开始连接后，回到开放平台保存长连接配置。此时不需要先绑定飞书账号，也不需要启动任何 CLI 会话。事件、权限和版本发布完成后，再从桌面助手断开并重新连接一次。
+第一次保存长连接订阅方式时，飞书控制台通常会检查是否已经有客户端在线。前面把 App ID / App Secret 写入 `.env` 后，可以先启动打包版 `AI CLI飞书助手.exe`，或源码构建产物 `desktop-control\publish\AiCliFeishuControl.exe`，再点击“连接”；看到桥接服务开始连接后，回到开放平台保存长连接配置。此时不需要先绑定飞书账号，也不需要启动任何 CLI 会话。事件、权限和版本发布完成后，再从桌面助手断开并重新连接一次。
 
 如果控制台把“事件”和“回调”分成两个标签页，请分别添加。长连接由本机桥接器主动连向飞书，不需要填写公网请求地址；不要改成 Webhook 模式。飞书官方原理和限制见[长连接模式说明](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/event-subscription-guide/long-connection-mode)。
 
@@ -162,7 +168,7 @@ App Secret 等同于应用密码：不要发到群里、截图公开或提交到
 
 ### 5. 连接、绑定并验证
 
-1. 双击打包版 `Codex飞书助手.exe`，或运行源码构建出的 `desktop-control\publish\CodexFeishuControl.exe`；点击“连接”，等待界面显示“飞书已连接”。
+1. 双击打包版 `AI CLI飞书助手.exe`，或运行源码构建出的 `desktop-control\publish\AiCliFeishuControl.exe`；点击“连接”，等待界面显示“飞书已连接”。
 2. 在飞书中找到刚发布的机器人，进入私聊。
 3. 把桌面控制面板显示的命令发给机器人，首次通常是 `绑定 <随机绑定码>`。绑定后只有该飞书账号能管理本机助手。
 4. 从桌面新建一个 Codex、Claude Code 或 OpenCode 会话，等待其出现在“活跃会话”。
@@ -186,7 +192,7 @@ App Secret 等同于应用密码：不要发到群里、截图公开或提交到
 按下面顺序操作：
 
 1. 在飞书开放平台完成机器人、权限和事件配置，并创建、发布最新应用版本。
-2. 运行实际使用的桌面 EXE（或你为它创建的 `Codex飞书助手` 快捷方式），点击“连接”，等待顶部显示“飞书已连接”。
+2. 运行实际使用的桌面 EXE（或你为它创建的 `AI CLI飞书助手` 快捷方式），点击“连接”，等待顶部显示“飞书已连接”。
 3. 查看控制面板提示的绑定命令，在机器人私聊中发送它（首次通常是 `绑定 <随机绑定码>`）。绑定成功后，只有这个飞书账号能控制本机助手。
 4. 在“设置”中确认默认工作区。之后既可点击“新建 Codex”“新建 Claude”或“新建 opencode”选择目录，也可在机器人私聊发送 `新建 codex 项目名`；需要恢复旧对话时，可在“历史记录”中选中会话并点击“继续对话”。
 5. 新建的托管会话会自动尝试建群；如果没有自动创建，在“活跃会话”中选中目标会话并点击“创建飞书群”。创建成功后，列表“飞书群”列会显示 `Codex｜项目名`、`Claude｜项目名` 或 `OpenCode｜项目名`。
@@ -222,11 +228,11 @@ App Secret 等同于应用密码：不要发到群里、截图公开或提交到
 日常使用无需命令行。运行下面任意一个实际存在的主程序：
 
 ```text
-打包版：.\Codex飞书助手.exe
-源码构建：.\desktop-control\publish\CodexFeishuControl.exe
+打包版：.\AI CLI飞书助手.exe
+源码构建：.\desktop-control\publish\AiCliFeishuControl.exe
 ```
 
-如需桌面入口，可为实际运行的 EXE 手动创建名为 `Codex飞书助手` 的快捷方式。控制面板提供：
+如需桌面入口，可为实际运行的 EXE 手动创建名为 `AI CLI飞书助手` 的快捷方式。控制面板提供：
 
 - 连接/断开（同一个按钮会根据服务状态切换）；
 - “新建 Codex”：选择项目目录并启动一个可与飞书同步的 Windows Terminal 窗口（PowerShell 7 + Codex）；
@@ -252,7 +258,7 @@ App Secret 等同于应用密码：不要发到群里、截图公开或提交到
 
 推荐按以下顺序使用：
 
-1. 双击桌面的 `Codex飞书助手`；
+1. 双击桌面的 `AI CLI飞书助手`；
 2. 点击“连接”，等待飞书状态变为“已连接”；
 3. 点击“新建 Codex”，选择项目目录；
 4. 如需特殊启动方式，在“Codex 启动参数”中填写参数，例如 `resume 019faef0-d0bb-7703-af82-17ee9b45397b`；也可以直接粘贴完整的 `codex resume ...`；匹配到本机历史会话时，项目目录会自动切换为该会话保存的目录；
@@ -374,7 +380,7 @@ opencode 窗口接入后体验与 Codex 托管窗口一致：
 
 别名为 1–20 个字符，可包含中文、字母、数字、下划线和短横线，不允许空格；活跃会话之间不能重名，拉丁字母不区分大小写。
 
-审批卡片还支持引用回复 `批准`、`拒绝` 或 `本机确认`；`本机确认`只把待处理项转到 Codex 飞书助手的 PC 审批窗口，不会直接批准或拒绝。
+审批卡片还支持引用回复 `批准`、`拒绝` 或 `本机确认`；`本机确认`只把待处理项转到 AI CLI 飞书助手的 PC 审批窗口，不会直接批准或拒绝。
 
 补充信息卡片支持点击单选选项；也可以引用卡片回复选项编号/文字。多选题用逗号分隔，例如 `1,3`；多问题按顺序用中文分号分隔，例如 `1；2,3；自定义答案`。题目禁止自定义答案时，只接受列出的选项。
 
@@ -409,7 +415,7 @@ CODEX_COMMAND=codex
 
 `DEFAULT_WORKSPACE_ROOT` 留空时默认使用桥接器目录的上一级，也可以在桌面“设置”中选择一个真实存在的目录；不要直接照抄其他机器的盘符路径。
 
-Codex 和 Claude Code Hook 脚本默认连接 `http://127.0.0.1:8765`。如需修改端口，还要给启动对应 CLI 的环境设置 `CODEX_FEISHU_BRIDGE_URL`，或同步更新 Hook 脚本配置。
+Codex 和 Claude Code Hook 脚本默认连接 `http://127.0.0.1:8765`。如需修改端口，还要给启动对应 CLI 的环境设置 `AI_CLI_FEISHU_BRIDGE_URL`，或同步更新 Hook 脚本配置。
 
 ## 安装与启动
 
@@ -417,7 +423,7 @@ Codex 和 Claude Code Hook 脚本默认连接 `http://127.0.0.1:8765`。如需�
 
 默认不安装 Windows 登录自启动。每次需要使用时，运行桌面面板 EXE 或自己的快捷方式，点击状态按钮连接；服务运行后同一个按钮会变为“断开”。无需输入命令行。
 
-桌面 EXE 会直接启动 Node.js 桥接进程；断开时通过带本机控制令牌的接口平滑停止，不再经过 VBS 或桥接启停 PowerShell 脚本。需要自动化但不打开面板时，可使用 `Codex飞书助手.exe --bridge-start` 和 `Codex飞书助手.exe --bridge-stop`。
+桌面 EXE 会直接启动 Node.js 桥接进程；断开时通过带本机控制令牌的接口平滑停止，不再经过 VBS 或桥接启停 PowerShell 脚本。需要自动化但不打开面板时，可使用 `AI CLI飞书助手.exe --bridge-start` 和 `AI CLI飞书助手.exe --bridge-stop`。
 
 Release ZIP 仍提供可选的登录自启动安装脚本；它只为当前 Windows 用户创建一个受限权限的计划任务，不会提升权限：
 
@@ -431,7 +437,7 @@ pwsh -NoProfile -File .\scripts\uninstall-autostart.ps1
 下面的命令只启动 Node.js 桥接服务，不包含桌面面板。需要完整的托管窗口、历史记录和自动恢复功能时，请按前文“获取程序与首次运行”同时构建并运行桌面端。
 
 ```powershell
-cd <项目目录>\codex-feishu-bridge
+cd <项目目录>\ai-cli-feishu-bridge
 npm install
 npm run build
 npm start
@@ -450,8 +456,8 @@ npm run lint
 npm run format:check
 npm test
 npm run build
-dotnet test .\desktop-control\tests\CodexFeishuTerminalHost.Tests.csproj -c Release
-dotnet build .\desktop-control\CodexFeishuControl.csproj -c Release
+dotnet test .\desktop-control\tests\AiCliFeishuTerminalHost.Tests.csproj -c Release
+dotnet build .\desktop-control\AiCliFeishuControl.csproj -c Release
 ```
 
 `npm run format:check` 是零额外依赖的文本卫生检查，检查受版本控制的源码和文档是否存在行尾空白或缺少末尾换行。仓库中的 Windows CI 会执行同一组 Node.js 与 .NET 校验。
@@ -465,10 +471,10 @@ dotnet build .\desktop-control\CodexFeishuControl.csproj -c Release
 ### 重新编译桌面 EXE
 
 ```powershell
-dotnet publish .\desktop-control\CodexFeishuControl.csproj -c Release -o .\desktop-control\publish
+dotnet publish .\desktop-control\AiCliFeishuControl.csproj -c Release -o .\desktop-control\publish
 ```
 
-发布结果包含两个单文件程序：界面程序 `CodexFeishuControl.exe` 和必须与它放在同一目录的 `CodexFeishuTerminalHost.exe`。两者都使用本机的 .NET 8 Windows Desktop Runtime。若希望沿用文档和桌面快捷方式中的名称，可以把界面程序复制或重命名为 `Codex飞书助手.exe`，不要改动或漏掉同步宿主。
+发布结果包含两个单文件程序：界面程序 `AiCliFeishuControl.exe` 和必须与它放在同一目录的 `AiCliFeishuTerminalHost.exe`。两者都使用本机的 .NET 8 Windows Desktop Runtime。若希望沿用文档和桌面快捷方式中的名称，可以把界面程序复制或重命名为 `AI CLI飞书助手.exe`，不要改动或漏掉同步宿主。
 
 ## Codex Hooks
 

@@ -11,7 +11,7 @@ if ($version -notmatch '^\d+\.\d+\.\d+$') {
 }
 
 $releaseDirectory = Join-Path $projectDirectory "release"
-$releaseName = "codex-feishu-bridge-v$version-windows-x64"
+$releaseName = "ai-cli-feishu-bridge-v$version-windows-x64"
 $stagingDirectory = Join-Path $releaseDirectory $releaseName
 $zipPath = Join-Path $releaseDirectory "$releaseName.zip"
 $hashPath = "$zipPath.sha256"
@@ -37,7 +37,7 @@ function Invoke-Checked {
 Invoke-Checked "npm.cmd" @("run", "build") $projectDirectory
 Invoke-Checked "dotnet.exe" @(
     "publish",
-    ".\desktop-control\CodexFeishuControl.csproj",
+    ".\desktop-control\AiCliFeishuControl.csproj",
     "-c",
     "Release",
     "-o",
@@ -89,11 +89,11 @@ foreach ($file in @(
 }
 
 Copy-Item `
-    -LiteralPath (Join-Path $publishDirectory "CodexFeishuControl.exe") `
-    -Destination (Join-Path $stagingDirectory "Codex飞书助手.exe")
+    -LiteralPath (Join-Path $publishDirectory "AiCliFeishuControl.exe") `
+    -Destination (Join-Path $stagingDirectory "AI CLI飞书助手.exe")
 Copy-Item `
-    -LiteralPath (Join-Path $publishDirectory "CodexFeishuTerminalHost.exe") `
-    -Destination (Join-Path $stagingDirectory "CodexFeishuTerminalHost.exe")
+    -LiteralPath (Join-Path $publishDirectory "AiCliFeishuTerminalHost.exe") `
+    -Destination (Join-Path $stagingDirectory "AiCliFeishuTerminalHost.exe")
 
 Invoke-Checked "npm.cmd" @(
     "ci",
@@ -105,8 +105,8 @@ Invoke-Checked "npm.cmd" @(
 ) $stagingDirectory
 
 $requiredPaths = @(
-    "Codex飞书助手.exe",
-    "CodexFeishuTerminalHost.exe",
+    "AI CLI飞书助手.exe",
+    "AiCliFeishuTerminalHost.exe",
     "dist\index.js",
     "node_modules\@larksuiteoapi\node-sdk\package.json",
     "node_modules\dotenv\package.json",
@@ -119,7 +119,10 @@ foreach ($relativePath in $requiredPaths) {
     }
 }
 $expectedFileVersion = "$version.0"
-foreach ($executableName in @("Codex飞书助手.exe", "CodexFeishuTerminalHost.exe")) {
+foreach ($executableName in @(
+    "AI CLI飞书助手.exe",
+    "AiCliFeishuTerminalHost.exe"
+)) {
     $executable = Get-Item -LiteralPath (Join-Path $stagingDirectory $executableName)
     if ($executable.VersionInfo.FileVersion -ne $expectedFileVersion) {
         throw "$executableName has version $($executable.VersionInfo.FileVersion), expected $expectedFileVersion."

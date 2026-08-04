@@ -147,7 +147,7 @@ $entries = foreach ($size in $sizes) {
     }
 }
 
-$iconPath = Join-Path $OutputDirectory "codex-feishu.ico"
+$iconPath = Join-Path $OutputDirectory "ai-cli-feishu.ico"
 $iconStream = [System.IO.File]::Create($iconPath)
 $writer = [System.IO.BinaryWriter]::new($iconStream)
 try {
@@ -176,7 +176,7 @@ try {
     $iconStream.Dispose()
 }
 
-$previewPath = Join-Path $OutputDirectory "codex-feishu.png"
+$previewPath = Join-Path $OutputDirectory "ai-cli-feishu.png"
 $preview = $entries | Where-Object Size -eq 256 | Select-Object -First 1
 [System.IO.File]::WriteAllBytes($previewPath, [byte[]]$preview.Bytes)
 

@@ -10,7 +10,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Win32.SafeHandles;
 
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 internal static class ManagedTerminalHost
 {
@@ -250,10 +250,10 @@ internal static class ManagedTerminalHost
         startInfo.ArgumentList.Add("-NoProfile");
         startInfo.ArgumentList.Add("-Command");
         startInfo.ArgumentList.Add(
-            "$toolCommand = $env:CODEX_FEISHU_TOOL_COMMAND; " +
-            "$toolArgsJson = $env:CODEX_FEISHU_TOOL_ARGS_JSON; " +
-            "Remove-Item Env:CODEX_FEISHU_TOOL_COMMAND -ErrorAction SilentlyContinue; " +
-            "Remove-Item Env:CODEX_FEISHU_TOOL_ARGS_JSON -ErrorAction SilentlyContinue; " +
+            "$toolCommand = $env:AI_CLI_FEISHU_TOOL_COMMAND; " +
+            "$toolArgsJson = $env:AI_CLI_FEISHU_TOOL_ARGS_JSON; " +
+            "Remove-Item Env:AI_CLI_FEISHU_TOOL_COMMAND -ErrorAction SilentlyContinue; " +
+            "Remove-Item Env:AI_CLI_FEISHU_TOOL_ARGS_JSON -ErrorAction SilentlyContinue; " +
             "$toolArgs = @($toolArgsJson | ConvertFrom-Json); " +
             "$exitCode = 1; " +
             "try { " +
@@ -264,22 +264,23 @@ internal static class ManagedTerminalHost
             "exit $exitCode");
         if (runtime.UsesManagedTerminal)
         {
-            startInfo.Environment["CODEX_FEISHU_MANAGED_TERMINAL_ID"] = terminalId;
-            startInfo.Environment["CODEX_FEISHU_MANAGED_TERMINAL_ELEVATED"] = elevated ? "1" : "0";
+            startInfo.Environment["AI_CLI_FEISHU_MANAGED_TERMINAL_ID"] = terminalId;
+            startInfo.Environment["AI_CLI_FEISHU_MANAGED_TERMINAL_ELEVATED"] = elevated ? "1" : "0";
         }
         else
         {
-            startInfo.Environment.Remove("CODEX_FEISHU_MANAGED_TERMINAL_ID");
-            startInfo.Environment.Remove("CODEX_FEISHU_MANAGED_TERMINAL_ELEVATED");
+            startInfo.Environment.Remove("AI_CLI_FEISHU_MANAGED_TERMINAL_ID");
+            startInfo.Environment.Remove("AI_CLI_FEISHU_MANAGED_TERMINAL_ELEVATED");
         }
-        startInfo.Environment["CODEX_FEISHU_BRIDGE_URL"] = bridgeUrl;
-        startInfo.Environment["CODEX_FEISHU_CONTROL_TOKEN"] = controlToken;
-        startInfo.Environment["CODEX_FEISHU_RUNTIME"] = runtime.Id;
-        startInfo.Environment["CODEX_FEISHU_TOOL_COMMAND"] = toolCommand;
-        startInfo.Environment["CODEX_FEISHU_TOOL_ARGS_JSON"] = JsonSerializer.Serialize(
+        startInfo.Environment["AI_CLI_FEISHU_BRIDGE_URL"] = bridgeUrl;
+        startInfo.Environment["AI_CLI_FEISHU_CONTROL_TOKEN"] = controlToken;
+        startInfo.Environment["AI_CLI_FEISHU_RUNTIME"] = runtime.Id;
+        startInfo.Environment["AI_CLI_FEISHU_TOOL_COMMAND"] = toolCommand;
+        var toolArgumentsJson = JsonSerializer.Serialize(
             runtime.InjectBridgeArguments
                 ? BuildCodexArguments(terminalId, bridgeUrl, elevated, toolArguments)
                 : toolArguments);
+        startInfo.Environment["AI_CLI_FEISHU_TOOL_ARGS_JSON"] = toolArgumentsJson;
 
         var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         if (!process.Start())
@@ -306,7 +307,7 @@ internal static class ManagedTerminalHost
         {
             Content = JsonContent.Create(new { terminalId, cwd, elevated, runtime, ready }),
         };
-        request.Headers.Add("X-Codex-Feishu-Control-Token", controlToken);
+        request.Headers.Add("X-AI-CLI-Feishu-Control-Token", controlToken);
         using var response = await client.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
     }
@@ -324,7 +325,7 @@ internal static class ManagedTerminalHost
         {
             Content = JsonContent.Create(new { terminalId }),
         };
-        request.Headers.Add("X-Codex-Feishu-Control-Token", controlToken);
+        request.Headers.Add("X-AI-CLI-Feishu-Control-Token", controlToken);
         using var response = await client.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
     }
@@ -380,11 +381,11 @@ internal static class ManagedTerminalHost
         var result = new List<string>
         {
             "-c",
-            ConfigSet("CODEX_FEISHU_MANAGED_TERMINAL_ID", terminalId),
+            ConfigSet("AI_CLI_FEISHU_MANAGED_TERMINAL_ID", terminalId),
             "-c",
-            ConfigSet("CODEX_FEISHU_MANAGED_TERMINAL_ELEVATED", elevated ? "1" : "0"),
+            ConfigSet("AI_CLI_FEISHU_MANAGED_TERMINAL_ELEVATED", elevated ? "1" : "0"),
             "-c",
-            ConfigSet("CODEX_FEISHU_BRIDGE_URL", bridgeUrl),
+            ConfigSet("AI_CLI_FEISHU_BRIDGE_URL", bridgeUrl),
         };
         result.AddRange(codexArguments);
         return result;
@@ -397,7 +398,7 @@ internal static class ManagedTerminalHost
         Process powershell,
         CancellationToken cancellationToken)
     {
-        var pipeName = $"CodexFeishu.{terminalId}";
+        var pipeName = $"AiCliFeishu.{terminalId}";
         while (!cancellationToken.IsCancellationRequested && !powershell.HasExited)
         {
             try

@@ -1,4 +1,4 @@
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 internal sealed class SettingsDialog : Form
 {

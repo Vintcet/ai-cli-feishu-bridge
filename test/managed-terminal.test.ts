@@ -145,7 +145,7 @@ test("retries while a managed terminal pipe is being recreated", async (context)
   const router = new ManagedTerminalRouter();
   router.register({ terminalId, cwd, elevated: false, ready: true });
   const target = session(terminalId, cwd);
-  const pipePath = "\\\\.\\pipe\\CodexFeishu." + terminalId;
+  const pipePath = "\\\\.\\pipe\\AiCliFeishu." + terminalId;
   const server = net.createServer((socket) => {
     socket.setEncoding("utf8");
     socket.once("data", () => socket.end('{"ok":true}\n'));

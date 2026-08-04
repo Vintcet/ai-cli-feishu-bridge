@@ -1,7 +1,7 @@
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 internal sealed class SessionAliasDialog : Form
 {
@@ -11,7 +11,7 @@ internal sealed class SessionAliasDialog : Form
 
     private readonly TextBox aliasBox = new();
 
-    public SessionAliasDialog(CodexSession session)
+    public SessionAliasDialog(AssistantSession session)
     {
         Text = "设置会话别名";
         StartPosition = FormStartPosition.CenterParent;

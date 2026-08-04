@@ -1,4 +1,4 @@
-namespace CodexFeishuControl;
+namespace AiCliFeishuControl;
 
 internal sealed class NewRuntimeDialog : Form
 {
@@ -8,12 +8,12 @@ internal sealed class NewRuntimeDialog : Form
     private readonly CheckBox administratorBox = new();
     private readonly Button startButton = new();
     private readonly Label launchHintLabel = new();
-    private readonly IReadOnlyList<CodexSession> knownSessions;
+    private readonly IReadOnlyList<AssistantSession> knownSessions;
 
     public NewRuntimeDialog(
         RuntimeProfile runtime,
         string initialDirectory,
-        IReadOnlyList<CodexSession>? knownSessions = null)
+        IReadOnlyList<AssistantSession>? knownSessions = null)
     {
         this.runtime = runtime;
         this.knownSessions = knownSessions ?? [];
