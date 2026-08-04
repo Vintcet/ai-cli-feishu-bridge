@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -155,7 +155,10 @@ test("file return directives are stripped and constrained to the project", async
     );
     assert.equal(parsed.displayMessage, "报告已生成。");
     assert.deepEqual(parsed.paths, [report]);
-    assert.equal((await validateBridgeFile(report, project, 1024)).path, report);
+    assert.equal(
+      (await validateBridgeFile(report, project, 1024)).path,
+      await realpath(report),
+    );
     await assert.rejects(
       validateBridgeFile(outside, project, 1024),
       /不在当前项目目录/,

@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -725,7 +733,7 @@ test("private Feishu commands create workspace projects and queue new runtimes",
       await controller.handleFeishuMessage(
         messageEvent(`new-runtime-${index}`, "owner", item.command),
       );
-      const expectedCwd = path.join(workspaceRoot, item.projectName);
+      const expectedCwd = await realpath(path.join(workspaceRoot, item.projectName));
       assert.equal((await stat(expectedCwd)).isDirectory(), true);
       const claim = controller.handleRuntimeLaunchClaim() as {
         request?: {
@@ -757,7 +765,10 @@ test("private Feishu commands create workspace projects and queue new runtimes",
     const existingClaim = controller.handleRuntimeLaunchClaim() as {
       request?: { requestId: string; cwd: string };
     };
-    assert.equal(existingClaim.request?.cwd, path.join(workspaceRoot, "主项目"));
+    assert.equal(
+      existingClaim.request?.cwd,
+      await realpath(path.join(workspaceRoot, "主项目")),
+    );
     await controller.handleRuntimeLaunchComplete({
       requestId: existingClaim.request!.requestId,
       success: true,
@@ -3538,7 +3549,9 @@ test("an explicit file request returns only project files and hides the protocol
     for (let attempt = 0; attempt < 20 && feishu.localFiles.length === 0; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.deepEqual(feishu.localFiles, [{ chatId: "chat-owner", filePath: report }]);
+    assert.deepEqual(feishu.localFiles, [
+      { chatId: "chat-owner", filePath: await realpath(report) },
+    ]);
     assert.doesNotMatch(JSON.stringify(feishu.cards.at(-1)?.card), /BRIDGE_SEND_FILE/);
   } finally {
     await rm(directory, { recursive: true, force: true });
