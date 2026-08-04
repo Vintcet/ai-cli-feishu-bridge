@@ -329,6 +329,8 @@ BRIDGE_HTTP_PORT=8765
 CODEX_APPROVAL_TIMEOUT_MS=1200000
 CODEX_SESSION_ACTIVE_MS=86400000
 CODEX_TRANSCRIPT_POLL_INTERVAL_MS=750
+CODEX_TRANSCRIPT_IDLE_POLL_INTERVAL_MS=5000
+CODEX_TRANSCRIPT_ACTIVE_WINDOW_MS=30000
 FEISHU_SESSION_GROUP_INACTIVE_MS=604800000
 FEISHU_SESSION_GROUP_CLEANUP_INTERVAL_MS=3600000
 RUNTIME_AUTO_LAUNCH_TIMEOUT_MS=120000
@@ -397,7 +399,7 @@ The user-level Codex hook file is `%USERPROFILE%\.codex\hooks.json`. Connect run
 
 Installed hook events include `SessionStart`, `SessionEnd`, `PermissionRequest`, `Stop`, `PreToolUse` including `request_user_input`, `PostToolUse`, `PreCompact`, `PostCompact`, and `UserPromptSubmit`.
 
-`Stop` covers normal completion and follow-up notifications, but Codex does not run it for every sampling failure. For newly appended `task_complete.error` records, the bridge polls active JSONL transcripts and reuses the same Feishu error-card, deduplication, and optional retry path. Polling starts at the current end of each transcript to avoid replaying old failures and defaults to `CODEX_TRANSCRIPT_POLL_INTERVAL_MS=750`.
+`Stop` covers normal completion and follow-up notifications, but Codex does not run it for every sampling failure. For newly appended `task_complete.error` records, the bridge polls active JSONL transcripts and reuses the same Feishu error-card, deduplication, and optional retry path. Polling starts at the current end of each transcript to avoid replaying old failures. By default it checks every 750ms for 30 seconds after a new activity registration or transcript change, then backs off to every 5 seconds until the next change or hook immediately restores fast polling. Configure these periods with `CODEX_TRANSCRIPT_POLL_INTERVAL_MS`, `CODEX_TRANSCRIPT_IDLE_POLL_INTERVAL_MS`, and `CODEX_TRANSCRIPT_ACTIVE_WINDOW_MS`.
 
 On the first new Codex window, Codex may ask you to review and trust the hook. Verify its path and content and approve normally; do not use unsafe flags to bypass hook trust. After hook configuration or compiled hook output changes, reconnect/restart the bridge and open a new Codex window.
 
@@ -419,6 +421,8 @@ Runtime state and audit data stay under `data/`, while Feishu credentials remain
 - `uploads/` contains files received from Feishu or staged for an explicit return.
 
 These files, rotated logs, quarantined corrupt files, and `.env` are ignored by Git. Release ZIPs explicitly exclude `.env`, `data/`, and internal review files. JSON state is written through a temporary file and atomically replaced. A file that fails structural validation is preserved as `*.corrupt-*`, while the bridge starts from safe defaults instead of overwriting the evidence.
+
+To keep long-running installations from repeatedly parsing and rewriting unbounded JSON, message routes are retained for seven days and capped at 3,000 records, while inbound deduplication records are capped at 5,000. Resolved or orphaned approvals are retained for 24 hours and capped at 500 records. Pending approvals are never removed by the count limit, and the rotating `approval-events.log` remains the long-term audit trail. This maintenance does not change sessions, aliases, or Feishu group bindings stored in `sessions.json`.
 
 The hook HTTP service listens only on `127.0.0.1`. Anonymous health checks omit pairing codes, sessions, approvals, and settings. Control and hook writes require the persistent random token and a JSON content type, and cross-site browser requests are rejected. Approval content receives basic redaction of common token, secret, password, and API-key fields plus length limits. Approval logs rotate at 5 MiB by default with up to five backups. The attachment staging area defaults to 500 files and 1 GiB total and cleans files older than seven days.
 

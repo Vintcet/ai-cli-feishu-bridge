@@ -18,6 +18,8 @@ interface WatchState {
   transcriptPath: string;
   offset: number;
   carry: Buffer;
+  activeUntil: number;
+  nextScanAt: number;
   fileIdentity?: string;
   stopping?: boolean;
   scanning?: Promise<void>;
@@ -28,16 +30,45 @@ interface TranscriptFileSnapshot {
   identity?: string;
 }
 
+export interface CodexTranscriptMonitorOptions {
+  /** 文件活跃时的轮询间隔。 */
+  activePollIntervalMs?: number;
+  /** 文件持续无变化后的轮询间隔。 */
+  idlePollIntervalMs?: number;
+  /** 最后一次登记或文件变化后维持活跃轮询的时长。 */
+  activeWindowMs?: number;
+}
+
 export class CodexTranscriptMonitor {
   private readonly watches = new Map<string, WatchState>();
   private timer: NodeJS.Timeout | undefined;
+  private timerDueAt: number | undefined;
   private closed = false;
   private closePromise: Promise<void> | undefined;
+  private readonly activePollIntervalMs: number;
+  private readonly idlePollIntervalMs: number;
+  private readonly activeWindowMs: number;
 
   constructor(
     private readonly onError: (event: CodexTranscriptErrorEvent) => Promise<void>,
-    private readonly pollIntervalMs = 750,
-  ) {}
+    options: number | CodexTranscriptMonitorOptions = {},
+  ) {
+    const resolved = typeof options === "number"
+      ? { activePollIntervalMs: options }
+      : options;
+    this.activePollIntervalMs = Math.max(
+      50,
+      resolved.activePollIntervalMs ?? 750,
+    );
+    this.idlePollIntervalMs = Math.max(
+      this.activePollIntervalMs,
+      resolved.idlePollIntervalMs ?? 5_000,
+    );
+    this.activeWindowMs = Math.max(
+      this.activePollIntervalMs,
+      resolved.activeWindowMs ?? 30_000,
+    );
+  }
 
   async watch(sessionId: string, transcriptPath: string | null | undefined): Promise<boolean> {
     if (
@@ -51,6 +82,7 @@ export class CodexTranscriptMonitor {
     const normalizedPath = path.resolve(transcriptPath);
     const current = this.watches.get(sessionId);
     if (current?.transcriptPath === normalizedPath && !current.stopping) {
+      this.activate(current, true);
       return true;
     }
 
@@ -73,11 +105,14 @@ export class CodexTranscriptMonitor {
     if (this.closed) {
       return false;
     }
+    const now = Date.now();
     this.watches.set(sessionId, {
       sessionId,
       transcriptPath: normalizedPath,
       offset: initialSnapshot.size,
       carry: Buffer.alloc(0),
+      activeUntil: now + this.activeWindowMs,
+      nextScanAt: now + this.activePollIntervalMs,
       fileIdentity: initialSnapshot.identity,
     });
     this.start();
@@ -93,17 +128,12 @@ export class CodexTranscriptMonitor {
       return;
     }
     this.watches.delete(sessionId);
-    if (this.watches.size === 0 && this.timer) {
-      clearInterval(this.timer);
-      this.timer = undefined;
-    }
+    this.scheduleNext();
   }
 
   async checkNow(): Promise<void> {
-    await Promise.all(
-      [...this.watches.values()]
-        .filter((state) => !state.stopping)
-        .map((state) => this.scan(state)),
+    await this.scanStates(
+      [...this.watches.values()].filter((state) => !state.stopping),
     );
   }
 
@@ -111,8 +141,9 @@ export class CodexTranscriptMonitor {
     if (this.closePromise) return this.closePromise;
     this.closed = true;
     if (this.timer) {
-      clearInterval(this.timer);
+      clearTimeout(this.timer);
       this.timer = undefined;
+      this.timerDueAt = undefined;
     }
     const states = [...this.watches.values()];
     states.forEach((state) => {
@@ -127,13 +158,88 @@ export class CodexTranscriptMonitor {
   }
 
   private start(): void {
-    if (this.timer || this.closed) return;
-    this.timer = setInterval(() => {
-      void this.checkNow().catch((error) => {
-        console.error("[transcript] Codex transcript scan failed:", error);
-      });
-    }, Math.max(50, this.pollIntervalMs));
+    this.scheduleNext();
+  }
+
+  private scheduleNext(): void {
+    if (this.closed || this.watches.size === 0) {
+      if (this.timer) {
+        clearTimeout(this.timer);
+        this.timer = undefined;
+        this.timerDueAt = undefined;
+      }
+      return;
+    }
+    const now = Date.now();
+    let dueAt = Number.POSITIVE_INFINITY;
+    for (const state of this.watches.values()) {
+      if (!state.stopping && state.nextScanAt < dueAt) {
+        dueAt = state.nextScanAt;
+      }
+    }
+    if (!Number.isFinite(dueAt)) {
+      if (this.timer) {
+        clearTimeout(this.timer);
+        this.timer = undefined;
+        this.timerDueAt = undefined;
+      }
+      return;
+    }
+    if (this.timer && this.timerDueAt === dueAt) {
+      return;
+    }
+    if (this.timer) {
+      clearTimeout(this.timer);
+    }
+    const delay = Math.max(0, dueAt - now);
+    this.timerDueAt = dueAt;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      this.timerDueAt = undefined;
+      void this.scanDue()
+        .catch((error) => {
+          console.error("[transcript] Codex transcript scan failed:", error);
+        })
+        .finally(() => this.scheduleNext());
+    }, delay);
     this.timer.unref?.();
+  }
+
+  private async scanDue(): Promise<void> {
+    const now = Date.now();
+    await this.scanStates(
+      [...this.watches.values()].filter(
+        (state) => !state.stopping && state.nextScanAt <= now,
+      ),
+    );
+  }
+
+  private async scanStates(states: WatchState[]): Promise<void> {
+    await Promise.all(states.map((state) => this.scan(state)));
+    const now = Date.now();
+    for (const state of states) {
+      if (this.watches.get(state.sessionId) !== state || state.stopping) {
+        continue;
+      }
+      state.nextScanAt = now + (
+        state.activeUntil > now
+          ? this.activePollIntervalMs
+          : this.idlePollIntervalMs
+      );
+    }
+    this.scheduleNext();
+  }
+
+  private activate(state: WatchState, reschedule = false): void {
+    const now = Date.now();
+    state.activeUntil = now + this.activeWindowMs;
+    if (reschedule) {
+      state.nextScanAt = Math.min(
+        state.nextScanAt,
+        now + this.activePollIntervalMs,
+      );
+      this.scheduleNext();
+    }
   }
 
   private scan(state: WatchState): Promise<void> {
@@ -174,16 +280,19 @@ export class CodexTranscriptMonitor {
         fileStat.birthtimeMs,
       );
       if (state.fileIdentity !== identity) {
+        this.activate(state);
         state.fileIdentity = identity;
         state.offset = 0;
         state.carry = Buffer.alloc(0);
       } else if (fileSize < state.offset) {
+        this.activate(state);
         state.offset = 0;
         state.carry = Buffer.alloc(0);
       }
       if (fileSize === state.offset) {
         return;
       }
+      this.activate(state);
 
       let start = state.offset;
       if (fileSize - start > maxReadBytes) {

@@ -3,6 +3,7 @@ import { appendFile, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import {
   CodexTranscriptMonitor,
@@ -154,6 +155,45 @@ test("unwatch and close perform a fresh scan after an in-flight scan", async (co
         await rm(directory, { recursive: true, force: true });
       }
     });
+  }
+});
+
+test("backs off each inactive session and wakes only the session that becomes active", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-transcript-monitor-"));
+  const transcriptPath = path.join(directory, "rollout.jsonl");
+  const activeTranscriptPath = path.join(directory, "active.jsonl");
+  const events: CodexTranscriptErrorEvent[] = [];
+  const monitor = new CodexTranscriptMonitor(
+    async (event) => {
+      events.push(event);
+    },
+    {
+      activePollIntervalMs: 50,
+      idlePollIntervalMs: 1_000,
+      activeWindowMs: 120,
+    },
+  );
+  try {
+    await writeFile(transcriptPath, "", "utf8");
+    await writeFile(activeTranscriptPath, "", "utf8");
+    await monitor.watch("adaptive-session", transcriptPath);
+    await monitor.watch("active-session", activeTranscriptPath);
+    await delay(220);
+
+    await appendFile(transcriptPath, `${taskCompleteError("idle-turn")}\n`, "utf8");
+    await appendFile(activeTranscriptPath, "{}\n", "utf8");
+    await monitor.watch("active-session", activeTranscriptPath);
+    await delay(120);
+    assert.equal(events.length, 0);
+
+    await monitor.watch("adaptive-session", transcriptPath);
+    for (let attempt = 0; attempt < 20 && events.length === 0; attempt += 1) {
+      await delay(25);
+    }
+    assert.deepEqual(events.map((event) => event.turnId), ["idle-turn"]);
+  } finally {
+    await monitor.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

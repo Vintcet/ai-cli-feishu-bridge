@@ -605,6 +605,118 @@ test("prunes stale pending and resolved approvals from memory and disk", async (
   }
 });
 
+test("bounds completed approvals while retaining every pending request", async () => {
+  const directory = await temporaryDirectory();
+  const store = new BridgeStore(directory, {
+    approvalRetentionMs: 7 * 24 * 60 * 60 * 1000,
+    maxCompletedApprovals: 2,
+    retentionMaintenanceIntervalMs: 0,
+    persistDebounceMs: 10_000,
+  });
+  try {
+    await store.init();
+    const now = Date.now();
+    await store.createApproval({
+      requestId: "pending",
+      sessionId: "approval-session",
+      turnId: "turn-pending",
+      cwd: directory,
+      toolName: "shell_command",
+      toolPreview: "pending command",
+      createdAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + 60_000).toISOString(),
+      status: "pending",
+      messageIds: [],
+    });
+    for (let index = 1; index <= 4; index += 1) {
+      const timestamp = new Date(now - (5 - index) * 1_000).toISOString();
+      await store.createApproval({
+        requestId: `resolved-${index}`,
+        sessionId: "approval-session",
+        turnId: `turn-${index}`,
+        cwd: directory,
+        toolName: "shell_command",
+        toolPreview: `resolved command ${index}`,
+        createdAt: timestamp,
+        expiresAt: timestamp,
+        status: "resolved",
+        resolution: "allow",
+        resolvedAt: timestamp,
+        messageIds: [],
+      });
+    }
+
+    await store.flushPending();
+    assert.deepEqual(
+      store.listApprovals().map((approval) => approval.requestId).sort(),
+      ["pending", "resolved-3", "resolved-4"],
+    );
+    const persisted = JSON.parse(
+      await readFile(path.join(directory, "approvals.json"), "utf8"),
+    ) as { requests: Record<string, unknown> };
+    assert.deepEqual(Object.keys(persisted.requests).sort(), [
+      "pending",
+      "resolved-3",
+      "resolved-4",
+    ]);
+  } finally {
+    await store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("bounds recent message routes and inbound deduplication records", async () => {
+  const directory = await temporaryDirectory();
+  const now = Date.now();
+  const messages = Object.fromEntries(
+    Array.from({ length: 4 }, (_, offset) => {
+      const index = offset + 1;
+      const createdAt = new Date(now - (5 - index) * 1_000).toISOString();
+      return [
+        `route-${index}`,
+        {
+          messageId: `route-${index}`,
+          sessionId: "route-session",
+          chatId: "route-chat",
+          kind: "stop",
+          createdAt,
+        },
+      ];
+    }),
+  );
+  const processedInbound = Object.fromEntries(
+    Array.from({ length: 4 }, (_, offset) => {
+      const index = offset + 1;
+      return [
+        `inbound-${index}`,
+        new Date(now - (5 - index) * 1_000).toISOString(),
+      ];
+    }),
+  );
+  await writeFile(
+    path.join(directory, "message-routes.json"),
+    JSON.stringify({ messages, processedInbound }),
+    "utf8",
+  );
+  const store = new BridgeStore(directory, {
+    routeRetentionMs: 7 * 24 * 60 * 60 * 1000,
+    maxMessageRoutes: 2,
+    maxProcessedInbound: 2,
+  });
+  try {
+    await store.init();
+    assert.equal(store.findMessageRoute(["route-1"]), undefined);
+    assert.equal(store.findMessageRoute(["route-2"]), undefined);
+    assert.equal(store.findMessageRoute(["route-3"])?.messageId, "route-3");
+    assert.equal(store.findMessageRoute(["route-4"])?.messageId, "route-4");
+    assert.equal(await store.claimInboundMessage("inbound-3"), false);
+    assert.equal(await store.claimInboundMessage("inbound-1"), true);
+  } finally {
+    await store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("turn notification claims are durable and recoverable", async () => {
   const directory = await temporaryDirectory();
   try {

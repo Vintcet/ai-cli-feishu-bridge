@@ -386,6 +386,8 @@ BRIDGE_HTTP_PORT=8765
 CODEX_APPROVAL_TIMEOUT_MS=1200000
 CODEX_SESSION_ACTIVE_MS=86400000
 CODEX_TRANSCRIPT_POLL_INTERVAL_MS=750
+CODEX_TRANSCRIPT_IDLE_POLL_INTERVAL_MS=5000
+CODEX_TRANSCRIPT_ACTIVE_WINDOW_MS=30000
 FEISHU_SESSION_GROUP_INACTIVE_MS=604800000
 FEISHU_SESSION_GROUP_CLEANUP_INTERVAL_MS=3600000
 RUNTIME_AUTO_LAUNCH_TIMEOUT_MS=120000
@@ -481,7 +483,7 @@ dotnet publish .\desktop-control\CodexFeishuControl.csproj -c Release -o .\deskt
 - `PreCompact` / `PostCompact`：更新上下文压缩活动；
 - `UserPromptSubmit`：标记新一轮任务开始，帮助“排队”准确判断运行状态。
 
-对于未经过 `Stop` 的 `task_complete.error`，桥接器会轮询活动 Codex 会话的 JSONL 转录并复用同一套错误卡、去重和自动重试逻辑。轮询从登记时的文件末尾开始，默认间隔由 `CODEX_TRANSCRIPT_POLL_INTERVAL_MS=750` 控制。
+对于未经过 `Stop` 的 `task_complete.error`，桥接器会轮询活动 Codex 会话的 JSONL 转录并复用同一套错误卡、去重和自动重试逻辑。轮询从登记时的文件末尾开始；登记新活动或检测到文件变化后的 30 秒内默认每 750ms 检查一次，持续无变化后自动降为每 5 秒一次，下一次 Hook 活动会立即恢复快速轮询。三项时间分别由 `CODEX_TRANSCRIPT_POLL_INTERVAL_MS`、`CODEX_TRANSCRIPT_IDLE_POLL_INTERVAL_MS` 和 `CODEX_TRANSCRIPT_ACTIVE_WINDOW_MS` 控制。
 
 首次打开新的 Codex 窗口时，Codex 会显示 Hook 信任审核。确认路径和内容无误后正常批准即可。不要使用绕过 Hook 信任的危险参数。
 
@@ -518,6 +520,8 @@ Claude Code 的用户级配置位置是：
 - `uploads/`：从飞书接收或准备回传的暂存文件。
 
 这些文件、轮换备份、损坏文件隔离副本以及 `.env` 都被 `.gitignore` 排除，Release ZIP 也明确排除 `.env`、`data/` 和内部审查文件。JSON 状态使用同目录临时文件原子替换；内容无法通过结构校验时，原文件会保留为 `*.corrupt-*`，桥接器改用安全默认值，不会直接覆盖损坏证据。
+
+为避免长期运行后反复解析和重写无限增长的 JSON，消息路由默认保留 7 天且最多 3000 条，入站去重记录最多 5000 条；已完成或孤立审批默认保留 24 小时且最多 500 条。仍在等待决定的审批不受数量上限影响，长期审计记录继续写入会自动轮换的 `approval-events.log`。这些清理不会修改 `sessions.json` 中的会话、别名或飞书群绑定。
 
 Hook HTTP 服务只监听 `127.0.0.1`。匿名健康检查不包含配对码、会话、审批或设置详情；所有控制和 Hook 写请求都要求持久随机令牌、JSON 内容类型，并拒绝跨站浏览器请求。发送审批内容前会对常见 token、secret、password 和 API key 字段做基础脱敏并限制长度；审批日志默认每个 5 MiB、最多保留 5 个备份。附件暂存区默认最多 500 个文件、总计 1 GiB，并清理 7 天前的文件。
 

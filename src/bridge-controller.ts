@@ -84,6 +84,8 @@ interface ControllerConfig {
   outboundFileMaxBytes: number;
   retryBaseDelayMs?: number;
   transcriptPollIntervalMs?: number;
+  transcriptIdlePollIntervalMs?: number;
+  transcriptActiveWindowMs?: number;
   approvalLogPath?: string;
   approvalLogMaxBytes?: number;
   approvalLogMaxBackups?: number;
@@ -132,7 +134,11 @@ export class BridgeController {
     });
     this.transcriptMonitor = new CodexTranscriptMonitor(
       (event) => this.handleCodexTranscriptError(event),
-      config.transcriptPollIntervalMs,
+      {
+        activePollIntervalMs: config.transcriptPollIntervalMs,
+        idlePollIntervalMs: config.transcriptIdlePollIntervalMs,
+        activeWindowMs: config.transcriptActiveWindowMs,
+      },
     );
     this.sessionGroups = new SessionGroupCoordinator(
       store,

@@ -30,6 +30,13 @@ import {
   isRouteStoreValue,
   isSessionStoreValue,
 } from "./store-schema.js";
+import {
+  pruneApprovals,
+  pruneRoutes,
+  resolveStoreRetentionPolicy,
+  type StoreRetentionOptions,
+  type StoreRetentionPolicy,
+} from "./store-retention.js";
 
 const emptyBindings = (): BindingStore => ({ users: {} });
 const emptySessions = (): SessionStore => ({ sessions: {} });
@@ -61,7 +68,7 @@ function integerInRange(
     : fallback;
 }
 
-export interface BridgeStoreOptions {
+export interface BridgeStoreOptions extends StoreRetentionOptions {
   /** 首次运行时使用的默认项目工作区根目录。 */
   defaultWorkspaceRoot?: string;
   /** 高频会话写入合并落盘的时间窗口（毫秒）。 */
@@ -88,8 +95,12 @@ export class BridgeStore {
   private settings: BridgeSettings = defaultSettings();
   private mutationQueue: Promise<void> = Promise.resolve();
   private readonly approvalClaims = new Set<string>();
+  private closePromise: Promise<void> | undefined;
 
   private readonly endedSessionRetentionMs: number;
+  private readonly retentionPolicy: StoreRetentionPolicy;
+  private nextRouteMaintenanceAt = 0;
+  private nextApprovalMaintenanceAt = 0;
   private readonly defaultWorkspaceRoot: string;
   private readonly persistence: JsonFilePersistence;
 
@@ -105,6 +116,7 @@ export class BridgeStore {
     this.settingsFile = path.join(dataDirectory, "settings.json");
     this.endedSessionRetentionMs =
       options.endedSessionRetentionMs ?? defaultEndedSessionRetentionMs;
+    this.retentionPolicy = resolveStoreRetentionPolicy(options);
     this.defaultWorkspaceRoot = options.defaultWorkspaceRoot
       ? path.resolve(options.defaultWorkspaceRoot)
       : "";
@@ -239,7 +251,7 @@ export class BridgeStore {
         approvalsChanged = true;
       }
     }
-    const pruneChanges = this.pruneInMemory(now);
+    const pruneChanges = this.pruneInMemory(now, "all", true);
     routesChanged ||= pruneChanges.routesChanged;
     approvalsChanged ||= pruneChanges.approvalsChanged;
     sessionsChanged ||= this.pruneEndedSessions(now);
@@ -811,7 +823,7 @@ export class BridgeStore {
   async addMessageRoute(route: MessageRoute): Promise<void> {
     await this.mutate(async () => {
       this.routes.messages[route.messageId] = route;
-      const pruneChanges = this.pruneInMemory(Date.now());
+      const pruneChanges = this.pruneInMemory(Date.now(), "routes");
       this.schedulePersist(this.routeFile);
       this.schedulePrunedFiles(pruneChanges);
     });
@@ -823,7 +835,7 @@ export class BridgeStore {
         return false;
       }
       this.routes.processedInbound[messageId] = new Date().toISOString();
-      const pruneChanges = this.pruneInMemory(Date.now());
+      const pruneChanges = this.pruneInMemory(Date.now(), "routes");
       await this.writeJson(this.routeFile, this.routes);
       this.schedulePrunedFiles(pruneChanges, this.routeFile);
       return true;
@@ -864,7 +876,7 @@ export class BridgeStore {
   async createApproval(approval: ApprovalRecord): Promise<void> {
     await this.mutate(async () => {
       this.approvals.requests[approval.requestId] = approval;
-      const pruneChanges = this.pruneInMemory(Date.now());
+      const pruneChanges = this.pruneInMemory(Date.now(), "approvals");
       this.schedulePersist(this.approvalFile);
       this.schedulePrunedFiles(pruneChanges);
     });
@@ -877,7 +889,7 @@ export class BridgeStore {
         return;
       }
       approval.messageIds.push(messageId);
-      const pruneChanges = this.pruneInMemory(Date.now());
+      const pruneChanges = this.pruneInMemory(Date.now(), "approvals");
       this.schedulePersist(this.approvalFile);
       this.schedulePrunedFiles(pruneChanges);
     });
@@ -894,7 +906,7 @@ export class BridgeStore {
         return;
       }
       approval.requiresManualApproval = true;
-      const pruneChanges = this.pruneInMemory(Date.now());
+      const pruneChanges = this.pruneInMemory(Date.now(), "approvals");
       this.schedulePersist(this.approvalFile);
       this.schedulePrunedFiles(pruneChanges);
     });
@@ -910,7 +922,7 @@ export class BridgeStore {
       }
       if (approval.desktopApprovalRequested !== true) {
         approval.desktopApprovalRequested = true;
-        const pruneChanges = this.pruneInMemory(Date.now());
+        const pruneChanges = this.pruneInMemory(Date.now(), "approvals");
         this.schedulePersist(this.approvalFile);
         this.schedulePrunedFiles(pruneChanges);
       }
@@ -957,7 +969,7 @@ export class BridgeStore {
       approval.resolution = resolution;
       approval.resolvedAt = new Date().toISOString();
       this.approvalClaims.delete(requestId);
-      const pruneChanges = this.pruneInMemory(Date.now());
+      const pruneChanges = this.pruneInMemory(Date.now(), "approvals");
       this.schedulePersist(this.approvalFile);
       this.schedulePrunedFiles(pruneChanges);
       return approval;
@@ -966,31 +978,31 @@ export class BridgeStore {
 
   private pruneInMemory(
     now: number,
+    scope: "all" | "routes" | "approvals" = "all",
+    force = false,
   ): { routesChanged: boolean; approvalsChanged: boolean } {
     let routesChanged = false;
     let approvalsChanged = false;
-    const routeCutoff = now - 7 * 24 * 60 * 60 * 1000;
-    for (const [messageId, route] of Object.entries(this.routes.messages)) {
-      if (Date.parse(route.createdAt) < routeCutoff) {
-        delete this.routes.messages[messageId];
-        routesChanged = true;
-      }
-    }
-    for (const [messageId, processedAt] of Object.entries(this.routes.processedInbound)) {
-      if (Date.parse(processedAt) < routeCutoff) {
-        delete this.routes.processedInbound[messageId];
-        routesChanged = true;
-      }
+    if (
+      (scope === "all" || scope === "routes") &&
+      (force || now >= this.nextRouteMaintenanceAt)
+    ) {
+      this.nextRouteMaintenanceAt = now + this.retentionPolicy.maintenanceIntervalMs;
+      routesChanged = pruneRoutes(this.routes, now, this.retentionPolicy);
     }
 
-    const approvalCutoff = now - 7 * 24 * 60 * 60 * 1000;
-    for (const [requestId, approval] of Object.entries(this.approvals.requests)) {
-      const referenceTime = approval.resolvedAt ?? approval.createdAt;
-      if (Date.parse(referenceTime) < approvalCutoff) {
-        delete this.approvals.requests[requestId];
-        this.approvalClaims.delete(requestId);
-        approvalsChanged = true;
-      }
+    if (
+      (scope === "all" || scope === "approvals") &&
+      (force || now >= this.nextApprovalMaintenanceAt)
+    ) {
+      this.nextApprovalMaintenanceAt =
+        now + this.retentionPolicy.maintenanceIntervalMs;
+      approvalsChanged = pruneApprovals(
+        this.approvals,
+        now,
+        this.retentionPolicy,
+        (requestId) => this.approvalClaims.delete(requestId),
+      );
     }
     return { routesChanged, approvalsChanged };
   }
@@ -1034,12 +1046,24 @@ export class BridgeStore {
 
   /** 立即把待写文件全部落盘。适用于进程退出前的收尾和测试。 */
   async flushPending(): Promise<void> {
+    await this.mutate(async () => {
+      this.performSafetyMaintenance(true);
+    });
     await this.persistence.flushPending();
   }
 
   /** 停止后台定时器并确保所有排队写入已经落盘。 */
-  async close(): Promise<void> {
-    await this.persistence.close();
+  close(): Promise<void> {
+    if (!this.closePromise) {
+      this.closePromise = (async () => {
+        await this.flushPending();
+        await this.persistence.close();
+      })().catch((error) => {
+        this.closePromise = undefined;
+        throw error;
+      });
+    }
+    return this.closePromise;
   }
 
   private inMemoryState(filePath: string): unknown {
@@ -1083,8 +1107,8 @@ export class BridgeStore {
     this.persistence.startSafetyFlush();
   }
 
-  private performSafetyMaintenance(): void {
-    const pruneChanges = this.pruneInMemory(Date.now());
+  private performSafetyMaintenance(force = false): void {
+    const pruneChanges = this.pruneInMemory(Date.now(), "all", force);
     this.schedulePrunedFiles(pruneChanges);
     if (this.pruneEndedSessions(Date.now())) {
       this.schedulePersist(this.sessionFile);
