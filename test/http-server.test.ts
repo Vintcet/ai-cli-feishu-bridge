@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import test from "node:test";
 
 import { startHookHttpServer, type HookHttpHandlers } from "../src/http-server.js";
@@ -427,6 +428,74 @@ test("hook posts require JSON, same-site metadata, and the persistent token", as
     });
     assert.equal(legitimate.status, 200);
     assert.equal(stopCalls, 1);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+});
+
+test("permission hook aborts its handler when the HTTP client disconnects", async () => {
+  const token = "e".repeat(64);
+  const custom = handlers();
+  let handlerSignal: AbortSignal | undefined;
+  let resolveHandlerStarted!: () => void;
+  const handlerStarted = new Promise<void>((resolve) => {
+    resolveHandlerStarted = resolve;
+  });
+  custom.permission = async (_payload, signal) => {
+    handlerSignal = signal;
+    resolveHandlerStarted();
+    if (!signal.aborted) {
+      await new Promise<void>((resolve) => {
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+    }
+    return {};
+  };
+  const server = startHookHttpServer("127.0.0.1", 0, custom, token);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("listening", resolve);
+      server.once("error", reject);
+    });
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const body = JSON.stringify({
+      hook_event_name: "PermissionRequest",
+      session_id: "session-disconnected-hook",
+      turn_id: "turn-1",
+      cwd: "C:/demo",
+      model: "gpt-5",
+      permission_mode: "default",
+      tool_name: "shell_command",
+      tool_input: { command: "npm test" },
+      transcript_path: null,
+    });
+    const request = http.request({
+      host: "127.0.0.1",
+      port: address.port,
+      path: "/hooks/permission",
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+        "x-ai-cli-feishu-control-token": token,
+      },
+    });
+    request.on("error", () => {});
+    request.end(body);
+    await handlerStarted;
+
+    request.destroy();
+    await new Promise<void>((resolve) => {
+      if (handlerSignal?.aborted) {
+        resolve();
+      } else {
+        handlerSignal?.addEventListener("abort", () => resolve(), { once: true });
+      }
+    });
+    assert.equal(handlerSignal?.aborted, true);
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());

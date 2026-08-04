@@ -1437,6 +1437,93 @@ test("local and Feishu approval resolutions share one atomic result", async () =
   }
 });
 
+test("a disconnected Codex permission hook invalidates its Feishu approval card", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-hook-disconnect-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      {
+        openId: "owner",
+        chatId: "chat-owner",
+        chatType: "p2p",
+        boundAt: new Date().toISOString(),
+      },
+      code,
+    );
+    const sessionId = "codex-hook-disconnected-before-feishu-click";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "running",
+      source: "startup",
+      runtime: "codex",
+      clientProcessId: process.pid,
+    });
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+    const abortController = new AbortController();
+    const hookResultPromise = controller.handlePermissionHook(
+      {
+        hook_event_name: "PermissionRequest",
+        session_id: sessionId,
+        turn_id: "turn-disconnected",
+        cwd: directory,
+        model: "gpt-5",
+        permission_mode: "default",
+        tool_name: "shell_command",
+        tool_input: { command: "npm test" },
+        transcript_path: null,
+        runtime: "codex",
+      },
+      abortController.signal,
+    );
+    while (feishu.cards.length === 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const approval = store.listApprovals().at(-1);
+    assert.ok(approval);
+
+    abortController.abort();
+    assert.deepEqual(await hookResultPromise, {});
+    assert.equal(store.getApproval(approval.requestId)?.status, "resolved");
+    assert.equal(store.getApproval(approval.requestId)?.resolution, "local");
+    for (let attempt = 0; attempt < 30 && feishu.patchedCards.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const patchedCard = feishu.patchedCards.find(
+      (item) => item.messageId === feishu.cards[0]?.messageId,
+    )?.card;
+    assert.ok(patchedCard);
+    assert.match(JSON.stringify(patchedCard), /已转回电脑端/);
+    assert.doesNotMatch(JSON.stringify(patchedCard), /批准一次/);
+
+    const staleClick = await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: {
+        value: {
+          action: "approval_allow",
+          requestId: approval.requestId,
+          sessionId,
+        },
+      },
+    });
+    assert.equal(staleClick.toast.type, "warning");
+    assert.match(staleClick.toast.content, /已经处理或失效/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("manual approvals stay Feishu-first and fall back to PC when delivery fails", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-feishu-first-"));
   try {

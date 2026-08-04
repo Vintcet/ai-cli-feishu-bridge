@@ -184,6 +184,7 @@ export class HookEventCoordinator {
 
   async handlePermission(
     payload: PermissionHookPayload,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     if (this.dependencies.isClosing()) {
       return {};
@@ -261,50 +262,66 @@ export class HookEventCoordinator {
     );
 
     const resultPromise = approvals.createWaiter(approval);
-    const automaticallyHandled = await approvals.tryAutomatic(
-      session,
-      approval,
-      payload.runtime ?? "codex",
-    );
-    if (!automaticallyHandled) {
-      const sentCount = await approvals.sendCards(
-        session,
-        approval,
-        "pending",
-        "approval",
-      );
-      if (sentCount > 0) {
-        console.log(
-          `[approval] Waiting for desktop or Feishu decision for session #${session.shortId}.`,
-        );
+    const handleHookDisconnect = (): void => {
+      void approvals.complete(approval.requestId, "local", {
+        source: "hook_disconnected",
+      });
+    };
+    signal?.addEventListener("abort", handleHookDisconnect, { once: true });
+    try {
+      if (signal?.aborted) {
+        await approvals.complete(approval.requestId, "local", {
+          source: "hook_disconnected",
+        });
       } else {
-        console.warn(
-          `[approval] Feishu unavailable; waiting for desktop decision for session #${session.shortId}.`,
+        const automaticallyHandled = await approvals.tryAutomatic(
+          session,
+          approval,
+          payload.runtime ?? "codex",
         );
+        if (!automaticallyHandled) {
+          const sentCount = await approvals.sendCards(
+            session,
+            approval,
+            "pending",
+            "approval",
+          );
+          if (sentCount > 0) {
+            console.log(
+              `[approval] Waiting for desktop or Feishu decision for session #${session.shortId}.`,
+            );
+          } else {
+            console.warn(
+              `[approval] Feishu unavailable; waiting for desktop decision for session #${session.shortId}.`,
+            );
+          }
+        }
       }
-    }
 
-    const resolution = await resultPromise;
-    if (resolution === "allow") {
-      return {
-        hookSpecificOutput: {
-          hookEventName: "PermissionRequest",
-          decision: { behavior: "allow" },
-        },
-      };
-    }
-    if (resolution === "deny") {
-      return {
-        hookSpecificOutput: {
-          hookEventName: "PermissionRequest",
-          decision: {
-            behavior: "deny",
-            message: "用户已通过飞书拒绝这次操作。",
+      const resolution = await resultPromise;
+      if (resolution === "allow") {
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PermissionRequest",
+            decision: { behavior: "allow" },
           },
-        },
-      };
+        };
+      }
+      if (resolution === "deny") {
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PermissionRequest",
+            decision: {
+              behavior: "deny",
+              message: "用户已通过飞书拒绝这次操作。",
+            },
+          },
+        };
+      }
+      return {};
+    } finally {
+      signal?.removeEventListener("abort", handleHookDisconnect);
     }
-    return {};
   }
 
   async handleRequestUserInput(

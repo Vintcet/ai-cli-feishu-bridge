@@ -809,8 +809,9 @@ export class BridgeController {
 
   async handlePermissionHook(
     payload: PermissionHookPayload,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
-    return await this.hookEvents.handlePermission(payload);
+    return await this.hookEvents.handlePermission(payload, signal);
   }
 
   async handleRequestUserInputHook(

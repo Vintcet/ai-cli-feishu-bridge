@@ -34,6 +34,7 @@ export type ApprovalDecisionSource =
   | "feishu_text"
   | "opencode_runtime"
   | "claudecode_runtime"
+  | "hook_disconnected"
   | "timeout"
   | "session_closed"
   | "shutdown";

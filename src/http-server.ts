@@ -39,7 +39,10 @@ export interface HookHttpHandlers {
   ) => Promise<Record<string, unknown>>;
   localApproval: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
   settingsUpdate: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
-  permission: (payload: PermissionHookPayload) => Promise<Record<string, unknown>>;
+  permission: (
+    payload: PermissionHookPayload,
+    signal: AbortSignal,
+  ) => Promise<Record<string, unknown>>;
   requestUserInput: (
     payload: RequestUserInputHookPayload,
   ) => Promise<Record<string, unknown>>;
@@ -326,12 +329,28 @@ async function routeRequest(
   }
 
   if (url.pathname === "/hooks/permission") {
-    const body = await readJsonBody(request);
-    if (!isPermissionHookPayload(body)) {
-      sendJson(response, 400, {});
-      return;
+    const abortController = new AbortController();
+    const abortOnDisconnect = (): void => {
+      if (!response.writableEnded) {
+        abortController.abort();
+      }
+    };
+    request.once("aborted", abortOnDisconnect);
+    response.once("close", abortOnDisconnect);
+    try {
+      const body = await readJsonBody(request);
+      if (!isPermissionHookPayload(body)) {
+        sendJson(response, 400, {});
+        return;
+      }
+      const result = await handlers.permission(body, abortController.signal);
+      if (!abortController.signal.aborted && !response.destroyed) {
+        sendJson(response, 200, result);
+      }
+    } finally {
+      request.removeListener("aborted", abortOnDisconnect);
+      response.removeListener("close", abortOnDisconnect);
     }
-    sendJson(response, 200, await handlers.permission(body));
     return;
   }
 
