@@ -1,5 +1,13 @@
-import { randomUUID } from "node:crypto";
-import { appendFile, lstat, mkdir, realpath, stat } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  appendFile,
+  lstat,
+  mkdir,
+  realpath,
+  rename,
+  rm,
+  stat,
+} from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -8,6 +16,7 @@ import {
   parseFeishuContent,
   type SavedAttachment,
 } from "./attachments.js";
+import { assessApprovalRisk } from "./approval-risk.js";
 import {
   buildActivityCard,
   buildApprovalCard,
@@ -137,6 +146,7 @@ type UserInputToggleResult = "selected" | "deselected" | "stale";
 interface UserInputMessageCard {
   messageId: string;
   questionId: string;
+  chatId: string;
 }
 
 interface UserInputWaiter {
@@ -147,7 +157,7 @@ interface UserInputWaiter {
   questions: UserInputQuestion[];
   messageCards: UserInputMessageCard[];
   answers: UserInputAnswers;
-  selections: UserInputAnswers;
+  selections: Record<string, UserInputAnswers>;
   timer: NodeJS.Timeout;
   resolve?: (resolution: UserInputResolution) => void;
   opencodeRequestId?: string;
@@ -223,11 +233,15 @@ interface ControllerConfig {
   uploadsDirectory: string;
   inboundFileMaxBytes: number;
   inboundAttachmentMaxCount: number;
+  uploadMaxFiles: number;
+  uploadMaxBytes: number;
   uploadTtlMs: number;
   outboundFileMaxBytes: number;
   retryBaseDelayMs?: number;
   transcriptPollIntervalMs?: number;
   approvalLogPath?: string;
+  approvalLogMaxBytes?: number;
+  approvalLogMaxBackups?: number;
   liveClientProcessIds?: (clients: ClientProcessMetadata[]) => ReadonlySet<number>;
 }
 
@@ -286,6 +300,7 @@ export class BridgeController {
     string,
     Promise<SessionRecord | undefined>
   >();
+  private readonly turnNotificationsInFlight = new Set<string>();
   private readonly attachmentStore: LocalAttachmentStore;
   private readonly transcriptMonitor: CodexTranscriptMonitor;
   private approvalLogWrite: Promise<void> = Promise.resolve();
@@ -303,6 +318,8 @@ export class BridgeController {
       config.inboundFileMaxBytes,
       config.inboundAttachmentMaxCount,
       config.uploadTtlMs,
+      config.uploadMaxFiles,
+      config.uploadMaxBytes,
     );
     this.transcriptMonitor = new CodexTranscriptMonitor(
       (event) => this.handleCodexTranscriptError(event),
@@ -313,6 +330,7 @@ export class BridgeController {
   async initialize(): Promise<void> {
     await this.initializeCodexTranscriptMonitors();
     await this.initializeSessionGroups();
+    await this.recoverPendingTurnNotifications();
   }
 
   async close(): Promise<void> {
@@ -448,7 +466,15 @@ export class BridgeController {
     return { ok: true, sessionId: request.sessionId };
   }
 
-  health(): Record<string, unknown> {
+  /**
+   * Direct in-process callers get the full status by default. Network callers
+   * must explicitly prove local control; unauthenticated /health only needs a
+   * liveness result and must not expose sessions, approvals, or the pairing code.
+   */
+  health(includeLocalDetails = true): Record<string, unknown> {
+    if (!includeLocalDetails) {
+      return { ok: true };
+    }
     const sessions = this.listActiveSessions();
     const displayedSessions = [...sessions].sort(
       (left, right) =>
@@ -604,9 +630,11 @@ export class BridgeController {
       return { ok: false, error: "会话 ID 或别名参数不完整。" };
     }
 
-    const session = this.listActiveSessions().find((item) => item.sessionId === sessionId);
+    const session = this.listAliasReservedSessions().find(
+      (item) => item.sessionId === sessionId,
+    );
     if (!session) {
-      return { ok: false, error: "这个会话已不在活跃列表中，请刷新后重试。" };
+      return { ok: false, error: "这个会话已不在活跃或历史列表中，请刷新后重试。" };
     }
 
     const result = await this.updateSessionAlias(
@@ -961,11 +989,12 @@ export class BridgeController {
     }
     this.remoteInputLocks.delete(sessionId);
     this.resetRuntimeRetryState(sessionId);
+    const turnId = `opencode-${Date.now()}`;
     const session = await this.store.upsertSession({
       sessionId,
       cwd: current.cwd,
       model: current.model,
-      turnId: `opencode-${Date.now()}`,
+      turnId,
       status: "waiting",
       assistantMessage,
       runtime: "opencode",
@@ -979,17 +1008,14 @@ export class BridgeController {
     const message =
       fileDirectives.displayMessage ||
       assistantMessage || "opencode 已结束本轮处理。";
-    for (const recipient of await this.notificationRecipients(session)) {
-      try {
-        for (const card of buildStopCards(session, message)) {
-          const messageId = await this.feishu.sendCard(recipient.chatId, card);
-          await this.addRoute(messageId, sessionId, recipient.chatId, "stop");
-        }
-      } catch (error) {
-        console.error("[opencode] Failed to send a completion card:", error);
-      }
-    }
-    await this.store.markStopNotified(sessionId, session.lastTurnId ?? "");
+    await this.sendTurnNotificationCards(
+      session,
+      turnId,
+      "stop",
+      message,
+      buildStopCards(session, message),
+      "[opencode] Failed to send a completion card:",
+    );
 
     const fileReturnRequest = this.advanceFileReturnRequests(sessionId);
     if (fileReturnRequest && fileDirectives.paths.length > 0) {
@@ -1079,32 +1105,38 @@ export class BridgeController {
         return;
       }
       const now = Date.now();
+      const toolName =
+        permission.action ??
+        (typeof permission.permission === "string"
+          ? permission.permission
+          : permission.type ?? "permission");
+      const toolInput = {
+        action: permission.action,
+        resources: permission.resources,
+        save: permission.save,
+        source: permission.source,
+        permission: permission.permission ?? permission.type,
+        patterns: permission.patterns,
+        input: permission.input,
+        metadata: permission.metadata,
+        always: permission.always,
+      };
+      const risk = assessApprovalRisk({ toolName, toolInput, cwd });
       const approval: ApprovalRecord = {
         requestId: randomUUID(),
         sessionId,
         turnId: current?.lastTurnId ?? `opencode-${now}`,
         cwd,
-        toolName:
-          permission.action ??
-          (typeof permission.permission === "string"
-            ? permission.permission
-            : permission.type ?? "permission"),
-        toolPreview: previewJson({
-          action: permission.action,
-          resources: permission.resources,
-          save: permission.save,
-          source: permission.source,
-          permission: permission.permission ?? permission.type,
-          patterns: permission.patterns,
-          input: permission.input,
-          metadata: permission.metadata,
-          always: permission.always,
-        }),
+        toolName,
+        toolPreview: previewJson(toolInput),
         createdAt: new Date(now).toISOString(),
         expiresAt: new Date(now + this.config.approvalTimeoutMs).toISOString(),
         status: "pending",
         messageIds: [],
-        requiresManualApproval: !this.store.getSettings().autoApprove,
+        requiresManualApproval:
+          !this.store.getSettings().autoApprove || risk.level === "high",
+        riskLevel: risk.level,
+        riskReason: risk.reason,
         opencodePermissionId: permission.id,
       };
       await this.store.createApproval(approval);
@@ -1112,7 +1144,11 @@ export class BridgeController {
         "requested",
         session,
         approval,
-        { autoApprove: this.store.getSettings().autoApprove },
+        {
+          autoApprove: this.store.getSettings().autoApprove,
+          riskLevel: risk.level,
+          riskReason: risk.reason,
+        },
         now,
       );
       const timeoutTimer = setTimeout(() => {
@@ -1226,14 +1262,14 @@ export class BridgeController {
         opencodeRequestId: request.id,
       });
 
-      const sentCount = await this.sendUserInputCards(
+      const allQuestionsDelivered = await this.sendUserInputCards(
         session,
         requestId,
         questions,
         recipients,
         "opencode",
       );
-      if (sentCount === 0) {
+      if (!allQuestionsDelivered) {
         await this.completeUserInput(requestId, { kind: "local" });
       }
     } catch (error) {
@@ -1411,7 +1447,7 @@ export class BridgeController {
         : payload.client_process_started_at ?? null,
       managedTerminalId,
       managedTerminalElevated,
-      managedByAssistant: managedTerminalId ? true : undefined,
+      managedByAssistant: managedTerminalId ? true : false,
       transcriptPath: payload.transcript_path,
       openedAt,
     });
@@ -1508,6 +1544,11 @@ export class BridgeController {
     });
 
     const now = Date.now();
+    const risk = assessApprovalRisk({
+      toolName: payload.tool_name,
+      toolInput: payload.tool_input,
+      cwd: payload.cwd,
+    });
     const approval: ApprovalRecord = {
       requestId: randomUUID(),
       sessionId: payload.session_id,
@@ -1519,7 +1560,10 @@ export class BridgeController {
       expiresAt: new Date(now + this.config.approvalTimeoutMs).toISOString(),
       status: "pending",
       messageIds: [],
-      requiresManualApproval: !this.store.getSettings().autoApprove,
+      requiresManualApproval:
+        !this.store.getSettings().autoApprove || risk.level === "high",
+      riskLevel: risk.level,
+      riskReason: risk.reason,
     };
     await this.watchCodexTranscript(session);
     await this.store.createApproval(approval);
@@ -1527,7 +1571,11 @@ export class BridgeController {
       "requested",
       session,
       approval,
-      { autoApprove: this.store.getSettings().autoApprove },
+      {
+        autoApprove: this.store.getSettings().autoApprove,
+        riskLevel: risk.level,
+        riskReason: risk.reason,
+      },
       now,
     );
 
@@ -1635,14 +1683,14 @@ export class BridgeController {
       });
     });
 
-    const sentCount = await this.sendUserInputCards(
+    const allQuestionsDelivered = await this.sendUserInputCards(
       session,
       requestId,
       payload.tool_input.questions,
       recipients,
       "input",
     );
-    if (sentCount === 0) {
+    if (!allQuestionsDelivered) {
       await this.completeUserInput(requestId, { kind: "local" });
     }
 
@@ -1764,7 +1812,7 @@ export class BridgeController {
     if (!codexError) {
       this.resetRuntimeRetryState(payload.session_id);
     }
-    if (turnId && previous?.lastNotificationTurnId === turnId) {
+    if (turnId && turnNotificationWasSent(previous, turnId)) {
       return {};
     }
     if (codexError) {
@@ -1785,20 +1833,15 @@ export class BridgeController {
     );
     const message = fileDirectives.displayMessage ||
       `${runtimeDisplayName(session.runtime)} 已结束本轮处理。`;
-    let sentCount = 0;
-    for (const recipient of await this.notificationRecipients(session)) {
-      try {
-        for (const card of buildStopCards(session, message)) {
-          const messageId = await this.feishu.sendCard(recipient.chatId, card);
-          sentCount += 1;
-          await this.addRoute(messageId, payload.session_id, recipient.chatId, "stop");
-        }
-      } catch (error) {
-        console.error("[stop] Failed to send a Feishu completion card:", error);
-      }
-    }
+    const sentCount = await this.sendTurnNotificationCards(
+      session,
+      turnId,
+      "stop",
+      message,
+      buildStopCards(session, message),
+      "[stop] Failed to send a Feishu completion card:",
+    );
     if (sentCount > 0) {
-      await this.store.markStopNotified(payload.session_id, turnId);
       console.log(`[stop] Notified Feishu for session #${session.shortId}.`);
     }
     if (fileReturnRequest && fileDirectives.paths.length > 0) {
@@ -1822,7 +1865,7 @@ export class BridgeController {
       !current ||
       current.status === "ended" ||
       (current.runtime !== undefined && current.runtime !== "codex") ||
-      current.lastNotificationTurnId === event.turnId
+      turnNotificationWasSent(current, event.turnId)
     ) {
       return;
     }
@@ -1850,7 +1893,7 @@ export class BridgeController {
     errorMessage: string,
     errorCode?: string,
   ): Promise<boolean> {
-    if (this.store.getSession(session.sessionId)?.lastNotificationTurnId === turnId) {
+    if (turnNotificationWasSent(this.store.getSession(session.sessionId), turnId)) {
       return false;
     }
     await this.finishActivity(session.sessionId, "本轮发生错误");
@@ -1874,17 +1917,14 @@ export class BridgeController {
       error: errorMessage,
       runtime: session.runtime,
     });
-    for (const recipient of await this.notificationRecipients(failedSession)) {
-      try {
-        for (const card of buildErrorCards(failedSession, detail)) {
-          const messageId = await this.feishu.sendCard(recipient.chatId, card);
-          await this.addRoute(messageId, session.sessionId, recipient.chatId, "error");
-        }
-      } catch (error) {
-        console.error("[error] Failed to send a runtime error card:", error);
-      }
-    }
-    await this.store.markStopNotified(session.sessionId, turnId);
+    await this.sendTurnNotificationCards(
+      failedSession,
+      turnId,
+      "error",
+      errorMessage,
+      buildErrorCards(failedSession, detail),
+      "[error] Failed to send a runtime error card:",
+    );
     if (!canRetry) {
       return false;
     }
@@ -1919,6 +1959,107 @@ export class BridgeController {
     this.runtimeRetryTimers.set(session.sessionId, retryTimer);
     retryTimer.unref?.();
     return true;
+  }
+
+  private async sendTurnNotificationCards(
+    session: SessionRecord,
+    turnId: string,
+    kind: "stop" | "error",
+    notificationMessage: string,
+    cards: Record<string, unknown>[],
+    failureMessage: string,
+  ): Promise<number> {
+    const notificationKey = `${session.sessionId}\u0000${turnId}`;
+    if (this.turnNotificationsInFlight.has(notificationKey)) {
+      return 0;
+    }
+    this.turnNotificationsInFlight.add(notificationKey);
+    try {
+      if (
+        !(await this.store.claimTurnNotification(
+          session.sessionId,
+          turnId,
+          kind,
+          notificationMessage,
+        ))
+      ) {
+        return 0;
+      }
+      const recipients = await this.notificationRecipients(session);
+      if (recipients.length === 0) {
+        await this.store.releaseTurnNotification(session.sessionId, turnId);
+        return 0;
+      }
+      let sentCount = 0;
+      for (const recipient of recipients) {
+        try {
+          for (const [cardIndex, card] of cards.entries()) {
+            const messageId = await this.feishu.sendCard(
+              recipient.chatId,
+              card,
+              turnNotificationIdempotencyKey(
+                session.sessionId,
+                turnId,
+                kind,
+                recipient.chatId,
+                cardIndex,
+              ),
+            );
+            sentCount += 1;
+            await this.addRoute(messageId, session.sessionId, recipient.chatId, kind);
+          }
+        } catch (error) {
+          console.error(failureMessage, error);
+        }
+      }
+      if (sentCount === recipients.length * cards.length) {
+        await this.store.completeTurnNotification(session.sessionId, turnId);
+      }
+      return sentCount;
+    } finally {
+      this.turnNotificationsInFlight.delete(notificationKey);
+    }
+  }
+
+  private async recoverPendingTurnNotifications(): Promise<void> {
+    for (const session of this.store.listPendingTurnNotifications()) {
+      const turnId = session.lastNotificationTurnId;
+      if (!turnId) continue;
+      try {
+        const kind = session.pendingNotificationKind ??
+          (session.status === "error" ? "error" : "stop");
+        const pendingMessage = session.pendingNotificationMessage;
+        if (kind === "error") {
+          const errorMessage = pendingMessage ?? session.lastError;
+          if (!errorMessage) {
+            await this.store.releaseTurnNotification(session.sessionId, turnId);
+            continue;
+          }
+          await this.notifyRuntimeTurnError(session, turnId, errorMessage);
+          continue;
+        }
+        const fileDirectives = extractBridgeFileDirectives(
+          pendingMessage?.trim() ||
+            session.lastAssistantMessage?.trim() ||
+            `${runtimeDisplayName(session.runtime)} 已结束本轮处理。`,
+        );
+        const message = fileDirectives.displayMessage ||
+          `${runtimeDisplayName(session.runtime)} 已结束本轮处理。`;
+        await this.sendTurnNotificationCards(
+          session,
+          turnId,
+          "stop",
+          message,
+          buildStopCards(session, message),
+          "[stop] Failed to recover a pending Feishu completion card:",
+        );
+      } catch (error) {
+        console.warn(
+          `[notification] Could not recover pending turn ${turnId} for #${session.shortId}:`,
+          error,
+        );
+      }
+    }
   }
 
   private resetRuntimeRetryState(sessionId: string): void {
@@ -2348,6 +2489,7 @@ export class BridgeController {
     if (
       groupSession &&
       target.managedByAssistant === true &&
+      !target.clientProcessId &&
       !this.isRuntimeAvailable(target)
     ) {
       await this.queueRuntimeLaunch(target, {
@@ -2435,6 +2577,20 @@ export class BridgeController {
       if (!question) {
         return { toast: { type: "error", content: "这个问题已经失效。" } };
       }
+      const suppliedSelectionKey = actionValue?.selectionKey;
+      const selectionKey = typeof suppliedSelectionKey === "string"
+        ? suppliedSelectionKey
+        : `operator:${operatorOpenId}`;
+      if (
+        typeof suppliedSelectionKey === "string" &&
+        !waiter.messageCards.some(
+          (item) =>
+            item.questionId === questionId &&
+            item.chatId === suppliedSelectionKey,
+        )
+      ) {
+        return { toast: { type: "warning", content: "这张问题卡已经失效。" } };
+      }
       if (action === "input_toggle") {
         const answer = actionValue?.answer;
         if (!question.multiple || typeof answer !== "string") {
@@ -2443,7 +2599,12 @@ export class BridgeController {
         if (!question.options.some((option) => option.label === answer)) {
           return { toast: { type: "error", content: "这个答案不属于当前问题。" } };
         }
-        const result = await this.toggleUserInputAnswer(requestId, questionId, answer);
+        const result = await this.toggleUserInputAnswer(
+          requestId,
+          questionId,
+          answer,
+          selectionKey,
+        );
         return {
           toast: {
             type: result === "stale" ? "warning" : "success",
@@ -2459,7 +2620,11 @@ export class BridgeController {
         if (!question.multiple) {
           return { toast: { type: "error", content: "这不是多选问题。" } };
         }
-        const result = await this.submitUserInputQuestion(requestId, questionId);
+        const result = await this.submitUserInputQuestion(
+          requestId,
+          questionId,
+          selectionKey,
+        );
         const runtime = runtimeDisplayName(this.store.getSession(waiter.sessionId)?.runtime);
         return {
           toast: {
@@ -3262,10 +3427,15 @@ export class BridgeController {
     questions: UserInputQuestion[],
     recipients: Array<{ chatId: string }>,
     logLabel: string,
-  ): Promise<number> {
-    const cards = buildUserInputCards(session, requestId, questions);
-    let sentCount = 0;
+  ): Promise<boolean> {
+    const deliveredQuestionIds = new Set<string>();
     for (const recipient of recipients) {
+      const cards = buildUserInputCards(
+        session,
+        requestId,
+        questions,
+        recipient.chatId,
+      );
       for (const [questionIndex, card] of cards.entries()) {
         const question = questions[questionIndex];
         if (!question) {
@@ -3273,10 +3443,11 @@ export class BridgeController {
         }
         try {
           const messageId = await this.feishu.sendCard(recipient.chatId, card);
-          sentCount += 1;
+          deliveredQuestionIds.add(question.id);
           this.inputWaiters.get(requestId)?.messageCards.push({
             messageId,
             questionId: question.id,
+            chatId: recipient.chatId,
           });
           await this.addRoute(
             messageId,
@@ -3290,7 +3461,7 @@ export class BridgeController {
         }
       }
     }
-    return sentCount;
+    return questions.every((question) => deliveredQuestionIds.has(question.id));
   }
 
   private findOpenCodeInput(
@@ -3403,34 +3574,41 @@ export class BridgeController {
     requestId: string,
     questionId: string,
     answer: string,
+    selectionKey: string,
   ): Promise<UserInputToggleResult> {
     const waiter = this.inputWaiters.get(requestId);
     const question = waiter?.questions.find((item) => item.id === questionId);
     if (!waiter || !question || waiter.answers[questionId]) {
       return "stale";
     }
-    const current = waiter.selections[questionId] ?? [];
+    const selections = waiter.selections[selectionKey] ?? {};
+    const current = selections[questionId] ?? [];
     const selected = current.includes(answer);
     const next = selected
       ? current.filter((item) => item !== answer)
       : [...current, answer];
     if (next.length > 0) {
-      waiter.selections[questionId] = next;
+      selections[questionId] = next;
+      waiter.selections[selectionKey] = selections;
     } else {
-      delete waiter.selections[questionId];
+      delete selections[questionId];
+      if (Object.keys(selections).length === 0) {
+        delete waiter.selections[selectionKey];
+      }
     }
     await this.patchUserInputQuestionCards(requestId, questionId, {
       selectedAnswers: next,
-    });
+    }, selectionKey);
     return selected ? "deselected" : "selected";
   }
 
   private async submitUserInputQuestion(
     requestId: string,
     questionId: string,
+    selectionKey: string,
   ): Promise<UserInputAnswerResult> {
     const waiter = this.inputWaiters.get(requestId);
-    const selected = waiter?.selections[questionId] ?? [];
+    const selected = waiter?.selections[selectionKey]?.[questionId] ?? [];
     if (selected.length === 0) {
       return waiter ? "empty" : "stale";
     }
@@ -3438,7 +3616,13 @@ export class BridgeController {
     if (result === "recorded" || result === "submitted") {
       const current = this.inputWaiters.get(requestId);
       if (current) {
-        delete current.selections[questionId];
+        const selections = current.selections[selectionKey];
+        if (selections) {
+          delete selections[questionId];
+          if (Object.keys(selections).length === 0) {
+            delete current.selections[selectionKey];
+          }
+        }
       }
     }
     return result;
@@ -3476,7 +3660,34 @@ export class BridgeController {
     if (completed) {
       return "submitted";
     }
-    delete waiter.answers[questionId];
+    const attemptedAnswers = Object.fromEntries(
+      Object.entries(waiter.answers).map(([id, values]) => [id, [...values]]),
+    ) as UserInputAnswers;
+    for (const id of Object.keys(waiter.answers)) {
+      delete waiter.answers[id];
+    }
+    waiter.selections = {};
+    const chatIds = new Set(waiter.messageCards.map((item) => item.chatId));
+    for (const chatId of chatIds) {
+      const selections: UserInputAnswers = {};
+      for (const item of waiter.questions) {
+        const values = attemptedAnswers[item.id];
+        if (item.multiple && values?.length) {
+          selections[item.id] = [...values];
+        }
+      }
+      if (Object.keys(selections).length > 0) {
+        waiter.selections[chatId] = selections;
+      }
+    }
+    await Promise.all(
+      waiter.questions.map((item) =>
+        this.patchUserInputQuestionCards(requestId, item.id, {
+          selectedAnswers: attemptedAnswers[item.id] ?? [],
+          answered: false,
+        })
+      ),
+    );
     return "failed";
   }
 
@@ -3488,6 +3699,7 @@ export class BridgeController {
       answered?: boolean;
       remainingQuestions?: number;
     },
+    selectionKey?: string,
   ): Promise<void> {
     const waiter = this.inputWaiters.get(requestId);
     const questionIndex = waiter?.questions.findIndex((item) => item.id === questionId) ?? -1;
@@ -3496,19 +3708,27 @@ export class BridgeController {
     if (!waiter || !question || !session) {
       return;
     }
-    const card = buildUserInputQuestionCard(
-      session,
-      requestId,
-      question,
-      questionIndex,
-      waiter.questions.length,
-      state,
-    );
     const targets = waiter.messageCards
-      .filter((item) => item.questionId === questionId)
-      .map((item) => item.messageId);
+      .filter(
+        (item) =>
+          item.questionId === questionId &&
+          (selectionKey === undefined || item.chatId === selectionKey),
+      );
     await Promise.allSettled(
-      targets.map((messageId) => this.feishu.patchCard(messageId, card)),
+      targets.map((target) => {
+        const selectedAnswers = state.selectedAnswers ??
+          waiter.selections[target.chatId]?.[questionId];
+        const card = buildUserInputQuestionCard(
+          session,
+          requestId,
+          question,
+          questionIndex,
+          waiter.questions.length,
+          { ...state, selectedAnswers },
+          target.chatId,
+        );
+        return this.feishu.patchCard(target.messageId, card);
+      }),
     );
   }
 
@@ -3910,8 +4130,19 @@ export class BridgeController {
     if (!settings.autoApprove) {
       return false;
     }
+    if (approval.riskLevel !== "low") {
+      this.logApprovalEvent("automatic_skipped_high_risk", session, approval, {
+        path: logPrefix,
+        riskLevel: approval.riskLevel ?? "unknown",
+        riskReason: approval.riskReason ?? "未记录风险判定",
+        elapsedSinceRequestMs: elapsedMs(approval.createdAt),
+      });
+      return false;
+    }
     this.logApprovalEvent("automatic_attempt", session, approval, {
       path: logPrefix,
+      riskLevel: approval.riskLevel,
+      riskReason: approval.riskReason,
       elapsedSinceRequestMs: elapsedMs(approval.createdAt),
     });
     const completed = await this.completeApproval(approval.requestId, "allow", {
@@ -4217,10 +4448,36 @@ export class BridgeController {
       return;
     }
     this.approvalLogWrite = this.approvalLogWrite
-      .then(() => appendFile(approvalLogPath, `${line}\n`, "utf8"))
+      .then(() => this.appendApprovalLogLine(approvalLogPath, `${line}\n`))
       .catch((error) => {
         console.error("[approval] Failed to persist approval audit log:", error);
       });
+  }
+
+  private async appendApprovalLogLine(
+    approvalLogPath: string,
+    line: string,
+  ): Promise<void> {
+    const maxBytes = Math.max(
+      1,
+      this.config.approvalLogMaxBytes ?? 5 * 1024 * 1024,
+    );
+    const maxBackups = Math.max(
+      0,
+      this.config.approvalLogMaxBackups ?? 5,
+    );
+    let currentBytes = 0;
+    try {
+      currentBytes = (await stat(approvalLogPath)).size;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+    if (currentBytes > 0 && currentBytes + Buffer.byteLength(line) > maxBytes) {
+      await rotateLogFiles(approvalLogPath, maxBackups);
+    }
+    await appendFile(approvalLogPath, line, "utf8");
   }
 
   private listApprovalViews(): Array<Record<string, unknown>> {
@@ -4268,6 +4525,7 @@ export class BridgeController {
         ? [{
             processId: session.clientProcessId,
             startedAt: session.clientProcessStartedAt,
+            observedAt: session.lastSeenAt,
           }]
         : []
     );
@@ -4350,6 +4608,17 @@ export class BridgeController {
     );
   }
 
+  private listAliasReservedSessions(): SessionRecord[] {
+    const sessions = new Map<string, SessionRecord>();
+    for (const session of this.listActiveSessions()) {
+      sessions.set(session.sessionId, session);
+    }
+    for (const session of this.store.listAssistantManagedSessions()) {
+      sessions.set(session.sessionId, session);
+    }
+    return [...sessions.values()];
+  }
+
   private async updateSessionAlias(
     session: SessionRecord,
     rawAlias: string | undefined,
@@ -4390,7 +4659,7 @@ export class BridgeController {
     }
     const alias = normalizeSessionAlias(rawAlias);
     const key = sessionAliasKey(alias);
-    const conflict = this.listActiveSessions().find(
+    const conflict = this.listAliasReservedSessions().find(
       (item) =>
         item.sessionId !== session.sessionId &&
         item.alias &&
@@ -4908,7 +5177,10 @@ function normalizePromptForMatch(value: string): string {
 }
 
 function externalSessionInputBlockedMessage(session: SessionRecord): string {
-  return notReceivedText(session, "外部会话不支持飞书输入。请回到原窗口继续。");
+  return notReceivedText(
+    session,
+    "这个窗口不是由 Codex 飞书助手打开，不能从飞书回复。请回到原窗口继续。",
+  );
 }
 
 function codexNotReceived(reason: string): string {
@@ -5056,6 +5328,46 @@ function sessionGroupActivityTime(session: SessionRecord): number {
 function parseTimestamp(value: string | undefined): number {
   const parsed = value ? Date.parse(value) : Number.NaN;
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function turnNotificationWasSent(
+  session: SessionRecord | undefined,
+  turnId: string,
+): boolean {
+  return session?.lastNotificationTurnId === turnId &&
+    session.lastNotificationStatus !== "pending";
+}
+
+function turnNotificationIdempotencyKey(
+  sessionId: string,
+  turnId: string,
+  kind: "stop" | "error",
+  chatId: string,
+  cardIndex: number,
+): string {
+  return createHash("sha256")
+    .update(`${sessionId}\u0000${turnId}\u0000${kind}\u0000${chatId}\u0000${cardIndex}`)
+    .digest("hex")
+    .slice(0, 32);
+}
+
+async function rotateLogFiles(logPath: string, maxBackups: number): Promise<void> {
+  if (maxBackups === 0) {
+    await rm(logPath, { force: true });
+    return;
+  }
+  for (let index = maxBackups; index >= 1; index -= 1) {
+    const source = index === 1 ? logPath : `${logPath}.${index - 1}`;
+    const destination = `${logPath}.${index}`;
+    await rm(destination, { force: true });
+    try {
+      await rename(source, destination);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
 }
 
 function elapsedMs(startAt: string | undefined, endAt = Date.now()): number | null {

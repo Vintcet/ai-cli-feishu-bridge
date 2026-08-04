@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -79,6 +79,81 @@ test("preserves partial UTF-8 and scans once more when a session is unwatched", 
   } finally {
     await monitor.close();
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("detects a transcript replaced by an equal-or-larger file", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-transcript-monitor-"));
+  const transcriptPath = path.join(directory, "rollout.jsonl");
+  const replacementPath = path.join(directory, "replacement.jsonl");
+  const events: CodexTranscriptErrorEvent[] = [];
+  const monitor = new CodexTranscriptMonitor(async (event) => {
+    events.push(event);
+  }, 60_000);
+  try {
+    await writeFile(transcriptPath, `${"x".repeat(80)}\n`, "utf8");
+    await monitor.watch("session-replaced", transcriptPath);
+    await writeFile(
+      replacementPath,
+      `${taskCompleteError("replacement-turn", "replacement failure")}\n`,
+      "utf8",
+    );
+    await rm(transcriptPath);
+    await rename(replacementPath, transcriptPath);
+
+    await monitor.checkNow();
+    assert.deepEqual(events.map((event) => event.turnId), ["replacement-turn"]);
+  } finally {
+    await monitor.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("unwatch and close perform a fresh scan after an in-flight scan", async (context) => {
+  for (const action of ["unwatch", "close"] as const) {
+    await context.test(action, async () => {
+      const directory = await mkdtemp(path.join(os.tmpdir(), "codex-transcript-monitor-"));
+      const transcriptPath = path.join(directory, "rollout.jsonl");
+      const events: CodexTranscriptErrorEvent[] = [];
+      let releaseFirst: (() => void) | undefined;
+      const firstHandled = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let notifyFirstStarted: (() => void) | undefined;
+      const firstStarted = new Promise<void>((resolve) => {
+        notifyFirstStarted = resolve;
+      });
+      const monitor = new CodexTranscriptMonitor(async (event) => {
+        events.push(event);
+        if (event.turnId === "first-turn") {
+          notifyFirstStarted?.();
+          await firstHandled;
+        }
+      }, 60_000);
+      try {
+        await writeFile(transcriptPath, "", "utf8");
+        await monitor.watch(`session-${action}`, transcriptPath);
+        await appendFile(transcriptPath, `${taskCompleteError("first-turn")}\n`, "utf8");
+        const inFlightScan = monitor.checkNow();
+        await firstStarted;
+
+        const stopping = action === "unwatch"
+          ? monitor.unwatch(`session-${action}`)
+          : monitor.close();
+        await appendFile(transcriptPath, `${taskCompleteError("final-turn")}\n`, "utf8");
+        releaseFirst?.();
+        await Promise.all([inFlightScan, stopping]);
+
+        assert.deepEqual(
+          events.map((event) => event.turnId),
+          ["first-turn", "final-turn"],
+        );
+      } finally {
+        releaseFirst?.();
+        await monitor.close();
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
   }
 });
 

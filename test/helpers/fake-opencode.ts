@@ -59,13 +59,17 @@ export class FakeOpenCodeServer {
   }
 
   async close(): Promise<void> {
+    this.closeSseClients();
+    await new Promise<void>((resolve, reject) => {
+      this.server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+
+  closeSseClients(): void {
     for (const client of this.sseClients) {
       client.end();
     }
     this.sseClients.clear();
-    await new Promise<void>((resolve, reject) => {
-      this.server.close((error) => (error ? reject(error) : resolve()));
-    });
   }
 
   sendSse(event: string, data: unknown): void {

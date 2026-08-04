@@ -23,15 +23,26 @@ export interface ParsedFeishuContent {
 
 export class LocalAttachmentStore {
   private lastPrunedAt = 0;
+  private operationQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly rootDirectory: string,
     private readonly maxBytes: number,
     private readonly maxPerMessage: number,
     private readonly ttlMs: number,
+    private readonly maxTotalFiles: number,
+    private readonly maxTotalBytes: number,
   ) {}
 
   async download(
+    gateway: FeishuGateway,
+    messageId: string,
+    attachments: IncomingAttachment[],
+  ): Promise<SavedAttachment[]> {
+    return this.runExclusive(() => this.downloadExclusive(gateway, messageId, attachments));
+  }
+
+  private async downloadExclusive(
     gateway: FeishuGateway,
     messageId: string,
     attachments: IncomingAttachment[],
@@ -40,6 +51,12 @@ export class LocalAttachmentStore {
       throw new Error(`每条消息最多接收 ${this.maxPerMessage} 个附件。`);
     }
     await this.pruneIfNeeded();
+    const usage = await measureDirectory(this.rootDirectory);
+    if (usage.fileCount + attachments.length > this.maxTotalFiles) {
+      throw new Error(
+        `附件暂存区最多保留 ${this.maxTotalFiles} 个文件，请等待旧附件自动清理后重试。`,
+      );
+    }
     const month = new Date().toISOString().slice(0, 7);
     const directory = path.join(this.rootDirectory, month);
     await mkdir(directory, { recursive: true });
@@ -60,12 +77,25 @@ export class LocalAttachmentStore {
           this.maxBytes,
         );
         saved.push({ absolutePath: path.resolve(destinationPath), fileName: safeName, size });
+        usage.fileCount += 1;
+        usage.totalBytes += size;
+        if (usage.totalBytes > this.maxTotalBytes) {
+          throw new Error(
+            `附件暂存区总容量不能超过 ${formatBytes(this.maxTotalBytes)}，请等待旧附件自动清理后重试。`,
+          );
+        }
       }
       return saved;
     } catch (error) {
       await Promise.allSettled(saved.map((item) => rm(item.absolutePath, { force: true })));
       throw error;
     }
+  }
+
+  private runExclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.operationQueue.then(operation, operation);
+    this.operationQueue = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   private async pruneIfNeeded(): Promise<void> {
@@ -238,9 +268,10 @@ function sanitizeFileName(value: string): string {
   const base = path.basename(value).normalize("NFC");
   const cleaned = base
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .slice(0, 120)
     .replace(/[. ]+$/g, "")
     .trim();
-  return (cleaned || "attachment.bin").slice(0, 120);
+  return cleaned || "attachment.bin";
 }
 
 function sanitizeToken(value: string): string {
@@ -275,4 +306,54 @@ async function pruneDirectory(directory: string, cutoff: number): Promise<void> 
       await rm(fullPath, { force: true });
     }
   }
+}
+
+interface DirectoryUsage {
+  fileCount: number;
+  totalBytes: number;
+}
+
+async function measureDirectory(directory: string): Promise<DirectoryUsage> {
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { fileCount: 0, totalBytes: 0 };
+    }
+    throw error;
+  }
+  const usage: DirectoryUsage = { fileCount: 0, totalBytes: 0 };
+  for (const entry of entries) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      const nested = await measureDirectory(fullPath);
+      usage.fileCount += nested.fileCount;
+      usage.totalBytes += nested.totalBytes;
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    const fileStat = await stat(fullPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (fileStat) {
+      usage.fileCount += 1;
+      usage.totalBytes += fileStat.size;
+    }
+  }
+  return usage;
+}
+
+function formatBytes(value: number): string {
+  if (value >= 1024 * 1024 * 1024) {
+    return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
+  }
+  if (value >= 1024 * 1024) {
+    return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
+  }
+  if (value >= 1024) {
+    return `${(value / 1024).toFixed(1)} KiB`;
+  }
+  return `${value} B`;
 }

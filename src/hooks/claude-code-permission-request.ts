@@ -10,7 +10,7 @@ import {
 
 try {
   const input = normalizeClaudeCodePayload(await readHookInput());
-  const enriched = addClientProcessMetadata(addManagedTerminalMetadata(input));
+  const enriched = await addClientProcessMetadata(addManagedTerminalMetadata(input));
   const isQuestion = Boolean(
     enriched &&
       typeof enriched === "object" &&

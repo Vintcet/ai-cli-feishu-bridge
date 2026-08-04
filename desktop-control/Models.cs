@@ -77,6 +77,9 @@ internal sealed class BridgeStatus
     [JsonPropertyName("version")]
     public string Version { get; set; } = "";
 
+    [JsonPropertyName("processId")]
+    public int ProcessId { get; set; }
+
     [JsonPropertyName("startedAt")]
     public string StartedAt { get; set; } = "";
 

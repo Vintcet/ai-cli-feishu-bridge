@@ -2,7 +2,6 @@ import type {
   ApprovalRecord,
   ApprovalResolution,
   SessionRecord,
-  UserInputAnswers,
   UserInputQuestion,
 } from "./domain.js";
 import {
@@ -51,15 +50,24 @@ export function buildApprovalCard(
   return {
     config: { wide_screen_mode: true, update_multi: true },
     header: {
-      template: "orange",
-      title: { tag: "plain_text", content: `${runtime} 需要你的确认` },
+      template: approval.riskLevel === "high" ? "red" : "orange",
+      title: {
+        tag: "plain_text",
+        content: approval.riskLevel === "high"
+          ? `${runtime} 高风险操作需要确认`
+          : `${runtime} 需要你的确认`,
+      },
     },
     elements: [
       {
         tag: "div",
         text: {
           tag: "lark_md",
-          content: `**会话：** ${sessionLabel(session)}\n**工具：** ${approval.toolName}\n**目录：** ${session.cwd}`,
+          content: `**会话：** ${sessionLabel(session)}\n**工具：** ${approval.toolName}\n**目录：** ${session.cwd}${
+            approval.riskLevel === "high"
+              ? `\n**风险：** 高（${approval.riskReason ?? "命中高风险规则"}）`
+              : ""
+          }`,
         },
       },
       { tag: "hr" },
@@ -147,6 +155,7 @@ export function buildUserInputCards(
   session: SessionRecord,
   requestId: string,
   questions: UserInputQuestion[],
+  selectionKey?: string,
 ): Card[] {
   return questions.map((question, questionIndex) =>
     buildUserInputQuestionCard(
@@ -155,19 +164,9 @@ export function buildUserInputCards(
       question,
       questionIndex,
       questions.length,
+      {},
+      selectionKey,
     ));
-}
-
-/**
- * Compatibility entry point for callers that still expect a single card.
- * The controller uses buildUserInputCards for the actual multi-question flow.
- */
-export function buildUserInputCard(
-  session: SessionRecord,
-  requestId: string,
-  questions: UserInputQuestion[],
-): Card {
-  return buildUserInputCards(session, requestId, questions)[0]!;
 }
 
 export function buildUserInputQuestionCard(
@@ -177,6 +176,7 @@ export function buildUserInputQuestionCard(
   questionIndex: number,
   questionCount: number,
   state: UserInputCardState = {},
+  selectionKey?: string,
 ): Card {
   const runtime = runtimeDisplayName(session.runtime);
   const selected = [...(state.selectedAnswers ?? [])];
@@ -250,6 +250,7 @@ export function buildUserInputQuestionCard(
           sessionId: session.sessionId,
           questionId: question.id,
           answer: option.label,
+          ...(selectionKey ? { selectionKey } : {}),
         },
       };
     });
@@ -263,6 +264,7 @@ export function buildUserInputQuestionCard(
           requestId,
           sessionId: session.sessionId,
           questionId: question.id,
+          ...(selectionKey ? { selectionKey } : {}),
         },
       });
     }
@@ -374,55 +376,6 @@ function chunkCardActions(
   return rows;
 }
 
-export function buildResolvedUserInputCard(
-  session: SessionRecord,
-  questions: UserInputQuestion[],
-  answers: UserInputAnswers | undefined,
-  resolution: "answered" | "local" | "timeout" | "rejected",
-): Card {
-  const runtime = runtimeDisplayName(session.runtime);
-  const result = resolution === "answered"
-    ? questions
-        .map(
-            (question, index) =>
-            `${index + 1}. **${truncate(question.header, 60)}：** ${question.isSecret ? "已提供（已隐藏）" : truncate((answers?.[question.id] ?? []).join("、"), 300)}`,
-        )
-        .join("\n")
-    : resolution === "local"
-      ? `已转回电脑端，请在原 ${runtime} 窗口回答。`
-      : resolution === "rejected"
-        ? `已在原 ${runtime} 窗口取消这组问题。`
-        : "飞书回答已超时，已转回电脑端。";
-  return {
-    config: { wide_screen_mode: true, update_multi: true },
-    header: {
-      template: resolution === "answered" ? "green" : "grey",
-      title: { tag: "plain_text", content: `${runtime} 补充信息已处理` },
-    },
-    elements: [
-      {
-        tag: "div",
-        text: {
-          tag: "lark_md",
-          content: `**会话：** ${sessionLabel(session)}\n\n${result}`,
-        },
-      },
-    ],
-  };
-}
-
-function inputReplyHint(questions: UserInputQuestion[]): string {
-  const hasMultiple = questions.some((question) => question.multiple);
-  const customAllowed = questions.some((question) => question.custom !== false);
-  const answerForm = hasMultiple
-    ? "多选题请用逗号分隔，例如“1,3”"
-    : "可回复选项编号或选项文字";
-  const customForm = customAllowed ? "，也可填写自定义答案" : "";
-  return questions.length === 1
-    ? `请引用本卡片回复；${answerForm}${customForm}。`
-    : `请引用本卡片，按问题顺序用中文分号“；”分隔 ${questions.length} 个答案；${answerForm}${customForm}。`;
-}
-
 export function buildActivityCard(
   session: SessionRecord,
   events: ActivityCardEvent[],
@@ -499,7 +452,7 @@ export function buildStopCards(
   const waitingForReply = looksLikeQuestion(safeMessage);
   const continuationHint = session.managedByAssistant === true
     ? "下一轮请直接发送消息。"
-    : "外部会话不支持飞书输入。";
+    : "这个窗口不是由 Codex 飞书助手打开，不能从飞书回复。";
   const chunks = splitTextForFeishu(safeMessage || `${runtime} 已结束本轮处理。`, 2_800);
   return chunks.map((chunk, index) => buildMessageCard({
     session,

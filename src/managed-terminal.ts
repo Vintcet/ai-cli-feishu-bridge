@@ -12,6 +12,13 @@ interface TerminalReply {
   error?: string;
 }
 
+interface ExpectedTerminalRegistration {
+  terminalId: string;
+  sessionId?: string;
+  createdAt: number;
+  generation: number;
+}
+
 export type TerminalSubmitMode = "steer" | "queue";
 
 export interface ManagedTerminalRegistration {
@@ -39,7 +46,9 @@ export function managedTerminalSessionId(terminalId: string): string {
 
 export class ManagedTerminalRouter {
   private readonly registrations = new Map<string, ManagedTerminalRegistration>();
+  private readonly registrationGenerations = new Map<string, number>();
   private readonly sendChains = new Map<string, Promise<void>>();
+  private nextRegistrationGeneration = 0;
 
   isManaged(session: SessionRecord): boolean {
     return Boolean(session.managedTerminalId);
@@ -96,6 +105,10 @@ export class ManagedTerminalRouter {
     if (!runtime) {
       throw new Error("托管终端运行时无效。");
     }
+    const generation = current
+      ? this.registrationGenerations.get(terminalId) ??
+        ++this.nextRegistrationGeneration
+      : ++this.nextRegistrationGeneration;
     this.registrations.set(terminalId, {
       terminalId,
       cwd: path.resolve(cwd),
@@ -110,6 +123,7 @@ export class ManagedTerminalRouter {
       lastSeenAt: now,
       sessionId: existingSessionId ?? current?.sessionId,
     });
+    this.registrationGenerations.set(terminalId, generation);
     this.prune(now);
   }
 
@@ -119,6 +133,7 @@ export class ManagedTerminalRouter {
       throw new Error("托管终端注销信息无效。");
     }
     this.registrations.delete(terminalId);
+    this.registrationGenerations.delete(terminalId);
   }
 
   claim(cwd: string, sessionId: string): ManagedTerminalClaim | undefined {
@@ -202,20 +217,11 @@ export class ManagedTerminalRouter {
       throw new Error("托管终端提交模式无效。");
     }
 
-    const registration = this.registrations.get(terminalId);
-    if (!registration || Date.now() - registration.lastSeenAt > 20_000) {
-      throw new Error("对应的同步窗口已经关闭或暂时离线。");
-    }
-    if (!registration.ready) {
-      throw new Error("同步窗口仍在启动，请稍等几秒后再回复。");
-    }
-    if (registration.sessionId && registration.sessionId !== session.sessionId) {
-      throw new Error("托管终端与目标会话不匹配，已拒绝输入以避免串线。");
-    }
+    const expected = this.captureExpectedRegistration(terminalId, session.sessionId);
 
     const previous = this.sendChains.get(terminalId) ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(
-      () => this.sendNow(terminalId, normalizedPrompt, submitMode),
+      () => this.sendNow(expected, normalizedPrompt, submitMode),
     );
     this.sendChains.set(terminalId, current);
     try {
@@ -228,14 +234,15 @@ export class ManagedTerminalRouter {
   }
 
   private async sendNow(
-    terminalId: string,
+    expected: ExpectedTerminalRegistration,
     prompt: string,
     submitMode: TerminalSubmitMode,
   ): Promise<void> {
     let lastError: Error | undefined;
     for (let attempt = 1; attempt <= 4; attempt += 1) {
       try {
-        await this.sendOnce(terminalId, prompt, submitMode);
+        this.assertExpectedRegistration(expected);
+        await this.sendOnce(expected, prompt, submitMode);
         return;
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
@@ -249,10 +256,11 @@ export class ManagedTerminalRouter {
   }
 
   private async sendOnce(
-    terminalId: string,
+    expected: ExpectedTerminalRegistration,
     prompt: string,
     submitMode: TerminalSubmitMode,
   ): Promise<void> {
+    const terminalId = expected.terminalId;
     const pipePath = `\\\\.\\pipe\\CodexFeishu.${terminalId}`;
     await new Promise<void>((resolve, reject) => {
       const socket = net.createConnection(pipePath);
@@ -270,6 +278,12 @@ export class ManagedTerminalRouter {
       socket.setEncoding("utf8");
       socket.setTimeout(7_000);
       socket.once("connect", () => {
+        try {
+          this.assertExpectedRegistration(expected);
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
         socket.write(`${JSON.stringify({ type: "prompt", prompt, submitMode })}\n`);
       });
       socket.on("data", (chunk) => {
@@ -311,10 +325,58 @@ export class ManagedTerminalRouter {
     });
   }
 
+  private captureExpectedRegistration(
+    terminalId: string,
+    sessionId: string,
+  ): ExpectedTerminalRegistration {
+    const registration = this.registrations.get(terminalId);
+    if (!registration || Date.now() - registration.lastSeenAt > 20_000) {
+      throw new Error("对应的同步窗口已经关闭或暂时离线。");
+    }
+    if (!registration.ready) {
+      throw new Error("同步窗口仍在启动，请稍等几秒后再回复。");
+    }
+    if (registration.sessionId && registration.sessionId !== sessionId) {
+      throw new Error("托管终端与目标会话不匹配，已拒绝输入以避免串线。");
+    }
+    const generation = this.registrationGenerations.get(terminalId);
+    if (generation === undefined) {
+      throw new Error("对应的同步窗口已经关闭或暂时离线。");
+    }
+    return {
+      terminalId,
+      sessionId: registration.sessionId,
+      createdAt: registration.createdAt,
+      generation,
+    };
+  }
+
+  private assertExpectedRegistration(
+    expected: ExpectedTerminalRegistration,
+  ): ManagedTerminalRegistration {
+    const registration = this.registrations.get(expected.terminalId);
+    if (!registration || Date.now() - registration.lastSeenAt > 20_000) {
+      throw new Error("对应的同步窗口已经关闭或暂时离线。");
+    }
+    if (!registration.ready) {
+      throw new Error("同步窗口仍在启动，请稍等几秒后再回复。");
+    }
+    if (
+      this.registrationGenerations.get(expected.terminalId) !==
+        expected.generation ||
+      registration.createdAt !== expected.createdAt ||
+      registration.sessionId !== expected.sessionId
+    ) {
+      throw new Error("托管终端与目标会话不匹配，已拒绝输入以避免串线。");
+    }
+    return registration;
+  }
+
   private prune(now: number): void {
     for (const [terminalId, registration] of this.registrations) {
       if (now - registration.lastSeenAt > 60_000) {
         this.registrations.delete(terminalId);
+        this.registrationGenerations.delete(terminalId);
       }
     }
   }

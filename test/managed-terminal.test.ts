@@ -88,6 +88,53 @@ test("rejects an invalid terminal submit mode before connecting", async () => {
   );
 });
 
+test("queued input is rejected if the terminal changes session ownership", async () => {
+  const router = new ManagedTerminalRouter();
+  const cwd = path.resolve("ownership-race");
+  const terminalId = "terminal777";
+  router.register({ terminalId, cwd, elevated: false, ready: true });
+  router.claimById(terminalId, cwd, "session-owner-one");
+
+  let releaseFirst: (() => void) | undefined;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let markFirstStarted: (() => void) | undefined;
+  const firstStarted = new Promise<void>((resolve) => {
+    markFirstStarted = resolve;
+  });
+  let sendOnceCalls = 0;
+  const internal = router as unknown as {
+    sendOnce: (...args: unknown[]) => Promise<void>;
+  };
+  internal.sendOnce = async () => {
+    sendOnceCalls += 1;
+    if (sendOnceCalls === 1) {
+      markFirstStarted?.();
+      await firstGate;
+    }
+  };
+
+  const first = router.send(
+    session(terminalId, cwd, "session-owner-one"),
+    "first",
+  );
+  await firstStarted;
+  const second = router.send(
+    session(terminalId, cwd, "session-owner-one"),
+    "second",
+  );
+  const secondRejected = assert.rejects(second, /目标会话不匹配/);
+
+  router.release("session-owner-one");
+  router.claimById(terminalId, cwd, "session-owner-two");
+  releaseFirst?.();
+
+  await first;
+  await secondRejected;
+  assert.equal(sendOnceCalls, 1);
+});
+
 test("retries while a managed terminal pipe is being recreated", async (context) => {
   if (process.platform !== "win32") {
     context.skip("Windows named pipe behavior");

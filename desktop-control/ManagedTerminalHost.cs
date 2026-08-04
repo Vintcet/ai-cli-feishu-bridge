@@ -7,6 +7,7 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Win32.SafeHandles;
 
 namespace CodexFeishuControl;
@@ -26,6 +27,7 @@ internal static class ManagedTerminalHost
         var terminalId = ReadArgument(args, "--id");
         var cwd = ReadArgument(args, "--cwd");
         var bridgeUrl = ReadArgument(args, "--bridge-url") ?? "http://127.0.0.1:8765";
+        var bridgeRoot = ReadArgument(args, "--bridge-root");
         var runtimeId = ReadArgument(args, "--runtime") ?? RuntimeCatalog.Codex.Id;
         var toolCommand = ReadArgument(args, "--tool-command");
         var rawToolArguments = ReadArgument(args, "--tool-args") ??
@@ -40,6 +42,10 @@ internal static class ManagedTerminalHost
             return 2;
         }
         if (string.IsNullOrWhiteSpace(cwd) || !Directory.Exists(cwd))
+        {
+            return 3;
+        }
+        if (string.IsNullOrWhiteSpace(bridgeRoot) || !Directory.Exists(bridgeRoot))
         {
             return 3;
         }
@@ -76,8 +82,10 @@ internal static class ManagedTerminalHost
             cancellation.Cancel();
         };
 
+        var controlToken = "";
         try
         {
+            controlToken = ReadControlToken(bridgeRoot);
             var toolArguments = forwardedToolArguments.Count > 0
                 ? ValidateForwardedArguments(runtime, forwardedToolArguments)
                 : RuntimeArgumentParser.Parse(runtime, rawToolArguments);
@@ -87,6 +95,7 @@ internal static class ManagedTerminalHost
                     cwd,
                     terminalId,
                     bridgeUrl,
+                    controlToken,
                     elevated,
                     runtime,
                     toolCommand,
@@ -96,6 +105,7 @@ internal static class ManagedTerminalHost
                     terminalId,
                     cwd,
                     bridgeUrl,
+                    controlToken,
                     elevated,
                     runtime.Id,
                     ready: false,
@@ -107,6 +117,7 @@ internal static class ManagedTerminalHost
                 cwd,
                 terminalId,
                 bridgeUrl,
+                controlToken,
                 elevated,
                 runtime,
                 toolCommand,
@@ -119,6 +130,7 @@ internal static class ManagedTerminalHost
                 terminalId,
                 cwd,
                 bridgeUrl,
+                controlToken,
                 elevated,
                 runtime,
                 powershell,
@@ -149,7 +161,11 @@ internal static class ManagedTerminalHost
             {
                 try
                 {
-                    UnregisterTerminalAsync(terminalId, bridgeUrl, CancellationToken.None)
+                    UnregisterTerminalAsync(
+                            terminalId,
+                            bridgeUrl,
+                            controlToken,
+                            CancellationToken.None)
                         .GetAwaiter()
                         .GetResult();
                 }
@@ -166,6 +182,7 @@ internal static class ManagedTerminalHost
         string cwd,
         string terminalId,
         string bridgeUrl,
+        string controlToken,
         bool elevated,
         RuntimeProfile runtime,
         string toolCommand,
@@ -176,6 +193,7 @@ internal static class ManagedTerminalHost
             cwd,
             terminalId,
             bridgeUrl,
+            controlToken,
             elevated,
             runtime,
             toolCommand,
@@ -212,6 +230,7 @@ internal static class ManagedTerminalHost
         string cwd,
         string terminalId,
         string bridgeUrl,
+        string controlToken,
         bool elevated,
         RuntimeProfile runtime,
         string toolCommand,
@@ -254,6 +273,7 @@ internal static class ManagedTerminalHost
             startInfo.Environment.Remove("CODEX_FEISHU_MANAGED_TERMINAL_ELEVATED");
         }
         startInfo.Environment["CODEX_FEISHU_BRIDGE_URL"] = bridgeUrl;
+        startInfo.Environment["CODEX_FEISHU_CONTROL_TOKEN"] = controlToken;
         startInfo.Environment["CODEX_FEISHU_RUNTIME"] = runtime.Id;
         startInfo.Environment["CODEX_FEISHU_TOOL_COMMAND"] = toolCommand;
         startInfo.Environment["CODEX_FEISHU_TOOL_ARGS_JSON"] = JsonSerializer.Serialize(
@@ -273,29 +293,39 @@ internal static class ManagedTerminalHost
         string terminalId,
         string cwd,
         string bridgeUrl,
+        string controlToken,
         bool elevated,
         string runtime,
         bool ready,
         CancellationToken cancellationToken)
     {
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
-        using var response = await client.PostAsJsonAsync(
-            $"{bridgeUrl.TrimEnd('/')}/managed-terminals/register",
-            new { terminalId, cwd, elevated, runtime, ready },
-            cancellationToken);
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"{bridgeUrl.TrimEnd('/')}/managed-terminals/register")
+        {
+            Content = JsonContent.Create(new { terminalId, cwd, elevated, runtime, ready }),
+        };
+        request.Headers.Add("X-Codex-Feishu-Control-Token", controlToken);
+        using var response = await client.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
     }
 
     private static async Task UnregisterTerminalAsync(
         string terminalId,
         string bridgeUrl,
+        string controlToken,
         CancellationToken cancellationToken)
     {
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
-        using var response = await client.PostAsJsonAsync(
-            $"{bridgeUrl.TrimEnd('/')}/managed-terminals/unregister",
-            new { terminalId },
-            cancellationToken);
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"{bridgeUrl.TrimEnd('/')}/managed-terminals/unregister")
+        {
+            Content = JsonContent.Create(new { terminalId }),
+        };
+        request.Headers.Add("X-Codex-Feishu-Control-Token", controlToken);
+        using var response = await client.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
     }
 
@@ -303,6 +333,7 @@ internal static class ManagedTerminalHost
         string terminalId,
         string cwd,
         string bridgeUrl,
+        string controlToken,
         bool elevated,
         RuntimeProfile runtime,
         Process powershell,
@@ -317,6 +348,7 @@ internal static class ManagedTerminalHost
                     terminalId,
                     cwd,
                     bridgeUrl,
+                    controlToken,
                     elevated,
                     runtime.Id,
                     ready: !powershell.HasExited,
@@ -600,6 +632,25 @@ internal static class ManagedTerminalHost
             }
         }
         return null;
+    }
+
+    private static string ReadControlToken(string bridgeRoot)
+    {
+        var tokenPath = Path.Combine(bridgeRoot, "data", "control-token.json");
+        var value = JsonSerializer.Deserialize<ControlTokenFile>(File.ReadAllText(tokenPath));
+        if (string.IsNullOrWhiteSpace(value?.Token) ||
+            value.Token.Length != 64 ||
+            value.Token.Any(character => !Uri.IsHexDigit(character)))
+        {
+            throw new InvalidOperationException("本机控制令牌缺失或格式无效。");
+        }
+        return value.Token;
+    }
+
+    private sealed class ControlTokenFile
+    {
+        [JsonPropertyName("token")]
+        public string Token { get; set; } = "";
     }
 
     [StructLayout(LayoutKind.Explicit, CharSet = CharSet.Unicode)]

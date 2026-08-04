@@ -5,6 +5,7 @@ import {
   findCodexAncestor,
   isProcessAlive,
   matchTrackedCodexProcessIds,
+  provisionalTrackedAssistantProcessIds,
   type ProcessSnapshot,
 } from "../src/process-tracking.js";
 
@@ -77,4 +78,26 @@ test("rejects exited, reused, and non-Codex tracked processes", () => {
   );
 
   assert.deepEqual([...matches], [10, 40, 50]);
+});
+
+test("cold process matching does not trust an old session whose PID was reused", () => {
+  const now = Date.parse("2026-08-04T05:40:00.000Z");
+  const matches = provisionalTrackedAssistantProcessIds(
+    [
+      {
+        processId: 27428,
+        startedAt: "2026-08-01T20:37:00.995188Z",
+        observedAt: "2026-08-01T20:37:07.887Z",
+      },
+      {
+        processId: 39364,
+        startedAt: "2026-08-04T05:39:45.000Z",
+        observedAt: "2026-08-04T05:39:50.000Z",
+      },
+    ],
+    now,
+    () => true,
+  );
+
+  assert.deepEqual([...matches], [39364]);
 });

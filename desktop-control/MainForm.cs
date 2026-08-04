@@ -1,10 +1,14 @@
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 
 namespace CodexFeishuControl;
 
 internal sealed partial class MainForm : Form
 {
+    private const int SwRestore = 9;
+    private const int IdaniCaption = 0x0003;
+
     private static readonly Color PageBackground = Color.FromArgb(244, 247, 251);
     private static readonly Color HeaderBackground = Color.FromArgb(15, 23, 42);
     private static readonly Color Primary = Color.FromArgb(37, 99, 235);
@@ -16,7 +20,7 @@ internal sealed partial class MainForm : Form
     private static readonly Color Border = Color.FromArgb(226, 232, 240);
 
     private readonly BridgeClient bridgeClient = new();
-    private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 30_000 };
+    private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 15_000 };
     private readonly CancellationTokenSource lifetime = new();
     private readonly Font gridBoldFont = new("Microsoft YaHei UI", 9F, FontStyle.Bold);
     private readonly EventWaitHandle activateEvent;
@@ -69,7 +73,7 @@ internal sealed partial class MainForm : Form
             AppLog.Info(
                 $"面板启动 bridgeRoot={bridgeClient.BridgeRoot} " +
                 $"port={bridgeClient.Port} " +
-                $"controlToken存在={File.Exists(Path.Combine(bridgeClient.BridgeRoot, "data", "control.token"))}");
+                $"controlToken存在={File.Exists(Path.Combine(bridgeClient.BridgeRoot, "data", "control-token.json"))}");
         }
         catch (Exception error)
         {
@@ -120,13 +124,6 @@ internal sealed partial class MainForm : Form
             {
                 eventArgs.Cancel = true;
                 HideToTray(showHint: true);
-            }
-        };
-        Resize += (_, _) =>
-        {
-            if (WindowState == FormWindowState.Minimized)
-            {
-                HideToTray(showHint: false);
             }
         };
         FormClosed += (_, _) =>
@@ -180,8 +177,14 @@ internal sealed partial class MainForm : Form
 
     private void HideToTray(bool showHint)
     {
-        ShowInTaskbar = false;
+        if (Visible && WindowState != FormWindowState.Minimized)
+        {
+            var source = NativeRectangle.From(Bounds);
+            var target = NativeRectangle.From(TrayAnimationTarget());
+            DrawAnimatedRects(Handle, IdaniCaption, ref source, ref target);
+        }
         Hide();
+        ShowInTaskbar = false;
         if (showHint && !trayHintShown)
         {
             trayHintShown = true;
@@ -191,6 +194,20 @@ internal sealed partial class MainForm : Form
                 "双击托盘图标可重新打开；右键选择“退出”才会完全关闭。",
                 ToolTipIcon.Info);
         }
+    }
+
+    private Rectangle TrayAnimationTarget()
+    {
+        var screen = Screen.PrimaryScreen ?? Screen.FromHandle(Handle);
+        var scale = Math.Max(1F, DeviceDpi / 96F);
+        var size = (int)Math.Round(16 * scale);
+        var horizontalInset = (int)Math.Round(18 * scale);
+        var verticalInset = (int)Math.Round(14 * scale);
+        return new Rectangle(
+            screen.Bounds.Right - horizontalInset - size,
+            screen.Bounds.Bottom - verticalInset - size,
+            size,
+            size);
     }
 
     private void RestoreFromTray()
@@ -222,8 +239,52 @@ internal sealed partial class MainForm : Form
         {
             Bounds = restoreBounds;
         }
-        BringToFront();
+        ShowWindow(Handle, SwRestore);
+        if (!SetForegroundWindow(Handle))
+        {
+            var wasTopMost = TopMost;
+            TopMost = true;
+            BringToFront();
+            TopMost = wasTopMost;
+        }
+        else
+        {
+            BringToFront();
+        }
         Activate();
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(IntPtr windowHandle, int command);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DrawAnimatedRects(
+        IntPtr windowHandle,
+        int animation,
+        ref NativeRectangle source,
+        ref NativeRectangle target);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRectangle
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+
+        public static NativeRectangle From(Rectangle rectangle) => new()
+        {
+            Left = rectangle.Left,
+            Top = rectangle.Top,
+            Right = rectangle.Right,
+            Bottom = rectangle.Bottom,
+        };
     }
 
     private Rectangle VisibleRestoreBounds()
@@ -568,19 +629,29 @@ internal sealed partial class MainForm : Form
         titlePanel.Controls.Add(retryGroupButton);
         titlePanel.Controls.Add(resumeSessionButton);
         titlePanel.Controls.Add(deleteHistoryButton);
-        titlePanel.Resize += (_, _) =>
+        void LayoutSessionActions()
         {
             folderButton.Left = titlePanel.ClientSize.Width - folderButton.Width - 2;
-            aliasButton.Left = folderButton.Left - aliasButton.Width - 8;
-            retryGroupButton.Left = aliasButton.Left - retryGroupButton.Width - 8;
-            deleteHistoryButton.Left =
-                folderButton.Left - deleteHistoryButton.Width - 8;
-            resumeSessionButton.Left =
-                deleteHistoryButton.Left - resumeSessionButton.Width - 8;
+            if (sessionTabs.SelectedIndex == 1)
+            {
+                deleteHistoryButton.Left =
+                    folderButton.Left - deleteHistoryButton.Width - 8;
+                resumeSessionButton.Left =
+                    deleteHistoryButton.Left - resumeSessionButton.Width - 8;
+                aliasButton.Left = resumeSessionButton.Left - aliasButton.Width - 8;
+            }
+            else
+            {
+                aliasButton.Left = folderButton.Left - aliasButton.Width - 8;
+                retryGroupButton.Left = aliasButton.Left - retryGroupButton.Width - 8;
+            }
             hint.Width = Math.Max(
                 160,
-                Math.Min(retryGroupButton.Left, resumeSessionButton.Left) - hint.Left - 12);
-        };
+                (sessionTabs.SelectedIndex == 1
+                    ? aliasButton.Left
+                    : retryGroupButton.Left) - hint.Left - 12);
+        }
+        titlePanel.Resize += (_, _) => LayoutSessionActions();
 
         ConfigureSessionGrid();
         ConfigureHistoryGrid();
@@ -601,7 +672,12 @@ internal sealed partial class MainForm : Form
         sessionTabs.Padding = new Point(18, 6);
         sessionTabs.Controls.Add(activePage);
         sessionTabs.Controls.Add(historyPage);
-        sessionTabs.SelectedIndexChanged += (_, _) => UpdateSessionActionState();
+        sessionTabs.SelectedIndexChanged += (_, _) =>
+        {
+            LayoutSessionActions();
+            UpdateSessionActionState();
+        };
+        LayoutSessionActions();
         card.Controls.Add(sessionTabs);
         card.Controls.Add(titlePanel);
         return card;
@@ -710,7 +786,10 @@ internal sealed partial class MainForm : Form
 
     private async Task EditSelectedAliasAsync()
     {
-        if (operating || sessionGrid.CurrentRow?.Tag is not CodexSession session)
+        var session = sessionTabs.SelectedIndex == 1
+            ? historyGrid.CurrentRow?.Tag as CodexSession
+            : sessionGrid.CurrentRow?.Tag as CodexSession;
+        if (operating || session is null)
         {
             return;
         }
@@ -908,7 +987,7 @@ internal sealed partial class MainForm : Form
         SetOperating(true, "正在启动桥接服务…");
         try
         {
-            await bridgeClient.StartAsync();
+            await bridgeClient.StartAsync(lifetime.Token);
             BridgeStatus? status = null;
             for (var attempt = 0; attempt < 20 && status is null; attempt++)
             {
@@ -941,7 +1020,7 @@ internal sealed partial class MainForm : Form
         SetOperating(true, "正在断开桥接服务…");
         try
         {
-            await bridgeClient.StopAsync();
+            await bridgeClient.StopAsync(lifetime.Token);
             var stopped = false;
             for (var attempt = 0; attempt < 20; attempt++)
             {
@@ -1324,13 +1403,16 @@ internal sealed partial class MainForm : Form
     private void UpdateSessionActionState()
     {
         var historySelected = sessionTabs.SelectedIndex == 1;
-        aliasButton.Visible = !historySelected;
+        aliasButton.Visible = true;
         retryGroupButton.Visible = !historySelected;
         folderButton.Visible = true;
         resumeSessionButton.Visible = historySelected;
         deleteHistoryButton.Visible = historySelected;
         aliasButton.Enabled =
-            !operating && !historySelected && sessionGrid.CurrentRow?.Tag is CodexSession;
+            !operating &&
+            (historySelected
+                ? historyGrid.CurrentRow?.Tag is CodexSession
+                : sessionGrid.CurrentRow?.Tag is CodexSession);
         retryGroupButton.Enabled =
             !operating &&
             !historySelected &&

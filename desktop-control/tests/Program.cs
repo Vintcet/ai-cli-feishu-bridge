@@ -180,11 +180,39 @@ public sealed class RuntimeAndTerminalTests
     }
 
     [TestMethod]
+    public void ManagedTerminalReadsLowercaseControlTokenField()
+    {
+        var bridgeRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"codex-feishu-control-token-{Guid.NewGuid():N}");
+        var dataDirectory = Path.Combine(bridgeRoot, "data");
+        var token = new string('a', 64);
+        Directory.CreateDirectory(dataDirectory);
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(dataDirectory, "control-token.json"),
+                JsonSerializer.Serialize(new { token }));
+            var readControlToken = typeof(ManagedTerminalHost).GetMethod(
+                "ReadControlToken",
+                System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Static);
+            Assert.IsNotNull(readControlToken);
+            Assert.AreEqual(token, readControlToken.Invoke(null, [bridgeRoot]));
+        }
+        finally
+        {
+            Directory.Delete(bridgeRoot, recursive: true);
+        }
+    }
+
+    [TestMethod]
     public void HealthAcceptsFractionalFeishuTimestamps()
     {
         const string json = """
             {
               "ok": true,
+              "processId": 4321,
               "activeSessions": 2,
               "feishu": {
                 "state": "connected",
@@ -200,6 +228,7 @@ public sealed class RuntimeAndTerminalTests
             """;
         var status = JsonSerializer.Deserialize<BridgeStatus>(json);
         Assert.IsNotNull(status);
+        Assert.AreEqual(4321, status.ProcessId);
         Assert.AreEqual(2, status.ActiveSessions);
         Assert.AreEqual(1785510446683.327, status.Feishu.NextConnectTime);
     }

@@ -1,5 +1,6 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { promisify } from "node:util";
 
 export interface ProcessSnapshot {
   processId: number;
@@ -11,15 +12,21 @@ export interface ProcessSnapshot {
 export interface ClientProcessMetadata {
   processId: number;
   startedAt?: string;
+  observedAt?: string;
 }
 
 interface ProcessMatchCache {
-  key: string;
   expiresAt: number;
+  lastUsedAt: number;
   processIds: Set<number>;
 }
 
-let processMatchCache: ProcessMatchCache | undefined;
+const execFileAsync = promisify(execFile);
+const processMatchCaches = new Map<string, ProcessMatchCache>();
+const processMatchRefreshes = new Map<string, Promise<void>>();
+const processMatchCacheTtlMs = 1_500;
+const processMatchCacheRetentionMs = 5 * 60_000;
+const provisionalObservationMaxAgeMs = 60_000;
 
 const trackedAssistantProcessPattern = /^(?:codex|claude)(?:\.exe)?$/i;
 
@@ -47,7 +54,7 @@ export function findCodexAncestor(
   return undefined;
 }
 
-export function captureCodexAncestor(): ClientProcessMetadata | undefined {
+export async function captureCodexAncestor(): Promise<ClientProcessMetadata | undefined> {
   if (process.platform !== "win32") {
     return undefined;
   }
@@ -68,7 +75,7 @@ export function captureCodexAncestor(): ClientProcessMetadata | undefined {
     "$items | ConvertTo-Json -Compress",
   ].join("\n");
   try {
-    const result = spawnSync(
+    const result = await execFileAsync(
       executable,
       ["-NoProfile", "-NonInteractive", "-Command", script],
       {
@@ -78,32 +85,10 @@ export function captureCodexAncestor(): ClientProcessMetadata | undefined {
         maxBuffer: 128 * 1024,
       },
     );
-    if (result.status !== 0 || !result.stdout.trim()) {
+    if (!result.stdout.trim()) {
       return undefined;
     }
-    const parsed: unknown = JSON.parse(result.stdout);
-    const values = Array.isArray(parsed) ? parsed : [parsed];
-    const snapshots = values.flatMap((value): ProcessSnapshot[] => {
-      if (!value || typeof value !== "object") {
-        return [];
-      }
-      const item = value as Record<string, unknown>;
-      if (
-        typeof item.processId !== "number" ||
-        !Number.isInteger(item.processId) ||
-        typeof item.parentProcessId !== "number" ||
-        !Number.isInteger(item.parentProcessId) ||
-        typeof item.name !== "string"
-      ) {
-        return [];
-      }
-      return [{
-        processId: Number(item.processId),
-        parentProcessId: Number(item.parentProcessId),
-        name: item.name,
-        startedAt: typeof item.startedAt === "string" ? item.startedAt : undefined,
-      }];
-    });
+    const snapshots = parseProcessSnapshots(result.stdout);
     return findCodexAncestor(process.pid, snapshots);
   } catch {
     return undefined;
@@ -179,13 +164,88 @@ export function captureLiveTrackedCodexProcessIds(
     .map((client) => `${client.processId}:${client.startedAt ?? ""}`)
     .join("|");
   const now = Date.now();
-  if (processMatchCache?.key === cacheKey && processMatchCache.expiresAt > now) {
-    return new Set(processMatchCache.processIds);
+  for (const [key, cached] of processMatchCaches) {
+    if (
+      key !== cacheKey &&
+      cached.lastUsedAt + processMatchCacheRetentionMs <= now &&
+      !processMatchRefreshes.has(key)
+    ) {
+      processMatchCaches.delete(key);
+    }
+  }
+  const cached = processMatchCaches.get(cacheKey);
+  if (cached) {
+    cached.lastUsedAt = now;
+    if (cached.expiresAt <= now) {
+      scheduleProcessMatchRefresh(cacheKey, uniqueClients);
+    }
+    return new Set(cached.processIds);
   }
 
+  const fallbackMatches = provisionalTrackedAssistantProcessIds(
+    uniqueClients,
+    now,
+  );
+  processMatchCaches.set(cacheKey, {
+    expiresAt: now + processMatchCacheTtlMs,
+    lastUsedAt: now,
+    processIds: new Set(fallbackMatches),
+  });
+  scheduleProcessMatchRefresh(cacheKey, uniqueClients);
+  return fallbackMatches;
+}
+
+function scheduleProcessMatchRefresh(
+  cacheKey: string,
+  clients: ClientProcessMetadata[],
+): void {
+  if (processMatchRefreshes.has(cacheKey)) {
+    return;
+  }
+  const refresh = inspectTrackedCodexProcessIds(clients)
+    .then((processIds) => {
+      const previous = processMatchCaches.get(cacheKey);
+      processMatchCaches.set(cacheKey, {
+        expiresAt: Date.now() + processMatchCacheTtlMs,
+        lastUsedAt: previous?.lastUsedAt ?? Date.now(),
+        processIds,
+      });
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      if (processMatchRefreshes.get(cacheKey) === refresh) {
+        processMatchRefreshes.delete(cacheKey);
+      }
+    });
+  processMatchRefreshes.set(cacheKey, refresh);
+}
+
+export function provisionalTrackedAssistantProcessIds(
+  clients: ClientProcessMetadata[],
+  now = Date.now(),
+  processAlive: (processId: number) => boolean = isProcessAlive,
+): Set<number> {
+  return new Set(
+    clients
+      .filter((client) => {
+        if (!processAlive(client.processId)) {
+          return false;
+        }
+        const observedAt = Date.parse(client.observedAt ?? client.startedAt ?? "");
+        return Number.isFinite(observedAt) &&
+          observedAt <= now + 1_000 &&
+          now - observedAt <= provisionalObservationMaxAgeMs;
+      })
+      .map((client) => client.processId),
+  );
+}
+
+async function inspectTrackedCodexProcessIds(
+  clients: ClientProcessMetadata[],
+): Promise<Set<number>> {
   const powerShell7 = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
   const executable = existsSync(powerShell7) ? powerShell7 : "powershell.exe";
-  const processIds = uniqueClients.map((client) => client.processId).join(",");
+  const processIds = clients.map((client) => client.processId).join(",");
   const script = [
     `$ids = @(${processIds})`,
     "$items = foreach ($processId in $ids) {",
@@ -199,55 +259,44 @@ export function captureLiveTrackedCodexProcessIds(
     "@($items) | ConvertTo-Json -Compress",
   ].join("\n");
 
-  let matches: Set<number>;
-  try {
-    const result = spawnSync(
-      executable,
-      ["-NoProfile", "-NonInteractive", "-Command", script],
-      {
-        encoding: "utf8",
-        timeout: 2_000,
-        windowsHide: true,
-        maxBuffer: 128 * 1024,
-      },
-    );
-    if (result.status !== 0 || !result.stdout.trim()) {
-      throw new Error("Could not inspect tracked processes.");
-    }
-    const parsed: unknown = JSON.parse(result.stdout);
-    const values = Array.isArray(parsed) ? parsed : [parsed];
-    const snapshots = values.flatMap((value): ProcessSnapshot[] => {
-      if (!value || typeof value !== "object") {
-        return [];
-      }
-      const item = value as Record<string, unknown>;
-      if (
-        typeof item.processId !== "number" ||
-        !Number.isSafeInteger(item.processId) ||
-        typeof item.name !== "string"
-      ) {
-        return [];
-      }
-      return [{
-        processId: item.processId,
-        parentProcessId: 0,
-        name: item.name,
-        startedAt: typeof item.startedAt === "string" ? item.startedAt : undefined,
-      }];
-    });
-    matches = matchTrackedCodexProcessIds(uniqueClients, snapshots);
-  } catch {
-    matches = new Set(
-      uniqueClients
-        .filter((client) => isProcessAlive(client.processId))
-        .map((client) => client.processId),
-    );
+  const result = await execFileAsync(
+    executable,
+    ["-NoProfile", "-NonInteractive", "-Command", script],
+    {
+      encoding: "utf8",
+      timeout: 2_000,
+      windowsHide: true,
+      maxBuffer: 128 * 1024,
+    },
+  );
+  if (!result.stdout.trim()) {
+    throw new Error("Could not inspect tracked processes.");
   }
+  return matchTrackedCodexProcessIds(clients, parseProcessSnapshots(result.stdout));
+}
 
-  processMatchCache = {
-    key: cacheKey,
-    expiresAt: now + 1_500,
-    processIds: new Set(matches),
-  };
-  return matches;
+function parseProcessSnapshots(text: string): ProcessSnapshot[] {
+  const parsed: unknown = JSON.parse(text);
+  const values = Array.isArray(parsed) ? parsed : [parsed];
+  return values.flatMap((value): ProcessSnapshot[] => {
+    if (!value || typeof value !== "object") {
+      return [];
+    }
+    const item = value as Record<string, unknown>;
+    if (
+      typeof item.processId !== "number" ||
+      !Number.isSafeInteger(item.processId) ||
+      typeof item.parentProcessId !== "number" ||
+      !Number.isSafeInteger(item.parentProcessId) ||
+      typeof item.name !== "string"
+    ) {
+      return [];
+    }
+    return [{
+      processId: item.processId,
+      parentProcessId: item.parentProcessId,
+      name: item.name,
+      startedAt: typeof item.startedAt === "string" ? item.startedAt : undefined,
+    }];
+  });
 }

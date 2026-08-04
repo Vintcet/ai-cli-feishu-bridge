@@ -51,6 +51,14 @@ export const bridgeConfig = {
   codexCommand: process.env.CODEX_COMMAND?.trim() || "codex",
   dataDirectory: path.join(projectRoot, "data"),
   approvalLogPath: path.join(projectRoot, "data", "approval-events.log"),
+  approvalLogMaxBytes: positiveInteger(
+    process.env.APPROVAL_LOG_MAX_BYTES,
+    5 * 1024 * 1024,
+  ),
+  approvalLogMaxBackups: positiveInteger(
+    process.env.APPROVAL_LOG_MAX_BACKUPS,
+    5,
+  ),
   uploadsDirectory: path.join(projectRoot, "data", "uploads"),
   inboundFileMaxBytes: positiveInteger(
     process.env.FEISHU_INBOUND_FILE_MAX_BYTES,
@@ -59,6 +67,14 @@ export const bridgeConfig = {
   inboundAttachmentMaxCount: positiveInteger(
     process.env.FEISHU_INBOUND_ATTACHMENT_MAX_COUNT,
     4,
+  ),
+  uploadMaxFiles: positiveInteger(
+    process.env.FEISHU_UPLOAD_MAX_FILES,
+    500,
+  ),
+  uploadMaxBytes: positiveInteger(
+    process.env.FEISHU_UPLOAD_MAX_BYTES,
+    1024 * 1024 * 1024,
   ),
   uploadTtlMs: positiveInteger(
     process.env.FEISHU_UPLOAD_TTL_MS,

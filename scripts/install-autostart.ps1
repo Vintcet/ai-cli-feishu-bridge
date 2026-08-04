@@ -4,13 +4,12 @@ param()
 $ErrorActionPreference = "Stop"
 $taskName = "CodexFeishuBridge"
 $projectDirectory = Split-Path -Parent $PSScriptRoot
-$runner = Join-Path $PSScriptRoot "run-bridge.ps1"
-$pwshExecutable = (Get-Command pwsh.exe -ErrorAction Stop).Source
+$controlExecutable = Join-Path $projectDirectory "Codex飞书助手.exe"
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
-$actionArguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$runner`""
+$actionArguments = "--bridge-service"
 $action = New-ScheduledTaskAction `
-    -Execute $pwshExecutable `
+    -Execute $controlExecutable `
     -Argument $actionArguments `
     -WorkingDirectory $projectDirectory
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser

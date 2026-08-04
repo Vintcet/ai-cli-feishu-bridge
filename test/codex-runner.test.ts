@@ -35,6 +35,7 @@ test("reserves a session before the child process finishes spawning", async () =
     assert.equal(runner.isRunning(session.sessionId), true);
     await exited;
     assert.equal(runner.isRunning(session.sessionId), false);
+    await runner.close();
   } finally {
     process.noDeprecation = previousNoDeprecation;
     await rm(directory, { recursive: true, force: true });

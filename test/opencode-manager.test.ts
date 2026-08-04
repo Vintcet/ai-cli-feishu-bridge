@@ -257,10 +257,38 @@ test("unregister closes the subscription and forgets its sessions", async () => 
   try {
     await manager.register(port, "C:/demo");
     await waitFor(() => manager.findInstanceBySession("session-alpha") !== undefined);
+    const internal = manager as unknown as {
+      sessionMetadata: Map<string, unknown>;
+    };
+    assert.equal(internal.sessionMetadata.has("session-alpha"), true);
     await manager.unregister(port);
     assert.equal(manager.getInstance(port), undefined);
     assert.equal(manager.findInstanceBySession("session-alpha"), undefined);
+    assert.equal(internal.sessionMetadata.has("session-alpha"), false);
   } finally {
+    await fake.close();
+  }
+});
+
+test("session deletion forgets metadata owned by that instance", async () => {
+  const fake = new FakeOpenCodeServer();
+  const port = await fake.listen();
+  const manager = new OpenCodeManager({
+    onInstanceConnected: () => {},
+    onInstanceDisconnected: () => {},
+    eventHandlers: {},
+  });
+  const internal = manager as unknown as {
+    sessionMetadata: Map<string, unknown>;
+  };
+  try {
+    await manager.register(port, "C:/demo");
+    await waitFor(() => internal.sessionMetadata.has("session-alpha"));
+    fake.sendSse("session.deleted", { sessionID: "session-alpha" });
+    await waitFor(() => !internal.sessionMetadata.has("session-alpha"));
+    assert.equal(manager.findInstanceBySession("session-alpha"), undefined);
+  } finally {
+    await manager.unregister(port);
     await fake.close();
   }
 });
@@ -432,6 +460,74 @@ test("re-registering a healthy port replaces its old event subscription", async 
     await waitFor(() => fake.activeSseClients === 1);
     await manager.register(port, "C:/demo");
     await waitFor(() => fake.sseConnectionCount >= 2 && fake.activeSseClients === 1);
+  } finally {
+    await manager.unregister(port);
+    await fake.close();
+  }
+});
+
+test("a dropped healthy subscription reconnects with backoff without reseeding", async () => {
+  const fake = new FakeOpenCodeServer();
+  fake.v2PermissionListStatus = 200;
+  fake.permissions = [{
+    id: "per_reconnect",
+    sessionID: "session-alpha",
+    action: "shell",
+  }];
+  fake.questions = [{
+    id: "que_reconnect",
+    sessionID: "session-alpha",
+    questions: [{
+      header: "方式",
+      question: "选择方式",
+      options: [{ label: "A", description: "选 A" }],
+    }],
+  }];
+  const port = await fake.listen();
+  const connected: number[] = [];
+  const created: string[] = [];
+  const permissions: string[] = [];
+  const questions: string[] = [];
+  const manager = new OpenCodeManager(
+    {
+      onInstanceConnected: (connectedPort) => connected.push(connectedPort),
+      onInstanceDisconnected: () => {},
+      eventHandlers: {
+        onSessionCreated: (session) => created.push(session.id),
+        onPermissionAsked: (permission) => permissions.push(permission.id),
+        onQuestionAsked: (question) => questions.push(question.id),
+      },
+    },
+    {
+      subscriptionRetryBaseMs: 80,
+      subscriptionRetryMaxMs: 200,
+      subscriptionStableMs: 1_000,
+    },
+  );
+  try {
+    await manager.register(port, "C:/demo");
+    await waitFor(
+      () =>
+        fake.activeSseClients === 1 &&
+        created.length === 1 &&
+        permissions.length === 1 &&
+        questions.length === 1,
+    );
+
+    const disconnectedAt = Date.now();
+    fake.closeSseClients();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(fake.sseConnectionCount, 1);
+    await waitFor(
+      () => fake.sseConnectionCount >= 2 && fake.activeSseClients === 1,
+    );
+    assert.ok(Date.now() - disconnectedAt >= 60);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.deepEqual(connected, [port]);
+    assert.deepEqual(created, ["session-alpha"]);
+    assert.deepEqual(permissions, ["per_reconnect"]);
+    assert.deepEqual(questions, ["que_reconnect"]);
   } finally {
     await manager.unregister(port);
     await fake.close();

@@ -99,6 +99,9 @@ export interface SessionRecord {
   lastTurnId?: string;
   lastAssistantMessage?: string;
   lastNotificationTurnId?: string;
+  lastNotificationStatus?: "pending" | "sent";
+  pendingNotificationKind?: "stop" | "error";
+  pendingNotificationMessage?: string;
   lastError?: string;
   source?: string;
   runtime?: RuntimeName;
@@ -145,6 +148,7 @@ export interface RouteStore {
 }
 
 export type ApprovalResolution = "allow" | "deny" | "local" | "timeout";
+export type ApprovalRiskLevel = "low" | "high";
 
 export interface ApprovalRecord {
   requestId: string;
@@ -160,6 +164,8 @@ export interface ApprovalRecord {
   resolvedAt?: string;
   messageIds: string[];
   requiresManualApproval?: boolean;
+  riskLevel?: ApprovalRiskLevel;
+  riskReason?: string;
   opencodePermissionId?: string;
 }
 

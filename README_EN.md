@@ -2,11 +2,19 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
-Current version: `0.17.3`
+Current version: `0.18.0`
 
 This is an unofficial Windows-local bridge that connects Codex CLI, Claude Code, and OpenCode sessions to your own Feishu custom app. Each assistant session can have a private Feishu group, so you can receive completion and error notifications, handle approval or follow-up prompts, and continue the original CLI conversation while away from the computer.
 
 The bridge service, session index, credentials, and settings stay on your computer. This project does not provide a cloud relay and does not bundle Codex CLI, Claude Code, OpenCode, or a Feishu app. You install and sign in to the CLI tools yourself and create your own Feishu custom app.
+
+## What's new in 0.18.0
+
+- All local HTTP control paths now use the persistent control token; anonymous health checks no longer expose pairing or session details, and cross-site or non-JSON writes are rejected.
+- Codex, Claude Code, and OpenCode share one low-risk automatic-approval policy, while high-risk operations still require a Feishu or local decision.
+- Aliases can be set, changed, or cleared directly from History without changing the session ID, Feishu group binding, or resume directory.
+- Long-running reliability fixes cover reused process IDs, cross-device approval state, attachment quotas, approval-log rotation, storage recovery, and OpenCode reconnect behavior.
+- The desktop executable manages Node.js directly and performs authenticated graceful shutdown. X collapses to the tray, minimize stays in the taskbar, and tray activation restores the window to the foreground.
 
 All three runtimes share the same session, routing, card, approval, and status management. Only the local transport to the CLI differs:
 
@@ -48,7 +56,7 @@ Main features:
 
 ## Get the desktop app and build it for the first time
 
-Windows users can download `codex-feishu-bridge-v0.17.3-windows-x64.zip` from [GitHub Releases](https://github.com/Vintcet/codex-feishu-bridge/releases). The archive includes the compiled bridge, production dependencies, and both desktop executables. Extract the complete archive instead of copying only the main executable. Before the first run, copy `.env.example` to `.env`, add your Feishu app settings, then launch `Codex飞书助手.exe` from the archive root.
+Windows users can download `codex-feishu-bridge-v0.18.0-windows-x64.zip` from [GitHub Releases](https://github.com/Vintcet/codex-feishu-bridge/releases). The archive includes the compiled bridge, production dependencies, and both desktop executables. Extract the complete archive instead of copying only the main executable. Before the first run, copy `.env.example` to `.env`, add your Feishu app settings, then launch `Codex飞书助手.exe` from the archive root.
 
 To build from source instead, run:
 
@@ -193,14 +201,14 @@ If you want a desktop entry, manually create a shortcut named `Codex飞书助手
 - History containing offline Codex/Claude Code sessions previously launched by the panel, plus the current conversations of OpenCode instances that were connected through a local port. Manually launched external Codex/Claude Code sessions are excluded.
 - One-click or double-click resume in the original directory and administrator mode.
 - Automatic recovery requests claimed when a message is sent to a closed session's Feishu group.
-- Alias management and Open Directory for the selected session.
+- Alias management from either Active Sessions or History without changing the original session or Feishu group binding, plus Open Directory for the selected session.
 - Settings for the default workspace, routine progress messages, mirroring local prompts, temporary-error retries, automatic approval, and optional automatic-approval audit cards.
 
-Closing or minimizing the window hides it in the system tray. Double-click the tray icon to restore it; only Exit from the tray menu terminates the panel process. Starting the EXE again brings the existing panel to the foreground. Exiting the panel still does not automatically stop an already running background bridge service.
+Clicking the window's X button uses a native collapse animation and hides the panel in the bottom-right system tray; ordinary minimize remains in the taskbar. Double-clicking the tray icon restores the window directly to the foreground, while only Exit from the tray menu terminates the panel process. Starting the EXE again also brings the existing panel forward. Exiting the panel still does not automatically stop an already running background bridge service.
 
 Temporary-error retry handles recognizable 400/408/409/429/5xx, high-demand, busy-service, and timeout failures that are safe to replay. Configure 1–20 retries per consecutive failure batch, a 1–600 second base delay, and 0–120 seconds of random jitter. Codex, Claude Code, and OpenCode ask the same session to retry its previous task. Any successful completion immediately resets the batch, so a later failure starts again at attempt 1 even when it happens moments later. Codex sampling failures may write `task_complete.error` without running the `Stop` hook, so the bridge polls each active transcript from its current end and processes only newly appended errors.
 
-Automatic approval uses the same semantics for Codex, Claude Code, and OpenCode permission requests delivered to the bridge. It is high risk and disabled by default; enabling it requires an additional local confirmation. A successful automatic approval is silent by default: no pending card, resolved card, or local dialog is shown. Enable the separate audit-card setting to send one resolved information card without action buttons. If automatic processing fails, the request remains pending and falls back to both an actionable Feishu card and the local approval dialog.
+Low-risk automatic approval uses the same risk rules for Codex, Claude Code, and OpenCode and is disabled by default. Requests involving deletion, destructive Git operations, dependency installation or publishing, network or cloud actions, permission or system changes, sensitive paths, or paths outside the project remain manual. Successful low-risk approvals are silent by default; enable the separate audit-card setting to send one resolved information card without action buttons. Failed or timed-out automatic processing falls back to manual or local confirmation and never silently allows the operation.
 
 ## Launch a synchronized Codex window
 
@@ -298,7 +306,7 @@ Codex and Claude Code hook scripts connect to `http://127.0.0.1:8765` by default
 
 ## Installation and startup
 
-Automatic Windows login startup is not currently installed. For normal use, run the desktop executable or your shortcut and click Connect. The root-level `启动Codex助手.vbs` and `停止Codex助手.vbs` control only the background bridge service; they do not open the desktop panel.
+Automatic Windows login startup is not currently installed. For normal use, run the desktop executable or your shortcut and click Connect. The desktop executable now starts Node.js directly and uses an authenticated local endpoint for graceful shutdown, without VBS or bridge lifecycle PowerShell wrappers. For automation without opening the panel, use `Codex飞书助手.exe --bridge-start` and `Codex飞书助手.exe --bridge-stop`.
 
 To run or debug only the Node.js bridge service:
 

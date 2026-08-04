@@ -10,7 +10,7 @@ import {
 
 try {
   const input = normalizeClaudeCodePayload(await readHookInput());
-  const enriched = addClientProcessMetadata(addManagedTerminalMetadata(input));
+  const enriched = await addClientProcessMetadata(addManagedTerminalMetadata(input));
   const result = await postHook("/hooks/stop", enriched, 20000);
   writeHookOutput(result);
 } catch (error) {

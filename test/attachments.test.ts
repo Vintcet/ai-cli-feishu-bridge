@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import {
   appendAttachmentsToPrompt,
+  LocalAttachmentStore,
   parseFeishuContent,
 } from "../src/attachments.js";
+import type { FeishuGateway } from "../src/feishu.js";
 import {
   extractBridgeFileDirectives,
   validateBridgeFile,
@@ -73,6 +75,71 @@ test("attachment paths are added to the Codex prompt", () => {
   assert.match(prompt, /用户要求：分析它/);
 });
 
+test("attachment filenames remain Windows-safe after truncation", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-attachments-"));
+  try {
+    const store = new LocalAttachmentStore(
+      directory,
+      1024,
+      4,
+      60_000,
+      10,
+      10 * 1024,
+    );
+    const [saved] = await store.download(
+      fakeAttachmentGateway(Buffer.from("test")),
+      "message-1",
+      [{
+        fileKey: "file-1",
+        fileName: `${"a".repeat(119)}.${"b".repeat(20)}`,
+        resourceType: "file",
+      }],
+    );
+
+    assert.ok(saved);
+    assert.ok(saved.fileName.length <= 120);
+    assert.doesNotMatch(saved.fileName, /[. ]$/u);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("attachment store enforces global file and byte limits", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-attachments-"));
+  const monthDirectory = path.join(directory, new Date().toISOString().slice(0, 7));
+  try {
+    await mkdir(monthDirectory, { recursive: true });
+    await writeFile(path.join(monthDirectory, "existing.bin"), "1234", "utf8");
+
+    let countDownloads = 0;
+    const countStore = new LocalAttachmentStore(directory, 1024, 4, 60_000, 1, 1024);
+    await assert.rejects(
+      countStore.download(
+        fakeAttachmentGateway(Buffer.from("x"), () => {
+          countDownloads += 1;
+        }),
+        "message-count",
+        [{ fileKey: "count", fileName: "count.bin", resourceType: "file" }],
+      ),
+      /最多保留 1 个文件/u,
+    );
+    assert.equal(countDownloads, 0);
+
+    const byteStore = new LocalAttachmentStore(directory, 1024, 4, 60_000, 10, 5);
+    await assert.rejects(
+      byteStore.download(
+        fakeAttachmentGateway(Buffer.from("12")),
+        "message-bytes",
+        [{ fileKey: "bytes", fileName: "bytes.bin", resourceType: "file" }],
+      ),
+      /总容量不能超过 5 B/u,
+    );
+    assert.deepEqual(await readdir(monthDirectory), ["existing.bin"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("file return directives are stripped and constrained to the project", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-files-"));
   const project = path.join(directory, "project");
@@ -97,3 +164,21 @@ test("file return directives are stripped and constrained to the project", async
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+function fakeAttachmentGateway(
+  data: Buffer,
+  onDownload?: () => void,
+): FeishuGateway {
+  return {
+    async downloadMessageResource(
+      _messageId: string,
+      _fileKey: string,
+      _resourceType: "image" | "file",
+      destinationPath: string,
+    ): Promise<number> {
+      onDownload?.();
+      await writeFile(destinationPath, data);
+      return data.length;
+    },
+  } as unknown as FeishuGateway;
+}

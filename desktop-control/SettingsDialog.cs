@@ -87,8 +87,8 @@ internal sealed class SettingsDialog : Form
         ConfigureRetryOptions(settings);
         ConfigureCheckBox(
             autoApproveBox,
-            "审批请求自动允许",
-            "高风险：助手请求权限时不再等待人工确认；默认不发送审批提醒。",
+            "低风险审批自动允许",
+            "未命中危险命令、敏感路径或外部副作用规则时自动允许；高风险请求仍需人工确认。",
             483,
             settings.AutoApprove);
         ConfigureCheckBox(
@@ -154,7 +154,7 @@ internal sealed class SettingsDialog : Form
         {
             var confirmation = MessageBox.Show(
                 this,
-                "开启后，助手的权限请求将直接允许，不再等待你确认。确定开启吗？",
+                "开启后，低风险权限请求会自动允许；高风险请求仍会等待你确认。确定开启吗？",
                 "确认开启自动审批",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning,

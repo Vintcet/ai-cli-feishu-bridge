@@ -2,6 +2,9 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import type { SessionRecord } from "./domain.js";
 
+const maxCapturedStderrChars = 64 * 1024;
+const stderrTruncationMarker = "\n...[stderr output truncated]...\n";
+
 export interface CodexExitResult {
   code: number | null;
   signal: NodeJS.Signals | null;
@@ -11,6 +14,7 @@ export interface CodexExitResult {
 export class CodexRunner {
   private readonly running = new Map<string, ChildProcessWithoutNullStreams>();
   private readonly starting = new Set<string>();
+  private readonly children = new Set<ChildProcessWithoutNullStreams>();
 
   constructor(private readonly command: string) {}
 
@@ -31,9 +35,10 @@ export class CodexRunner {
       throw new Error("这个会话已经在通过飞书继续运行，请等待本轮结束。");
     }
     this.starting.add(session.sessionId);
+    let child: ChildProcessWithoutNullStreams | undefined;
 
     try {
-      const child = spawn(
+      const spawnedChild = spawn(
         this.command,
         [
           "exec",
@@ -51,49 +56,104 @@ export class CodexRunner {
           windowsHide: true,
         },
       );
+      child = spawnedChild;
+      this.children.add(spawnedChild);
 
       let stderr = "";
       let spawned = false;
-      child.stdout.on("data", () => {
+      const appendStderr = (value: string): void => {
+        stderr = `${stderr}${value}`;
+        if (stderr.length > maxCapturedStderrChars) {
+          stderr = `${stderrTruncationMarker}${stderr.slice(
+            -(maxCapturedStderrChars - stderrTruncationMarker.length),
+          )}`;
+        }
+      };
+      const handleStdinError = (error: Error): void => {
+        appendStderr(`\nstdin: ${error.message}`);
+      };
+      spawnedChild.stdout.on("data", () => {
         // Drain JSONL output. Completion is delivered by the Stop hook instead.
       });
-      child.stderr.on("data", (chunk: Buffer | string) => {
-        stderr = `${stderr}${chunk.toString()}`;
+      spawnedChild.stderr.on("data", (chunk: Buffer | string) => {
+        appendStderr(chunk.toString());
       });
-      child.once("close", (code, signal) => {
+      spawnedChild.stdin.on("error", handleStdinError);
+      spawnedChild.once("close", (code, signal) => {
         this.starting.delete(session.sessionId);
         this.running.delete(session.sessionId);
+        this.children.delete(spawnedChild);
+        spawnedChild.stdin.off("error", handleStdinError);
         if (spawned) {
           void Promise.resolve(onExit({ code, signal, stderr })).catch((error) => {
             console.error("[resume] Exit handler failed:", error);
           });
         }
       });
-      child.once("error", (error) => {
-        stderr = `${stderr}\n${error.message}`;
+      spawnedChild.once("error", (error) => {
+        appendStderr(`\n${error.message}`);
       });
 
       await new Promise<void>((resolve, reject) => {
         const handleError = (error: Error): void => {
-          child.off("spawn", handleSpawn);
+          spawnedChild.off("spawn", handleSpawn);
           reject(error);
         };
         const handleSpawn = (): void => {
-          child.off("error", handleError);
+          spawnedChild.off("error", handleError);
           spawned = true;
-          this.running.set(session.sessionId, child);
+          this.running.set(session.sessionId, spawnedChild);
           this.starting.delete(session.sessionId);
           resolve();
         };
-        child.once("error", handleError);
-        child.once("spawn", handleSpawn);
+        spawnedChild.once("error", handleError);
+        spawnedChild.once("spawn", handleSpawn);
       });
 
-      child.stdin.end(prompt, "utf8");
+      spawnedChild.stdin.end(prompt, "utf8");
     } catch (error) {
       this.starting.delete(session.sessionId);
       this.running.delete(session.sessionId);
+      if (child) {
+        this.children.delete(child);
+      }
       throw error;
     }
+  }
+
+  async close(): Promise<void> {
+    const children = [...this.children];
+    this.children.clear();
+    this.running.clear();
+    this.starting.clear();
+    await Promise.allSettled(children.map((child) => this.terminateProcessTree(child)));
+  }
+
+  private async terminateProcessTree(child: ChildProcessWithoutNullStreams): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      return;
+    }
+    if (process.platform !== "win32" || child.pid === undefined) {
+      child.kill("SIGTERM");
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      const killer = spawn(
+        "taskkill",
+        ["/pid", String(child.pid), "/T", "/F"],
+        { stdio: "ignore", windowsHide: true },
+      );
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      killer.once("error", () => {
+        child.kill();
+        finish();
+      });
+      killer.once("close", finish);
+    });
   }
 }

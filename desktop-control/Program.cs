@@ -14,6 +14,18 @@ internal static class Program
         {
             return ManagedTerminalHost.Run(args);
         }
+        if (args.Contains("--bridge-start", StringComparer.OrdinalIgnoreCase))
+        {
+            return RunBridgeCommand(start: true);
+        }
+        if (args.Contains("--bridge-stop", StringComparer.OrdinalIgnoreCase))
+        {
+            return RunBridgeCommand(start: false);
+        }
+        if (args.Contains("--bridge-service", StringComparer.OrdinalIgnoreCase))
+        {
+            return RunBridgeService();
+        }
 
         var instanceScope = CurrentDesktopScope();
         var mutexName = $"CodexFeishuControl.SingleInstance.{instanceScope}";
@@ -36,6 +48,59 @@ internal static class Program
         mainForm.Show();
         Application.Run(mainForm);
         return 0;
+    }
+
+    private static int RunBridgeCommand(bool start)
+    {
+        try
+        {
+            using var bridgeClient = new BridgeClient();
+            AppLog.Initialize(Path.Combine(bridgeClient.BridgeRoot, "data"));
+            if (start)
+            {
+                bridgeClient.StartAsync().GetAwaiter().GetResult();
+                for (var attempt = 0; attempt < 25; attempt += 1)
+                {
+                    Thread.Sleep(400);
+                    if (bridgeClient.GetStatusAsync().GetAwaiter().GetResult() is not null)
+                    {
+                        return 0;
+                    }
+                }
+                throw new InvalidOperationException("桥接服务没有在预期时间内启动。");
+            }
+
+            bridgeClient.StopAsync().GetAwaiter().GetResult();
+            for (var attempt = 0; attempt < 25; attempt += 1)
+            {
+                if (bridgeClient.GetStatusAsync().GetAwaiter().GetResult() is null)
+                {
+                    return 0;
+                }
+                Thread.Sleep(200);
+            }
+            throw new InvalidOperationException("桥接服务没有在预期时间内停止。");
+        }
+        catch (Exception error)
+        {
+            AppLog.Error(start ? "命令行启动桥接失败" : "命令行停止桥接失败", error);
+            return 1;
+        }
+    }
+
+    private static int RunBridgeService()
+    {
+        try
+        {
+            using var bridgeClient = new BridgeClient();
+            AppLog.Initialize(Path.Combine(bridgeClient.BridgeRoot, "data"));
+            return bridgeClient.RunBridgeService();
+        }
+        catch (Exception error)
+        {
+            AppLog.Error("后台桥接宿主失败", error);
+            return 1;
+        }
     }
 
     private static string CurrentDesktopScope()

@@ -95,13 +95,18 @@ export class FeishuGateway {
     return this.messageIdFromResponse(response, "reply text");
   }
 
-  async sendCard(chatId: string, card: Card): Promise<string> {
+  async sendCard(
+    chatId: string,
+    card: Card,
+    idempotencyKey?: string,
+  ): Promise<string> {
     const response = await this.client.im.v1.message.create({
       params: { receive_id_type: "chat_id" },
       data: {
         receive_id: chatId,
         msg_type: "interactive",
         content: JSON.stringify(card),
+        ...(idempotencyKey ? { uuid: idempotencyKey } : {}),
       },
     });
     return this.messageIdFromResponse(response, "send card");

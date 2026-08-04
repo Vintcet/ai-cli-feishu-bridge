@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { OpenCodeClient } from "./opencode-client.js";
 import type {
   OpenCodeEventHandlers,
+  OpenCodePermission,
   OpenCodePermissionResponse,
   OpenCodeQuestionRequest,
   OpenCodeSession,
@@ -32,25 +33,42 @@ export interface OpenCodeManagerHandlers {
   eventHandlers: OpenCodeEventHandlers;
 }
 
+interface OpenCodeConnectOptions {
+  reconnecting?: boolean;
+  expectedClient?: OpenCodeClient;
+}
+
 export class OpenCodeManager {
   private readonly instances = new Map<number, OpenCodeInstance>();
   private readonly pendingPorts = new Set<number>();
   private readonly pendingSessionIds = new Map<number, string>();
   private readonly assistantLaunchPorts = new Set<number>();
   private readonly retryTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private readonly subscriptionRetryTimers = new Map<
+    number,
+    ReturnType<typeof setTimeout>
+  >();
+  private readonly subscriptionRetryAttempts = new Map<number, number>();
+  private readonly subscriptionConnectedAt = new Map<number, number>();
   private readonly sessionPorts = new Map<string, number>();
   private readonly foregroundSessions = new Map<number, string>();
   private readonly sessionMetadata = new Map<string, OpenCodeSession>();
+  private readonly pendingPermissionKeys = new Set<string>();
+  private readonly pendingQuestionKeys = new Set<string>();
   private readonly connectingPorts = new Set<number>();
   private readonly discoveryMisses = new Map<number, number>();
   private readonly basePort: number;
   private readonly maxPort: number;
   private readonly autoDiscover: boolean;
   private readonly scanIntervalMs: number;
+  private readonly subscriptionRetryBaseMs: number;
+  private readonly subscriptionRetryMaxMs: number;
+  private readonly subscriptionStableMs: number;
   private readonly enumerateLocalPorts: () => Promise<number[]>;
   private readonly isLocalPortAvailable: (port: number) => Promise<boolean>;
   private discoverTimer: ReturnType<typeof setTimeout> | undefined;
   private discoverRunning = false;
+  private discoveryActive = false;
 
   constructor(
     private readonly handlers: OpenCodeManagerHandlers,
@@ -59,6 +77,9 @@ export class OpenCodeManager {
       maxPort?: number;
       autoDiscover?: boolean;
       scanIntervalMs?: number;
+      subscriptionRetryBaseMs?: number;
+      subscriptionRetryMaxMs?: number;
+      subscriptionStableMs?: number;
       enumerateLocalPorts?: () => Promise<number[]>;
       isLocalPortAvailable?: (port: number) => Promise<boolean>;
     } = {},
@@ -67,6 +88,9 @@ export class OpenCodeManager {
     this.maxPort = options.maxPort ?? 5999;
     this.autoDiscover = options.autoDiscover ?? true;
     this.scanIntervalMs = options.scanIntervalMs ?? 20_000;
+    this.subscriptionRetryBaseMs = options.subscriptionRetryBaseMs ?? 1_000;
+    this.subscriptionRetryMaxMs = options.subscriptionRetryMaxMs ?? 30_000;
+    this.subscriptionStableMs = options.subscriptionStableMs ?? 30_000;
     this.enumerateLocalPorts = options.enumerateLocalPorts ?? defaultEnumerateLocalPorts;
     this.isLocalPortAvailable = options.isLocalPortAvailable ?? defaultIsLocalPortAvailable;
   }
@@ -113,6 +137,7 @@ export class OpenCodeManager {
 
   async register(port: number, cwd: string): Promise<void> {
     this.pendingPorts.add(port);
+    this.clearSubscriptionRetry(port, true);
     await this.connect(port, cwd);
   }
 
@@ -121,13 +146,14 @@ export class OpenCodeManager {
     if (instance) {
       instance.closeSubscription();
       this.instances.delete(port);
-      for (const [sessionId, sessionPort] of this.sessionPorts) {
-        if (sessionPort === port) {
-          this.sessionPorts.delete(sessionId);
-        }
-      }
-      this.foregroundSessions.delete(port);
     }
+    for (const [sessionId, sessionPort] of this.sessionPorts) {
+      if (sessionPort === port) {
+        this.sessionPorts.delete(sessionId);
+        this.sessionMetadata.delete(sessionId);
+      }
+    }
+    this.foregroundSessions.delete(port);
     this.pendingPorts.delete(port);
     this.pendingSessionIds.delete(port);
     this.assistantLaunchPorts.delete(port);
@@ -136,6 +162,10 @@ export class OpenCodeManager {
       clearTimeout(timer);
       this.retryTimers.delete(port);
     }
+    this.clearSubscriptionRetry(port, true);
+    this.subscriptionConnectedAt.delete(port);
+    this.clearPendingInteractionKeys(port);
+    this.discoveryMisses.delete(port);
     if (instance) {
       this.handlers.onInstanceDisconnected(port);
     }
@@ -201,11 +231,21 @@ export class OpenCodeManager {
     }
   }
 
-  private async connect(port: number, cwd: string): Promise<void> {
+  private async connect(
+    port: number,
+    cwd: string,
+    options: OpenCodeConnectOptions = {},
+  ): Promise<void> {
     const client = new OpenCodeClient(`http://127.0.0.1:${port}`, cwd);
     const healthy = await client.health();
     if (!healthy) {
       throw new Error(`opencode 端口 ${port} 未就绪`);
+    }
+    if (
+      options.expectedClient &&
+      this.instances.get(port)?.client !== options.expectedClient
+    ) {
+      return;
     }
     const wrappedHandlers: OpenCodeEventHandlers = {
       ...this.handlers.eventHandlers,
@@ -251,31 +291,33 @@ export class OpenCodeManager {
         this.handlers.eventHandlers.onMessagePartUpdated?.(properties);
       },
       onPermissionAsked: (permission) => {
-        if (permission.sessionID) {
-          this.rememberSession(port, permission.sessionID);
-        }
-        this.handlers.eventHandlers.onPermissionAsked?.(permission);
+        this.dispatchPermission(port, permission, "asked");
       },
       onPermissionUpdated: (permission) => {
-        if (permission.sessionID) {
-          this.rememberSession(port, permission.sessionID);
-        }
-        this.handlers.eventHandlers.onPermissionUpdated?.(permission);
+        this.dispatchPermission(port, permission, "updated");
       },
       onQuestionAsked: (request) => {
-        this.rememberSession(port, request.sessionID);
-        this.handlers.eventHandlers.onQuestionAsked?.(request);
+        this.dispatchQuestion(port, request);
       },
       onPermissionReplied: (reply) => {
         this.rememberSession(port, reply.sessionID);
+        this.pendingPermissionKeys.delete(
+          this.pendingInteractionKey(port, reply.requestID),
+        );
         this.handlers.eventHandlers.onPermissionReplied?.(reply);
       },
       onQuestionReplied: (reply) => {
         this.rememberSession(port, reply.sessionID);
+        this.pendingQuestionKeys.delete(
+          this.pendingInteractionKey(port, reply.requestID),
+        );
         this.handlers.eventHandlers.onQuestionReplied?.(reply);
       },
       onQuestionRejected: (rejection) => {
         this.rememberSession(port, rejection.sessionID);
+        this.pendingQuestionKeys.delete(
+          this.pendingInteractionKey(port, rejection.requestID),
+        );
         this.handlers.eventHandlers.onQuestionRejected?.(rejection);
       },
       onDisconnected: () => {
@@ -300,11 +342,17 @@ export class OpenCodeManager {
     const { close: closeSubscription } = client.subscribe(wrappedHandlers);
     instance.closeSubscription = closeSubscription;
     previous?.closeSubscription();
+    this.subscriptionConnectedAt.set(port, Date.now());
     this.pendingPorts.delete(port);
     this.pendingSessionIds.delete(port);
     this.assistantLaunchPorts.delete(port);
-    void this.bootstrapInstance(instance, pendingSessionId);
-    this.handlers.onInstanceConnected(port, cwd);
+    if (options.reconnecting) {
+      void this.seedPendingInteractions(instance);
+    } else {
+      this.clearSubscriptionRetry(port, true);
+      void this.bootstrapInstance(instance, pendingSessionId);
+      this.handlers.onInstanceConnected(port, cwd);
+    }
   }
 
   private async bootstrapInstance(
@@ -399,10 +447,7 @@ export class OpenCodeManager {
     if (permissionsResult.status === "fulfilled") {
       const permissions = permissionsResult.value;
       for (const permission of permissions) {
-        if (permission.sessionID) {
-          this.rememberSession(instance.port, permission.sessionID);
-        }
-        this.handlers.eventHandlers.onPermissionAsked?.(permission);
+        this.dispatchPermission(instance.port, permission, "asked");
       }
     } else {
       console.warn(
@@ -413,8 +458,7 @@ export class OpenCodeManager {
     if (questionsResult.status === "fulfilled") {
       const questions = questionsResult.value;
       for (const question of questions) {
-        this.rememberSession(instance.port, question.sessionID);
-        this.handlers.eventHandlers.onQuestionAsked?.(question);
+        this.dispatchQuestion(instance.port, question);
       }
     } else {
       console.warn(
@@ -424,13 +468,63 @@ export class OpenCodeManager {
     }
   }
 
+  private dispatchPermission(
+    port: number,
+    permission: OpenCodePermission,
+    event: "asked" | "updated",
+  ): void {
+    if (permission.sessionID) {
+      this.rememberSession(port, permission.sessionID);
+    }
+    const key = this.pendingInteractionKey(port, permission.id);
+    if (this.pendingPermissionKeys.has(key)) {
+      return;
+    }
+    this.pendingPermissionKeys.add(key);
+    if (event === "updated") {
+      this.handlers.eventHandlers.onPermissionUpdated?.(permission);
+    } else {
+      this.handlers.eventHandlers.onPermissionAsked?.(permission);
+    }
+  }
+
+  private dispatchQuestion(port: number, request: OpenCodeQuestionRequest): void {
+    this.rememberSession(port, request.sessionID);
+    const key = this.pendingInteractionKey(port, request.id);
+    if (this.pendingQuestionKeys.has(key)) {
+      return;
+    }
+    this.pendingQuestionKeys.add(key);
+    this.handlers.eventHandlers.onQuestionAsked?.(request);
+  }
+
+  private pendingInteractionKey(port: number, interactionId: string): string {
+    return `${port}:${interactionId}`;
+  }
+
+  private clearPendingInteractionKeys(port: number): void {
+    const prefix = `${port}:`;
+    for (const key of this.pendingPermissionKeys) {
+      if (key.startsWith(prefix)) {
+        this.pendingPermissionKeys.delete(key);
+      }
+    }
+    for (const key of this.pendingQuestionKeys) {
+      if (key.startsWith(prefix)) {
+        this.pendingQuestionKeys.delete(key);
+      }
+    }
+  }
+
   rememberSession(port: number, sessionId: string): void {
     this.sessionPorts.set(sessionId, port);
   }
 
   forgetSession(sessionId: string, port?: number): void {
-    if (port === undefined || this.sessionPorts.get(sessionId) === port) {
+    const ownsMapping = port === undefined || this.sessionPorts.get(sessionId) === port;
+    if (ownsMapping) {
       this.sessionPorts.delete(sessionId);
+      this.sessionMetadata.delete(sessionId);
     }
     for (const [activePort, activeSessionId] of this.foregroundSessions) {
       if (
@@ -439,9 +533,6 @@ export class OpenCodeManager {
       ) {
         this.foregroundSessions.delete(activePort);
       }
-    }
-    if (port === undefined) {
-      this.sessionMetadata.delete(sessionId);
     }
   }
 
@@ -496,6 +587,9 @@ export class OpenCodeManager {
       throw new Error("找不到对应的 opencode 实例");
     }
     await instance.client.replyPermission(sessionId, permissionId, response);
+    this.pendingPermissionKeys.delete(
+      this.pendingInteractionKey(instance.port, permissionId),
+    );
   }
 
   private async resolvePermissionInstance(
@@ -533,6 +627,9 @@ export class OpenCodeManager {
       throw new Error("找不到对应的 opencode 实例");
     }
     await instance.client.replyQuestion(requestId, answers);
+    this.pendingQuestionKeys.delete(
+      this.pendingInteractionKey(instance.port, requestId),
+    );
   }
 
   async rejectQuestion(sessionId: string, requestId: string): Promise<void> {
@@ -541,6 +638,9 @@ export class OpenCodeManager {
       throw new Error("找不到对应的 opencode 实例");
     }
     await instance.client.rejectQuestion(requestId);
+    this.pendingQuestionKeys.delete(
+      this.pendingInteractionKey(instance.port, requestId),
+    );
   }
 
   async listQuestions(sessionId: string): Promise<OpenCodeQuestionRequest[]> {
@@ -571,13 +671,24 @@ export class OpenCodeManager {
   }
 
   startAutoDiscovery(): void {
-    if (!this.autoDiscover || this.discoverTimer) {
+    if (!this.autoDiscover || this.discoveryActive) {
       return;
     }
+    this.discoveryActive = true;
     const schedule = (): void => {
+      if (!this.discoveryActive || this.discoverTimer) {
+        return;
+      }
       this.discoverTimer = setTimeout(() => {
         this.discoverTimer = undefined;
-        void this.runDiscoveryPass().finally(schedule);
+        if (!this.discoveryActive) {
+          return;
+        }
+        void this.runDiscoveryPass().finally(() => {
+          if (this.discoveryActive) {
+            schedule();
+          }
+        });
       }, this.scanIntervalMs);
       this.discoverTimer.unref?.();
     };
@@ -585,6 +696,7 @@ export class OpenCodeManager {
   }
 
   stopAutoDiscovery(): void {
+    this.discoveryActive = false;
     if (this.discoverTimer) {
       clearTimeout(this.discoverTimer);
       this.discoverTimer = undefined;
@@ -656,22 +768,65 @@ export class OpenCodeManager {
     if (!instance || instance.client !== disconnectedClient) {
       return;
     }
+    if (
+      this.connectingPorts.has(port) ||
+      this.subscriptionRetryTimers.has(port)
+    ) {
+      return;
+    }
+    const connectedAt = this.subscriptionConnectedAt.get(port) ?? Date.now();
+    if (Date.now() - connectedAt >= this.subscriptionStableMs) {
+      this.subscriptionRetryAttempts.delete(port);
+    }
+    const attempt = this.subscriptionRetryAttempts.get(port) ?? 0;
+    const delay = Math.min(
+      this.subscriptionRetryBaseMs * 2 ** Math.min(attempt, 20),
+      this.subscriptionRetryMaxMs,
+    );
+    this.subscriptionRetryAttempts.set(port, attempt + 1);
+    const timer = setTimeout(() => {
+      this.subscriptionRetryTimers.delete(port);
+      void this.reconnectSubscription(port, disconnectedClient);
+    }, delay);
+    timer.unref?.();
+    this.subscriptionRetryTimers.set(port, timer);
+  }
+
+  private async reconnectSubscription(
+    port: number,
+    disconnectedClient: OpenCodeClient,
+  ): Promise<void> {
+    const instance = this.instances.get(port);
+    if (!instance || instance.client !== disconnectedClient) {
+      return;
+    }
     if (this.connectingPorts.has(port)) {
       return;
     }
     this.connectingPorts.add(port);
     try {
-      const healthy = await instance.client.probeHealth();
-      if (healthy.healthy) {
-        await this.connect(port, instance.cwd);
-      } else {
+      await this.connect(port, instance.cwd, {
+        reconnecting: true,
+        expectedClient: disconnectedClient,
+      });
+    } catch {
+      if (this.instances.get(port)?.client === disconnectedClient) {
         console.warn(`[opencode] 端口 ${port} 订阅已断开且服务不可达，自动移除。`);
         await this.unregister(port);
       }
-    } catch {
-      await this.unregister(port);
     } finally {
       this.connectingPorts.delete(port);
+    }
+  }
+
+  private clearSubscriptionRetry(port: number, resetAttempts: boolean): void {
+    const timer = this.subscriptionRetryTimers.get(port);
+    if (timer) {
+      clearTimeout(timer);
+      this.subscriptionRetryTimers.delete(port);
+    }
+    if (resetAttempts) {
+      this.subscriptionRetryAttempts.delete(port);
     }
   }
 }

@@ -11,7 +11,7 @@ import {
 
 try {
   const input = normalizeClaudeCodePayload(await readHookInput());
-  const enriched = addClientProcessMetadata(addManagedTerminalMetadata(input));
+  const enriched = await addClientProcessMetadata(addManagedTerminalMetadata(input));
   const result = await postHook("/hooks/activity", compactActivityPayload(enriched), 5000);
   writeHookOutput(result);
 } catch (error) {

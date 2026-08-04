@@ -3,9 +3,20 @@ param()
 
 $ErrorActionPreference = "Stop"
 $taskName = "CodexFeishuBridge"
-$stopScript = Join-Path $PSScriptRoot "stop-bridge.ps1"
+$projectDirectory = Split-Path -Parent $PSScriptRoot
+$controlExecutable = Join-Path $projectDirectory "Codex飞书助手.exe"
 
-& $stopScript
+if (Test-Path -LiteralPath $controlExecutable) {
+    $stopProcess = Start-Process `
+        -FilePath $controlExecutable `
+        -ArgumentList "--bridge-stop" `
+        -WindowStyle Hidden `
+        -Wait `
+        -PassThru
+    if ($stopProcess.ExitCode -ne 0) {
+        Write-Warning "The bridge could not be stopped cleanly (exit code $($stopProcess.ExitCode))."
+    }
+}
 if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 }

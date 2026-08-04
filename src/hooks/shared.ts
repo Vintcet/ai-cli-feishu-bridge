@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import { captureCodexAncestor } from "../process-tracking.js";
 
 const defaultBridgeUrl = "http://127.0.0.1:8765";
@@ -152,7 +154,7 @@ export function addManagedTerminalMetadata(input: unknown): unknown {
   };
 }
 
-export function addClientProcessMetadata(input: unknown): unknown {
+export async function addClientProcessMetadata(input: unknown): Promise<unknown> {
   if (
     !input ||
     typeof input !== "object" ||
@@ -161,7 +163,7 @@ export function addClientProcessMetadata(input: unknown): unknown {
   ) {
     return input;
   }
-  const client = captureCodexAncestor();
+  const client = await captureCodexAncestor();
   if (!client) {
     return input;
   }
@@ -181,9 +183,13 @@ export async function postHook(
     /\/$/,
     "",
   );
+  const controlToken = await readControlToken();
   const response = await fetch(`${baseUrl}${pathname}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      "x-codex-feishu-control-token": controlToken,
+    },
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(timeoutMs),
   });
@@ -197,6 +203,22 @@ export async function postHook(
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+async function readControlToken(): Promise<string> {
+  const environmentToken = process.env.CODEX_FEISHU_CONTROL_TOKEN?.trim();
+  if (environmentToken && /^[a-f0-9]{64}$/i.test(environmentToken)) {
+    return environmentToken;
+  }
+  const text = await readFile(new URL("../../data/control-token.json", import.meta.url), "utf8");
+  const value: unknown = JSON.parse(text);
+  const token = value && typeof value === "object" && !Array.isArray(value)
+    ? (value as { token?: unknown }).token
+    : undefined;
+  if (typeof token !== "string" || !/^[a-f0-9]{64}$/i.test(token)) {
+    throw new Error("Bridge control token is missing or invalid.");
+  }
+  return token;
 }
 
 export function writeHookOutput(value: Record<string, unknown>): void {

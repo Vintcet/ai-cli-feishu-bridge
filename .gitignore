@@ -12,6 +12,7 @@ desktop-control/**/obj/
 desktop-control/publish/
 desktop-control/**/publish*/
 /publish/
+/release/
 desktop-control/ui-test*.png
 *.exe
 *.exe.bak-*

@@ -17,7 +17,8 @@ import {
 } from "./domain.js";
 
 export interface HookHttpHandlers {
-  health: () => Record<string, unknown>;
+  health: (includeLocalSecrets: boolean) => Record<string, unknown>;
+  shutdown: () => void;
   managedTerminalRegister: (payload: Record<string, unknown>) => Record<string, unknown>;
   managedTerminalUnregister: (
     payload: Record<string, unknown>,
@@ -90,12 +91,37 @@ async function routeRequest(
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
 
   if (method === "GET" && url.pathname === "/health") {
-    sendJson(response, 200, handlers.health());
+    // Unauthenticated callers get the same view minus the pairing code, which
+    // would otherwise let any local process claim the Feishu owner binding.
+    sendJson(response, 200, handlers.health(hasValidControlToken(request, controlToken)));
     return;
   }
 
   if (method !== "POST") {
     sendJson(response, 404, { error: "not_found" });
+    return;
+  }
+
+  // Requiring a JSON content type keeps write requests outside the CORS
+  // safelist, while Fetch Metadata rejects browser-originated variants before
+  // any body is parsed. The control token remains the authorization boundary
+  // for every state-changing endpoint, including hook callbacks.
+  if (!hasJsonContentType(request)) {
+    sendJson(response, 415, { ok: false, error: "请求必须使用 application/json。" });
+    return;
+  }
+  if (isCrossSiteRequest(request)) {
+    sendJson(response, 403, { ok: false, error: "拒绝跨站请求。" });
+    return;
+  }
+  if (!hasValidControlToken(request, controlToken)) {
+    sendJson(response, 401, { ok: false, error: "本机控制令牌无效。" });
+    return;
+  }
+
+  if (url.pathname === "/control/shutdown") {
+    response.once("finish", () => setImmediate(handlers.shutdown));
+    sendJson(response, 202, { ok: true });
     return;
   }
 
@@ -335,6 +361,24 @@ async function routeRequest(
   }
 
   sendJson(response, 404, { error: "not_found" });
+}
+
+function hasJsonContentType(request: IncomingMessage): boolean {
+  const header = request.headers["content-type"];
+  const value = (Array.isArray(header) ? header[0] : header) ?? "";
+  // Ignore charset and boundary parameters; only the media type matters here.
+  return value.split(";")[0]!.trim().toLowerCase() === "application/json";
+}
+
+/**
+ * Browsers attach Sec-Fetch-Site to every fetch/XHR. Local tooling (hook
+ * scripts, the desktop panel, curl) does not send it at all, so an absent
+ * header is treated as trusted while any cross-origin value is rejected.
+ */
+function isCrossSiteRequest(request: IncomingMessage): boolean {
+  const header = request.headers["sec-fetch-site"];
+  const value = (Array.isArray(header) ? header[0] : header) ?? "";
+  return value !== "" && value !== "same-origin" && value !== "none";
 }
 
 function hasValidControlToken(

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 
 import type {
@@ -106,11 +106,15 @@ export class BridgeStore {
   async init(): Promise<void> {
     await mkdir(this.dataDirectory, { recursive: true });
     const [bindings, sessions, routes, approvals, settings] = await Promise.all([
-      this.readJson(this.bindingFile, emptyBindings()),
-      this.readJson(this.sessionFile, emptySessions()),
-      this.readJson(this.routeFile, emptyRoutes()),
-      this.readJson(this.approvalFile, emptyApprovals()),
-      this.readJson(this.settingsFile, defaultSettings(this.defaultWorkspaceRoot)),
+      this.readJson(this.bindingFile, emptyBindings(), isBindingStoreValue),
+      this.readJson(this.sessionFile, emptySessions(), isSessionStoreValue),
+      this.readJson(this.routeFile, emptyRoutes(), isRouteStoreValue),
+      this.readJson(this.approvalFile, emptyApprovals(), isApprovalStoreValue),
+      this.readJson(
+        this.settingsFile,
+        defaultSettings(this.defaultWorkspaceRoot),
+        isPlainRecord,
+      ),
     ]);
     this.bindings = bindings;
     this.sessions = sessions;
@@ -187,6 +191,13 @@ export class BridgeStore {
       }
       if (session.managedTerminalId && session.managedByAssistant !== true) {
         session.managedByAssistant = true;
+        sessionsChanged = true;
+      } else if (
+        !session.managedTerminalId &&
+        session.clientProcessId &&
+        session.managedByAssistant === true
+      ) {
+        session.managedByAssistant = false;
         sessionsChanged = true;
       }
       if (
@@ -304,6 +315,7 @@ export class BridgeStore {
     const existing = await this.readJson<{ token?: unknown }>(
       this.controlTokenFile,
       {},
+      isPlainRecord,
     );
     if (
       typeof existing.token === "string" &&
@@ -402,6 +414,14 @@ export class BridgeStore {
       .sort((left, right) => Date.parse(left.lastSeenAt) - Date.parse(right.lastSeenAt));
   }
 
+  listPendingTurnNotifications(): SessionRecord[] {
+    return Object.values(this.sessions.sessions).filter(
+      (session) =>
+        session.lastNotificationStatus === "pending" &&
+        Boolean(session.lastNotificationTurnId),
+    );
+  }
+
   async upsertSession(input: {
     sessionId: string;
     alias?: string;
@@ -481,6 +501,9 @@ export class BridgeStore {
             ? current?.lastAssistantMessage
             : input.assistantMessage ?? undefined,
         lastNotificationTurnId: current?.lastNotificationTurnId,
+        lastNotificationStatus: current?.lastNotificationStatus,
+        pendingNotificationKind: current?.pendingNotificationKind,
+        pendingNotificationMessage: current?.pendingNotificationMessage,
         lastError: input.error ?? (input.status === "error" ? current?.lastError : undefined),
         source: input.source ?? current?.source,
         runtime: input.runtime ?? current?.runtime,
@@ -681,13 +704,59 @@ export class BridgeStore {
     });
   }
 
-  async markStopNotified(sessionId: string, turnId: string): Promise<void> {
-    await this.mutate(async () => {
+  async claimTurnNotification(
+    sessionId: string,
+    turnId: string,
+    kind: "stop" | "error" = "stop",
+    message = "",
+  ): Promise<boolean> {
+    return this.mutate(async () => {
       const session = this.sessions.sessions[sessionId];
       if (!session) {
-        return;
+        return false;
+      }
+      if (
+        session.lastNotificationTurnId === turnId &&
+        session.lastNotificationStatus !== "pending"
+      ) {
+        return false;
       }
       session.lastNotificationTurnId = turnId;
+      session.lastNotificationStatus = "pending";
+      session.pendingNotificationKind = kind;
+      session.pendingNotificationMessage = message;
+      await this.writeJson(this.sessionFile, this.sessions);
+      return true;
+    });
+  }
+
+  async completeTurnNotification(sessionId: string, turnId: string): Promise<void> {
+    await this.mutate(async () => {
+      const session = this.sessions.sessions[sessionId];
+      if (!session || session.lastNotificationTurnId !== turnId) {
+        return;
+      }
+      session.lastNotificationStatus = "sent";
+      delete session.pendingNotificationKind;
+      delete session.pendingNotificationMessage;
+      await this.writeJson(this.sessionFile, this.sessions);
+    });
+  }
+
+  async releaseTurnNotification(sessionId: string, turnId: string): Promise<void> {
+    await this.mutate(async () => {
+      const session = this.sessions.sessions[sessionId];
+      if (
+        !session ||
+        session.lastNotificationTurnId !== turnId ||
+        session.lastNotificationStatus !== "pending"
+      ) {
+        return;
+      }
+      delete session.lastNotificationTurnId;
+      delete session.lastNotificationStatus;
+      delete session.pendingNotificationKind;
+      delete session.pendingNotificationMessage;
       await this.writeJson(this.sessionFile, this.sessions);
     });
   }
@@ -695,8 +764,9 @@ export class BridgeStore {
   async addMessageRoute(route: MessageRoute): Promise<void> {
     await this.mutate(async () => {
       this.routes.messages[route.messageId] = route;
-      this.pruneInMemory(Date.now());
-      await this.writeJson(this.routeFile, this.routes);
+      const pruneChanges = this.pruneInMemory(Date.now());
+      this.schedulePersist(this.routeFile);
+      this.schedulePrunedFiles(pruneChanges);
     });
   }
 
@@ -706,8 +776,9 @@ export class BridgeStore {
         return false;
       }
       this.routes.processedInbound[messageId] = new Date().toISOString();
-      this.pruneInMemory(Date.now());
+      const pruneChanges = this.pruneInMemory(Date.now());
       await this.writeJson(this.routeFile, this.routes);
+      this.schedulePrunedFiles(pruneChanges, this.routeFile);
       return true;
     });
   }
@@ -746,7 +817,9 @@ export class BridgeStore {
   async createApproval(approval: ApprovalRecord): Promise<void> {
     await this.mutate(async () => {
       this.approvals.requests[approval.requestId] = approval;
-      await this.writeJson(this.approvalFile, this.approvals);
+      const pruneChanges = this.pruneInMemory(Date.now());
+      this.schedulePersist(this.approvalFile);
+      this.schedulePrunedFiles(pruneChanges);
     });
   }
 
@@ -757,7 +830,9 @@ export class BridgeStore {
         return;
       }
       approval.messageIds.push(messageId);
-      await this.writeJson(this.approvalFile, this.approvals);
+      const pruneChanges = this.pruneInMemory(Date.now());
+      this.schedulePersist(this.approvalFile);
+      this.schedulePrunedFiles(pruneChanges);
     });
   }
 
@@ -772,7 +847,9 @@ export class BridgeStore {
         return;
       }
       approval.requiresManualApproval = true;
-      await this.writeJson(this.approvalFile, this.approvals);
+      const pruneChanges = this.pruneInMemory(Date.now());
+      this.schedulePersist(this.approvalFile);
+      this.schedulePrunedFiles(pruneChanges);
     });
   }
 
@@ -788,7 +865,9 @@ export class BridgeStore {
       approval.status = "resolved";
       approval.resolution = resolution;
       approval.resolvedAt = new Date().toISOString();
-      await this.writeJson(this.approvalFile, this.approvals);
+      const pruneChanges = this.pruneInMemory(Date.now());
+      this.schedulePersist(this.approvalFile);
+      this.schedulePrunedFiles(pruneChanges);
       return approval;
     });
   }
@@ -815,7 +894,7 @@ export class BridgeStore {
     const approvalCutoff = now - 7 * 24 * 60 * 60 * 1000;
     for (const [requestId, approval] of Object.entries(this.approvals.requests)) {
       const referenceTime = approval.resolvedAt ?? approval.createdAt;
-      if (approval.status !== "pending" && Date.parse(referenceTime) < approvalCutoff) {
+      if (Date.parse(referenceTime) < approvalCutoff) {
         delete this.approvals.requests[requestId];
         approvalsChanged = true;
       }
@@ -823,23 +902,84 @@ export class BridgeStore {
     return { routesChanged, approvalsChanged };
   }
 
-  private async readJson<T>(filePath: string, fallback: T): Promise<T> {
+  private async readJson<T>(
+    filePath: string,
+    fallback: T,
+    validate: (value: unknown) => boolean,
+  ): Promise<T> {
+    let text: string;
     try {
-      return JSON.parse(await readFile(filePath, "utf8")) as T;
+      text = await readFile(filePath, "utf8");
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT") {
-        console.warn(`[store] Could not read ${path.basename(filePath)}; using defaults.`);
+      if (code === "ENOENT") {
+        return fallback;
       }
+      throw error;
+    }
+
+    try {
+      const value: unknown = JSON.parse(text);
+      if (!validate(value)) {
+        throw new Error("JSON structure does not match the expected store schema.");
+      }
+      return value as T;
+    } catch (error) {
+      const suffix = `${Date.now()}-${randomBytes(3).toString("hex")}`;
+      const quarantinePath = `${filePath}.corrupt-${suffix}`;
+      try {
+        await rename(filePath, quarantinePath);
+      } catch (quarantineError) {
+        throw new Error(
+          `Could not preserve corrupt ${path.basename(filePath)} before recovery.`,
+          { cause: quarantineError },
+        );
+      }
+      console.warn(
+        `[store] Preserved invalid ${path.basename(filePath)} as ${path.basename(quarantinePath)}; using defaults.`,
+      );
+      await this.writeJson(filePath, fallback);
       return fallback;
     }
   }
 
   private async writeJson(filePath: string, value: unknown): Promise<void> {
+    const trackedState = this.inMemoryState(filePath) !== undefined;
+    if (trackedState) {
+      this.dirtyFiles.add(filePath);
+    }
     await mkdir(this.dataDirectory, { recursive: true });
     const temporaryPath = `${filePath}.${process.pid}.tmp`;
-    await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, "utf8");
-    await rename(temporaryPath, filePath);
+    try {
+      const temporary = await open(temporaryPath, "w");
+      try {
+        await temporary.writeFile(`${JSON.stringify(value)}\n`, "utf8");
+        await temporary.sync();
+      } finally {
+        await temporary.close();
+      }
+      await rename(temporaryPath, filePath);
+      const committed = await open(filePath, "r+");
+      try {
+        await committed.sync();
+      } finally {
+        await committed.close();
+      }
+      if (process.platform !== "win32") {
+        const directory = await open(path.dirname(filePath), "r");
+        try {
+          await directory.sync();
+        } finally {
+          await directory.close();
+        }
+      }
+      if (trackedState) {
+        this.dirtyFiles.delete(filePath);
+      }
+    } catch (error) {
+      await rm(temporaryPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   private mutate<T>(operation: () => Promise<T>): Promise<T> {
@@ -868,6 +1008,18 @@ export class BridgeStore {
     this.flushTimer.unref?.();
   }
 
+  private schedulePrunedFiles(
+    changes: { routesChanged: boolean; approvalsChanged: boolean },
+    alreadyPersisted?: string,
+  ): void {
+    if (changes.routesChanged && alreadyPersisted !== this.routeFile) {
+      this.schedulePersist(this.routeFile);
+    }
+    if (changes.approvalsChanged && alreadyPersisted !== this.approvalFile) {
+      this.schedulePersist(this.approvalFile);
+    }
+  }
+
   /** 立即把待写文件全部落盘。适用于进程退出前的收尾和测试。 */
   async flushPending(): Promise<void> {
     if (this.flushTimer) {
@@ -880,13 +1032,13 @@ export class BridgeStore {
     const run = async (): Promise<void> => {
       while (this.dirtyFiles.size > 0) {
         const files = [...this.dirtyFiles];
-        this.dirtyFiles.clear();
         await this.mutate(async () => {
-          await Promise.all(
-            files.map((filePath) =>
-              this.writeJson(filePath, this.inMemoryState(filePath)),
-            ),
-          );
+          for (const filePath of files) {
+            if (!this.dirtyFiles.has(filePath)) {
+              continue;
+            }
+            await this.writeJson(filePath, this.inMemoryState(filePath));
+          }
         });
       }
     };
@@ -901,7 +1053,7 @@ export class BridgeStore {
     if (this.closePromise) {
       return this.closePromise;
     }
-    this.closePromise = (async () => {
+    const attempt = (async () => {
       if (this.safetyTimer) {
         clearInterval(this.safetyTimer);
         this.safetyTimer = undefined;
@@ -914,6 +1066,10 @@ export class BridgeStore {
       await this.flushPending();
       this.closed = true;
     })();
+    this.closePromise = attempt.catch((error) => {
+      this.closePromise = undefined;
+      throw error;
+    });
     return this.closePromise;
   }
 
@@ -944,7 +1100,6 @@ export class BridgeStore {
       const reference = session.endedAt ?? session.lastSeenAt;
       if (
         session.status === "ended" &&
-        !session.feishuChatId &&
         reference &&
         Date.parse(reference) < cutoff
       ) {
@@ -960,6 +1115,8 @@ export class BridgeStore {
       return;
     }
     this.safetyTimer = setInterval(() => {
+      const pruneChanges = this.pruneInMemory(Date.now());
+      this.schedulePrunedFiles(pruneChanges);
       if (this.pruneEndedSessions(Date.now())) {
         this.schedulePersist(this.sessionFile);
       }
@@ -969,6 +1126,89 @@ export class BridgeStore {
     }, 5_000);
     this.safetyTimer.unref?.();
   }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+function isBindingStoreValue(value: unknown): boolean {
+  if (!isPlainRecord(value) || !isPlainRecord(value.users)) {
+    return false;
+  }
+  if (!isOptionalString(value.ownerOpenId) || !isOptionalString(value.pairingCode)) {
+    return false;
+  }
+  return Object.values(value.users).every(
+    (binding) =>
+      isPlainRecord(binding) &&
+      typeof binding.openId === "string" &&
+      typeof binding.chatId === "string" &&
+      typeof binding.chatType === "string" &&
+      typeof binding.boundAt === "string",
+  );
+}
+
+function isSessionStoreValue(value: unknown): boolean {
+  if (!isPlainRecord(value) || !isPlainRecord(value.sessions)) {
+    return false;
+  }
+  return Object.values(value.sessions).every(
+    (session) =>
+      isPlainRecord(session) &&
+      typeof session.sessionId === "string" &&
+      typeof session.cwd === "string" &&
+      typeof session.status === "string" &&
+      typeof session.lastSeenAt === "string",
+  );
+}
+
+function isRouteStoreValue(value: unknown): boolean {
+  if (!isPlainRecord(value)) {
+    return false;
+  }
+  if (value.messages !== undefined && !isPlainRecord(value.messages)) {
+    return false;
+  }
+  if (value.processedInbound !== undefined && !isPlainRecord(value.processedInbound)) {
+    return false;
+  }
+  const messages = isPlainRecord(value.messages) ? value.messages : {};
+  const processedInbound = isPlainRecord(value.processedInbound) ? value.processedInbound : {};
+  return Object.values(messages).every(
+    (route) =>
+      isPlainRecord(route) &&
+      typeof route.messageId === "string" &&
+      typeof route.sessionId === "string" &&
+      typeof route.chatId === "string" &&
+      typeof route.kind === "string" &&
+      typeof route.createdAt === "string",
+  ) && Object.values(processedInbound).every((timestamp) => typeof timestamp === "string");
+}
+
+function isApprovalStoreValue(value: unknown): boolean {
+  if (!isPlainRecord(value) || !isPlainRecord(value.requests)) {
+    return false;
+  }
+  return Object.values(value.requests).every(
+    (approval) =>
+      isPlainRecord(approval) &&
+      typeof approval.requestId === "string" &&
+      typeof approval.sessionId === "string" &&
+      typeof approval.turnId === "string" &&
+      typeof approval.cwd === "string" &&
+      typeof approval.toolName === "string" &&
+      typeof approval.toolPreview === "string" &&
+      typeof approval.createdAt === "string" &&
+      typeof approval.expiresAt === "string" &&
+      typeof approval.status === "string" &&
+      Array.isArray(approval.messageIds) &&
+      approval.messageIds.every((messageId) => typeof messageId === "string"),
+  );
 }
 
 function createPairingCode(): string {

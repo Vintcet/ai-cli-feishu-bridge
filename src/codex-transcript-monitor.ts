@@ -18,13 +18,21 @@ interface WatchState {
   transcriptPath: string;
   offset: number;
   carry: Buffer;
+  fileIdentity?: string;
+  stopping?: boolean;
   scanning?: Promise<void>;
+}
+
+interface TranscriptFileSnapshot {
+  size: number;
+  identity?: string;
 }
 
 export class CodexTranscriptMonitor {
   private readonly watches = new Map<string, WatchState>();
   private timer: NodeJS.Timeout | undefined;
   private closed = false;
+  private closePromise: Promise<void> | undefined;
 
   constructor(
     private readonly onError: (event: CodexTranscriptErrorEvent) => Promise<void>,
@@ -42,21 +50,24 @@ export class CodexTranscriptMonitor {
     }
     const normalizedPath = path.resolve(transcriptPath);
     const current = this.watches.get(sessionId);
-    if (current?.transcriptPath === normalizedPath) {
+    if (current?.transcriptPath === normalizedPath && !current.stopping) {
       return true;
     }
 
-    const initialOffset = await stat(normalizedPath)
-      .then((value) => value.size)
-      .catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return 0;
+    const initialSnapshot = await stat(normalizedPath, { bigint: true })
+      .then((value): TranscriptFileSnapshot => ({
+        size: Number(value.size),
+        identity: transcriptFileIdentity(value.dev, value.ino, value.birthtimeMs),
+      }))
+      .catch((error: NodeJS.ErrnoException): TranscriptFileSnapshot | undefined => {
+        if (error.code === "ENOENT") return { size: 0 };
         console.warn(
           "[transcript] Could not watch " + path.basename(normalizedPath) + ":",
           error,
         );
         return undefined;
       });
-    if (initialOffset === undefined) {
+    if (initialSnapshot === undefined) {
       return false;
     }
     if (this.closed) {
@@ -65,8 +76,9 @@ export class CodexTranscriptMonitor {
     this.watches.set(sessionId, {
       sessionId,
       transcriptPath: normalizedPath,
-      offset: initialOffset,
+      offset: initialSnapshot.size,
       carry: Buffer.alloc(0),
+      fileIdentity: initialSnapshot.identity,
     });
     this.start();
     return true;
@@ -75,9 +87,8 @@ export class CodexTranscriptMonitor {
   async unwatch(sessionId: string): Promise<void> {
     const state = this.watches.get(sessionId);
     if (!state) return;
-    if (!this.closed) {
-      await this.scan(state);
-    }
+    state.stopping = true;
+    await this.scanAfterCurrent(state);
     if (this.watches.get(sessionId) !== state) {
       return;
     }
@@ -89,20 +100,30 @@ export class CodexTranscriptMonitor {
   }
 
   async checkNow(): Promise<void> {
-    await Promise.all([...this.watches.values()].map((state) => this.scan(state)));
+    await Promise.all(
+      [...this.watches.values()]
+        .filter((state) => !state.stopping)
+        .map((state) => this.scan(state)),
+    );
   }
 
-  async close(): Promise<void> {
-    if (this.closed) return;
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
     this.closed = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = undefined;
     }
-    await Promise.allSettled(
-      [...this.watches.values()].map((state) => this.scan(state)),
-    );
-    this.watches.clear();
+    const states = [...this.watches.values()];
+    states.forEach((state) => {
+      state.stopping = true;
+    });
+    this.closePromise = Promise.allSettled(
+      states.map((state) => this.scanAfterCurrent(state)),
+    ).then(() => {
+      this.watches.clear();
+    });
+    return this.closePromise;
   }
 
   private start(): void {
@@ -135,33 +156,51 @@ export class CodexTranscriptMonitor {
     return scanning;
   }
 
-  private async scanOnce(state: WatchState): Promise<void> {
-    const fileStat = await stat(state.transcriptPath);
-    if (fileStat.size < state.offset) {
-      state.offset = 0;
-      state.carry = Buffer.alloc(0);
+  private async scanAfterCurrent(state: WatchState): Promise<void> {
+    if (state.scanning) {
+      await state.scanning;
     }
-    if (fileStat.size === state.offset) {
-      return;
-    }
+    await this.scan(state);
+  }
 
-    let start = state.offset;
-    if (fileStat.size - start > maxReadBytes) {
-      start = fileStat.size - maxReadBytes;
-      state.carry = Buffer.alloc(0);
-    }
-    const length = fileStat.size - start;
+  private async scanOnce(state: WatchState): Promise<void> {
     const file = await open(state.transcriptPath, "r");
-    let chunk: Buffer;
     try {
+      const fileStat = await file.stat({ bigint: true });
+      const fileSize = Number(fileStat.size);
+      const identity = transcriptFileIdentity(
+        fileStat.dev,
+        fileStat.ino,
+        fileStat.birthtimeMs,
+      );
+      if (state.fileIdentity !== identity) {
+        state.fileIdentity = identity;
+        state.offset = 0;
+        state.carry = Buffer.alloc(0);
+      } else if (fileSize < state.offset) {
+        state.offset = 0;
+        state.carry = Buffer.alloc(0);
+      }
+      if (fileSize === state.offset) {
+        return;
+      }
+
+      let start = state.offset;
+      if (fileSize - start > maxReadBytes) {
+        start = fileSize - maxReadBytes;
+        state.carry = Buffer.alloc(0);
+      }
+      const length = fileSize - start;
       const buffer = Buffer.alloc(length);
       const { bytesRead } = await file.read(buffer, 0, length, start);
       state.offset = start + bytesRead;
-      chunk = buffer.subarray(0, bytesRead);
+      await this.processChunk(state, buffer.subarray(0, bytesRead));
     } finally {
       await file.close().catch(() => undefined);
     }
+  }
 
+  private async processChunk(state: WatchState, chunk: Buffer): Promise<void> {
     const content = state.carry.length > 0
       ? Buffer.concat([state.carry, chunk])
       : chunk;
@@ -197,4 +236,8 @@ export class CodexTranscriptMonitor {
       }
     }
   }
+}
+
+function transcriptFileIdentity(dev: bigint, ino: bigint, birthtimeMs: bigint): string {
+  return `${dev}:${ino}:${birthtimeMs}`;
 }

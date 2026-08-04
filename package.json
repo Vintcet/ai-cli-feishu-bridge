@@ -1,8 +1,8 @@
 {
   "name": "codex-feishu-bridge",
-  "version": "0.17.3",
+  "version": "0.18.0",
   "private": true,
-  "description": "A local Windows bridge connecting Codex CLI, Claude Code, and OpenCode sessions to Feishu.",
+  "description": "A Windows-local bridge for Feishu notifications, approvals, questions, and conversation control across Codex CLI, Claude Code, and OpenCode.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -20,7 +20,8 @@
     "format:check": "node scripts/check-format.mjs",
     "check": "npm run lint && npm run format:check",
     "test": "tsx --test --test-concurrency=1 test/**/*.test.ts",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "release:zip": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1"
   },
   "engines": {
     "node": ">=20"

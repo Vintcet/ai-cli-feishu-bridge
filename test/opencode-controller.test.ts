@@ -118,6 +118,8 @@ function controllerConfig(directory: string) {
     uploadsDirectory: path.join(directory, "uploads"),
     inboundFileMaxBytes: 1024 * 1024,
     inboundAttachmentMaxCount: 4,
+    uploadMaxFiles: 100,
+    uploadMaxBytes: 100 * 1024 * 1024,
     uploadTtlMs: 60_000,
     outboundFileMaxBytes: 1024 * 1024,
     retryBaseDelayMs: 10,
@@ -390,6 +392,40 @@ test("automatic OpenCode V2 approval is silent and uses the shared bridge settin
     assert.match(approval?.toolPreview ?? "", /npm test/);
     assert.equal(ctx.feishu.cards.length, cardsBefore);
     assert.equal(ctx.controller.health().pendingApprovals, 0);
+  } finally {
+    await ctx.opencode.unregister(ctx.port);
+    await ctx.fakeOpenCode.close();
+    await ctx.store.flushPending();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("high-risk OpenCode permission remains pending with automatic approval enabled", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-opencode-risk-"));
+  const ctx = await setup(directory);
+  try {
+    await waitFor(() => Boolean(ctx.store.getSession("session-alpha")?.feishuChatId));
+    await ctx.store.updateSettings({ autoApprove: true });
+    ctx.fakeOpenCode.v2PermissionReplyStatus = 204;
+    const cardsBefore = ctx.feishu.cards.length;
+
+    await ctx.controller.handleOpenCodePermissionUpdated({
+      id: "per_high_risk",
+      sessionID: "session-alpha",
+      action: "shell",
+      resources: ["rm -rf build"],
+      metadata: { command: "rm -rf build" },
+    });
+
+    const approval = ctx.store
+      .listApprovals()
+      .find((item) => item.opencodePermissionId === "per_high_risk");
+    assert.equal(approval?.status, "pending");
+    assert.equal(approval?.riskLevel, "high");
+    assert.equal(approval?.requiresManualApproval, true);
+    assert.equal(ctx.fakeOpenCode.permissionReplyResponses.per_high_risk, undefined);
+    assert.equal(ctx.feishu.cards.length, cardsBefore + 1);
+    assert.match(JSON.stringify(ctx.feishu.cards.at(-1)?.card), /高风险操作需要确认/);
   } finally {
     await ctx.opencode.unregister(ctx.port);
     await ctx.fakeOpenCode.close();

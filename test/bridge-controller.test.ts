@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { BridgeController } from "../src/bridge-controller.js";
 import type { CodexExitResult, CodexRunner } from "../src/codex-runner.js";
-import type { SessionRecord } from "../src/domain.js";
+import type { ApprovalRecord, SessionRecord } from "../src/domain.js";
 import type { FeishuGateway } from "../src/feishu.js";
 import { ManagedTerminalRouter } from "../src/managed-terminal.js";
 import type { OpenCodeManager } from "../src/opencode-manager.js";
@@ -25,7 +25,12 @@ class FakeFeishu {
   }> = [];
   readonly renamedGroups: Array<{ chatId: string; name: string }> = [];
   readonly deletedGroups: string[] = [];
+  readonly cardIdempotencyKeys: string[] = [];
+  readonly cardIdempotencyAttempts: string[] = [];
+  readonly failCardSendAttempts = new Set<number>();
+  private readonly idempotentCardMessages = new Map<string, string>();
   private counter = 0;
+  private cardSendAttempts = 0;
   createGroupError?: Error;
   deleteGroupError?: Error;
 
@@ -63,9 +68,30 @@ class FakeFeishu {
     this.deletedGroups.push(chatId);
   }
 
-  async sendCard(chatId: string, card: Record<string, unknown>): Promise<string> {
+  async sendCard(
+    chatId: string,
+    card: Record<string, unknown>,
+    idempotencyKey?: string,
+  ): Promise<string> {
+    if (idempotencyKey) {
+      this.cardIdempotencyAttempts.push(idempotencyKey);
+    }
+    const existingMessageId = idempotencyKey
+      ? this.idempotentCardMessages.get(idempotencyKey)
+      : undefined;
+    if (existingMessageId) {
+      return existingMessageId;
+    }
+    this.cardSendAttempts += 1;
+    if (this.failCardSendAttempts.has(this.cardSendAttempts)) {
+      throw new Error(`simulated card send failure ${this.cardSendAttempts}`);
+    }
     const messageId = `card-${++this.counter}`;
     this.cards.push({ chatId, card, messageId });
+    if (idempotencyKey) {
+      this.cardIdempotencyKeys.push(idempotencyKey);
+      this.idempotentCardMessages.set(idempotencyKey, messageId);
+    }
     return messageId;
   }
 
@@ -216,6 +242,8 @@ function controllerConfig(directory: string) {
     uploadsDirectory: path.join(directory, "uploads"),
     inboundFileMaxBytes: 1024 * 1024,
     inboundAttachmentMaxCount: 4,
+    uploadMaxFiles: 100,
+    uploadMaxBytes: 100 * 1024 * 1024,
     uploadTtlMs: 60_000,
     outboundFileMaxBytes: 1024 * 1024,
     retryBaseDelayMs: 10,
@@ -861,6 +889,100 @@ test("history removal hides only assistant-managed sessions", async () => {
   }
 });
 
+test("history aliases keep the same session and Feishu group binding", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-history-alias-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "ended",
+      managedByAssistant: true,
+    });
+    await store.setSessionFeishuChat(sessionId, {
+      chatId: "history-alias-chat",
+      chatName: "Codex｜old",
+    });
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+
+    const updated = await controller.handleSessionAliasUpdate({
+      sessionId,
+      alias: "归档会话",
+    });
+    assert.equal(updated.ok, true);
+    assert.equal(store.getSession(sessionId)?.alias, "归档会话");
+    assert.equal(store.getSession(sessionId)?.feishuChatId, "history-alias-chat");
+    assert.deepEqual(feishu.renamedGroups.at(-1), {
+      chatId: "history-alias-chat",
+      name: "Codex｜归档会话",
+    });
+
+    const cleared = await controller.handleSessionAliasUpdate({
+      sessionId,
+      alias: null,
+    });
+    assert.equal(cleared.ok, true);
+    assert.equal(store.getSession(sessionId)?.alias, undefined);
+    assert.equal(store.getSession(sessionId)?.feishuChatId, "history-alias-chat");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("visible history aliases reserve their names until hidden", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-alias-conflict-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const firstSessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const secondSessionId = "019faef0-d0bb-7703-af82-17ee9b45398c";
+    for (const sessionId of [firstSessionId, secondSessionId]) {
+      await store.upsertSession({
+        sessionId,
+        cwd: directory,
+        status: "ended",
+        managedByAssistant: true,
+      });
+    }
+    await store.setSessionAlias(secondSessionId, "保留名");
+    const controller = new BridgeController(
+      store,
+      new FakeFeishu() as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+
+    const conflict = await controller.handleSessionAliasUpdate({
+      sessionId: firstSessionId,
+      alias: "保留名",
+    });
+    assert.equal(conflict.ok, false);
+    assert.match(String(conflict.error), /已被会话/);
+
+    await controller.handleSessionHistoryHide({ sessionId: secondSessionId });
+    const reused = await controller.handleSessionAliasUpdate({
+      sessionId: firstSessionId,
+      alias: "保留名",
+    });
+    assert.equal(reused.ok, true);
+    assert.equal(store.getSession(firstSessionId)?.alias, "保留名");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("retry settings accept bounded integers and reject invalid values", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-settings-"));
   try {
@@ -980,6 +1102,12 @@ test("an external session rejects ordinary Feishu replies without a background r
       cwd: directory,
       status: "waiting",
       source: "resume",
+      clientProcessId: process.pid,
+      managedByAssistant: true,
+    });
+    await store.setSessionFeishuChat("019faef0-d0bb-7703-af82-17ee9b45397b", {
+      chatId: "external-session-chat",
+      chatName: "external session",
     });
     const feishu = new FakeFeishu();
     const codex = new FakeCodex();
@@ -993,19 +1121,27 @@ test("an external session rejects ordinary Feishu replies without a background r
     );
 
     await Promise.all([
-      controller.handleFeishuMessage(messageEvent("prompt-1", "owner", "第一条")),
-      controller.handleFeishuMessage(messageEvent("prompt-2", "owner", "第二条")),
+      controller.handleFeishuMessage(
+        groupMessageEvent("prompt-1", "owner", "external-session-chat", "第一条"),
+      ),
+      controller.handleFeishuMessage(
+        groupMessageEvent("prompt-2", "owner", "external-session-chat", "第二条"),
+      ),
     ]);
     assert.equal(codex.resumeCount, 0);
     assert.equal(codex.prompts.length, 0);
     assert.deepEqual(
       feishu.replies.map((item) => item.text),
       [
-        "Codex 未接收：外部会话不支持飞书输入。请回到原窗口继续。",
-        "Codex 未接收：外部会话不支持飞书输入。请回到原窗口继续。",
+        "Codex 未接收：这个窗口不是由 Codex 飞书助手打开，不能从飞书回复。请回到原窗口继续。",
+        "Codex 未接收：这个窗口不是由 Codex 飞书助手打开，不能从飞书回复。请回到原窗口继续。",
       ],
     );
     assert.equal(controller.health().queuedPrompts, 0);
+    assert.equal(
+      (controller.handleRuntimeLaunchClaim() as { request?: unknown }).request,
+      undefined,
+    );
     assert.equal(
       store.getSession("019faef0-d0bb-7703-af82-17ee9b45397b")?.status,
       "waiting",
@@ -1273,6 +1409,66 @@ test("an approval completed in Feishu is visible to the desktop and logs its sou
   }
 });
 
+test("approval audit logs rotate within the configured size and backup limit", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-approval-rotation-"));
+  const approvalLogPath = path.join(directory, "approval-events.log");
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const session = await store.upsertSession({
+      sessionId: "session-approval-log-rotation",
+      cwd: directory,
+      status: "waiting",
+    });
+    const controller = new BridgeController(
+      store,
+      new FakeFeishu() as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      {
+        ...controllerConfig(directory),
+        approvalLogPath,
+        approvalLogMaxBytes: 350,
+        approvalLogMaxBackups: 2,
+      },
+    );
+    const approval: ApprovalRecord = {
+      requestId: "approval-log-rotation",
+      sessionId: session.sessionId,
+      turnId: "turn-log-rotation",
+      cwd: directory,
+      toolName: "shell_command",
+      toolPreview: "npm test",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      status: "pending",
+      messageIds: [],
+    };
+    const internal = controller as unknown as {
+      logApprovalEvent: (
+        event: string,
+        session: SessionRecord,
+        approval: ApprovalRecord,
+        details?: Record<string, unknown>,
+      ) => void;
+    };
+    for (let index = 0; index < 10; index += 1) {
+      internal.logApprovalEvent(`rotation_${index}`, session, approval, {
+        payload: "x".repeat(160),
+      });
+    }
+    await controller.close();
+
+    assert.match(await readFile(approvalLogPath, "utf8"), /rotation_9/);
+    assert.match(await readFile(`${approvalLogPath}.1`, "utf8"), /rotation_8/);
+    assert.match(await readFile(`${approvalLogPath}.2`, "utf8"), /rotation_7/);
+    await assert.rejects(stat(`${approvalLogPath}.3`), { code: "ENOENT" });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("automatic Codex approval is silent by default and logs an automatic decision", async (t) => {
   const approvalLogs: string[] = [];
   t.mock.method(console, "log", (...args: unknown[]) => {
@@ -1363,6 +1559,97 @@ test("automatic Claude Code approval uses the same silent bridge flow", async ()
     assert.match(JSON.stringify(result), /"behavior":"allow"/);
     assert.equal(store.listApprovals()[0]?.resolution, "allow");
     assert.equal(feishu.cards.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("high-risk commands remain manual when automatic approval is enabled", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-risk-approval-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    await store.updateSettings({ autoApprove: true });
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+    const resultPromise = controller.handlePermissionHook({
+      hook_event_name: "PermissionRequest",
+      session_id: "claude-session-high-risk",
+      turn_id: "claude-turn-high-risk",
+      cwd: directory,
+      model: "claude-sonnet-4-5",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "rm -rf build" },
+      transcript_path: null,
+      runtime: "claudecode",
+    });
+    while (feishu.cards.length === 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const approval = store.listApprovals()[0];
+    assert.ok(approval);
+    assert.equal(approval.status, "pending");
+    assert.equal(approval.requiresManualApproval, true);
+    assert.equal(approval.riskLevel, "high");
+    assert.match(JSON.stringify(feishu.cards[0]?.card), /高风险操作需要确认/);
+
+    await controller.handleLocalApproval({
+      requestId: approval.requestId,
+      resolution: "allow",
+    });
+    const result = await resultPromise;
+    assert.match(JSON.stringify(result), /"behavior":"allow"/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("high-risk approval timeout returns control to the local runtime", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-risk-timeout-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    await store.updateSettings({ autoApprove: true });
+    const controller = new BridgeController(
+      store,
+      new FakeFeishu() as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      { ...controllerConfig(directory), approvalTimeoutMs: 30 },
+    );
+    const result = await controller.handlePermissionHook({
+      hook_event_name: "PermissionRequest",
+      session_id: "codex-session-high-risk-timeout",
+      turn_id: "codex-turn-high-risk-timeout",
+      cwd: directory,
+      model: "gpt-5",
+      permission_mode: "default",
+      tool_name: "shell_command",
+      tool_input: { command: "git push origin main" },
+      transcript_path: null,
+    });
+    assert.deepEqual(result, {});
+    const approval = store.listApprovals()[0];
+    assert.equal(approval?.riskLevel, "high");
+    assert.equal(approval?.resolution, "timeout");
+    assert.equal(store.getSession("codex-session-high-risk-timeout")?.status, "local_approval");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1582,6 +1869,87 @@ test("multiple request_user_input questions use separate clickable cards", async
   }
 });
 
+test("request_user_input falls back locally when any question has no delivered card", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-input-partial-send-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const sessionId = "codex-session-partial-input-cards";
+    await store.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "running",
+      runtime: "codex",
+      clientProcessId: process.pid,
+    });
+    const feishu = new FakeFeishu();
+    feishu.failCardSendAttempts.add(2);
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+
+    const result = await controller.handleRequestUserInputHook({
+      hook_event_name: "PreToolUse",
+      session_id: sessionId,
+      turn_id: "turn-partial-input-cards",
+      cwd: directory,
+      model: "gpt-5",
+      tool_name: "request_user_input",
+      tool_input: {
+        questions: [
+          {
+            header: "问题一",
+            id: "q1",
+            question: "选择一？",
+            options: [{ label: "一", description: "一" }],
+            custom: false,
+          },
+          {
+            header: "问题二",
+            id: "q2",
+            question: "选择二？",
+            options: [{ label: "二", description: "二" }],
+            custom: false,
+          },
+          {
+            header: "问题三",
+            id: "q3",
+            question: "选择三？",
+            options: [{ label: "三", description: "三" }],
+            custom: false,
+          },
+        ],
+      },
+    });
+
+    assert.deepEqual(result, {});
+    assert.equal(feishu.cards.length, 2);
+    assert.equal(controller.health().pendingInputs, 0);
+    for (let attempt = 0; attempt < 20 && feishu.patchedCards.length < 2; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(feishu.patchedCards.length, 2);
+    assert.ok(feishu.patchedCards.every((item) =>
+      JSON.stringify(item.card).includes("已转回电脑端")
+    ));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("multi-choice request_user_input cards toggle and submit selected options", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-input-multi-cards-"));
   try {
@@ -1662,6 +2030,192 @@ test("multi-choice request_user_input cards toggle and submit selected options",
     assert.match(JSON.stringify(hookResult), /代码/);
     assert.match(JSON.stringify(hookResult), /文档/);
     assert.equal(controller.health().pendingInputs, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("multi-recipient selections remain isolated per Feishu chat", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-input-recipients-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+    const internal = controller as unknown as {
+      notificationRecipients: () => Promise<Array<{ chatId: string }>>;
+    };
+    internal.notificationRecipients = async () => [
+      { chatId: "chat-recipient-a" },
+      { chatId: "chat-recipient-b" },
+    ];
+    const hookResultPromise = controller.handleRequestUserInputHook({
+      hook_event_name: "PreToolUse",
+      session_id: "codex-session-recipient-input",
+      turn_id: "turn-recipient-input",
+      cwd: directory,
+      model: "gpt-5",
+      tool_name: "request_user_input",
+      tool_input: {
+        questions: [{
+          header: "范围",
+          id: "scope",
+          question: "选择范围",
+          options: [
+            { label: "代码", description: "源代码" },
+            { label: "文档", description: "项目文档" },
+          ],
+          multiple: true,
+          custom: false,
+        }],
+      },
+    });
+    while (feishu.cards.length < 2) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const cardA = feishu.cards.find((item) => item.chatId === "chat-recipient-a");
+    const cardB = feishu.cards.find((item) => item.chatId === "chat-recipient-b");
+    assert.ok(cardA);
+    assert.ok(cardB);
+    const codeAction = findCardAction(cardA.card, "input_toggle", "代码");
+    const docsAction = findCardAction(cardB.card, "input_toggle", "文档");
+    const submitA = findCardAction(cardA.card, "input_submit");
+    assert.ok(codeAction);
+    assert.ok(docsAction);
+    assert.ok(submitA);
+
+    await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: { value: JSON.stringify(codeAction) },
+    });
+    await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: { value: JSON.stringify(docsAction) },
+    });
+    const latestA = feishu.patchedCards
+      .filter((item) => item.messageId === cardA.messageId)
+      .at(-1)?.card;
+    const latestB = feishu.patchedCards
+      .filter((item) => item.messageId === cardB.messageId)
+      .at(-1)?.card;
+    assert.match(JSON.stringify(latestA), /✓ 代码/);
+    assert.doesNotMatch(JSON.stringify(latestA), /✓ 文档/);
+    assert.match(JSON.stringify(latestB), /✓ 文档/);
+    assert.doesNotMatch(JSON.stringify(latestB), /✓ 代码/);
+
+    await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: { value: JSON.stringify(submitA) },
+    });
+    const hookResult = await hookResultPromise;
+    assert.match(JSON.stringify(hookResult), /代码/);
+    assert.doesNotMatch(JSON.stringify(hookResult), /文档/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failed final answer rolls every recorded question back to interactive", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-input-rollback-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+    const internal = controller as unknown as {
+      answerUserInput: () => Promise<boolean>;
+      inputWaiters: Map<string, { answers: Record<string, string[]> }>;
+    };
+    internal.answerUserInput = async () => false;
+    const hookResultPromise = controller.handleRequestUserInputHook({
+      hook_event_name: "PreToolUse",
+      session_id: "codex-session-input-rollback",
+      turn_id: "turn-input-rollback",
+      cwd: directory,
+      model: "gpt-5",
+      tool_name: "request_user_input",
+      tool_input: {
+        questions: [
+          {
+            header: "方式",
+            id: "mode",
+            question: "选择方式",
+            options: [{ label: "检查", description: "只检查" }],
+            custom: false,
+          },
+          {
+            header: "范围",
+            id: "scope",
+            question: "选择范围",
+            options: [{ label: "全部", description: "全部处理" }],
+            custom: false,
+          },
+        ],
+      },
+    });
+    while (feishu.cards.length < 2) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const firstAction = findCardAction(feishu.cards[0]!.card, "input_answer", "检查");
+    const secondAction = findCardAction(feishu.cards[1]!.card, "input_answer", "全部");
+    const localAction = findCardAction(feishu.cards[0]!.card, "input_local");
+    assert.ok(firstAction);
+    assert.ok(secondAction);
+    assert.ok(localAction);
+    await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: { value: JSON.stringify(firstAction) },
+    });
+    const failed = await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: { value: JSON.stringify(secondAction) },
+    });
+    assert.equal(failed.toast.type, "warning");
+    const waiter = [...internal.inputWaiters.values()][0];
+    assert.deepEqual(waiter?.answers, {});
+    for (const card of feishu.cards) {
+      const patched = feishu.patchedCards
+        .filter((item) => item.messageId === card.messageId)
+        .at(-1)?.card;
+      assert.ok(findCardAction(patched ?? {}, "input_answer"));
+      assert.doesNotMatch(JSON.stringify(patched), /已记录/);
+    }
+
+    await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      action: { value: JSON.stringify(localAction) },
+    });
+    assert.deepEqual(await hookResultPromise, {});
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -2080,6 +2634,94 @@ test("a transcript task error is notified even when Codex skips the Stop hook", 
   } finally {
     await controller?.close();
     await store?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a pending turn notification is recovered without creating a duplicate card", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-notification-recovery-"));
+  const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397d";
+  const turnId = "turn-notification-recovery";
+  const feishu = new FakeFeishu();
+  let firstController: BridgeController | undefined;
+  let recoveredController: BridgeController | undefined;
+  let firstStore: BridgeStore | undefined;
+  let recoveredStore: BridgeStore | undefined;
+  try {
+    firstStore = new BridgeStore(directory);
+    await firstStore.init();
+    const code = firstStore.getPairingCode();
+    assert.ok(code);
+    await firstStore.bindOwner({
+      openId: "owner",
+      chatId: "chat-owner",
+      chatType: "p2p",
+      boundAt: new Date().toISOString(),
+    }, code);
+    await firstStore.upsertSession({
+      sessionId,
+      cwd: directory,
+      status: "running",
+      runtime: "codex",
+    });
+    firstController = new BridgeController(
+      firstStore,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+    firstStore.completeTurnNotification = async () => {
+      throw new Error("simulated crash before notification completion persisted");
+    };
+
+    await assert.rejects(
+      firstController.handleStopHook({
+        hook_event_name: "Stop",
+        session_id: sessionId,
+        turn_id: turnId,
+        cwd: directory,
+        model: "gpt-5",
+        last_assistant_message: "处理完成。",
+        stop_hook_active: true,
+        transcript_path: null,
+        runtime: "codex",
+      }),
+      /simulated crash/u,
+    );
+    assert.equal(feishu.cards.length, 1);
+    assert.equal(firstStore.getSession(sessionId)?.lastNotificationStatus, "pending");
+
+    await firstController.close();
+    firstController = undefined;
+    await firstStore.close();
+    firstStore = undefined;
+
+    recoveredStore = new BridgeStore(directory);
+    await recoveredStore.init();
+    recoveredController = new BridgeController(
+      recoveredStore,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+    await recoveredController.initialize();
+
+    assert.equal(feishu.cards.length, 1);
+    assert.equal(recoveredStore.getSession(sessionId)?.lastNotificationStatus, "sent");
+    assert.equal(feishu.cardIdempotencyAttempts.length, 2);
+    assert.equal(
+      feishu.cardIdempotencyAttempts[0],
+      feishu.cardIdempotencyAttempts[1],
+    );
+  } finally {
+    await firstController?.close();
+    await recoveredController?.close();
+    await firstStore?.close();
+    await recoveredStore?.close();
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -2617,6 +3259,17 @@ test("resuming outside the helper clears stale managed-window metadata", async (
   try {
     const store = new BridgeStore(directory);
     await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      {
+        openId: "owner",
+        chatId: "chat-owner",
+        chatType: "p2p",
+        boundAt: new Date().toISOString(),
+      },
+      code,
+    );
     const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
     await store.upsertSession({
       sessionId,
@@ -2626,10 +3279,15 @@ test("resuming outside the helper clears stale managed-window metadata", async (
       managedTerminalId: "terminal888",
       managedTerminalElevated: true,
     });
+    await store.setSessionFeishuChat(sessionId, {
+      chatId: "external-session-chat",
+      chatName: "external session",
+    });
     await store.upsertSession({ sessionId, cwd: directory, status: "ended" });
+    const feishu = new FakeFeishu();
     const controller = new BridgeController(
       store,
-      new FakeFeishu() as unknown as FeishuGateway,
+      feishu as unknown as FeishuGateway,
       new FakeCodex() as unknown as CodexRunner,
       new ManagedTerminalRouter(),
       undefined,
@@ -2648,7 +3306,24 @@ test("resuming outside the helper clears stale managed-window metadata", async (
     const resumed = store.getSession(sessionId);
     assert.equal(resumed?.managedTerminalId, undefined);
     assert.equal(resumed?.managedTerminalElevated, undefined);
+    assert.equal(resumed?.managedByAssistant, false);
     assert.notEqual(resumed?.openedAt, "2020-01-01T00:00:00.000Z");
+    await controller.handleFeishuMessage(
+      groupMessageEvent(
+        "external-session-reply",
+        "owner",
+        "external-session-chat",
+        "继续完成剩余工作",
+      ),
+    );
+    assert.match(
+      feishu.replies.at(-1)?.text ?? "",
+      /不是由 Codex 飞书助手打开.*不能从飞书回复/,
+    );
+    assert.equal(
+      (controller.handleRuntimeLaunchClaim() as { request?: unknown }).request,
+      undefined,
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

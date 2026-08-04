@@ -381,6 +381,63 @@ test("user prompt is synthesized from message.updated plus its text part", async
   }
 });
 
+test("user message.updated with inline text is dispatched immediately", async () => {
+  const fake = new FakeOpenCodeServer();
+  const port = await fake.listen();
+  try {
+    const client = new OpenCodeClient(`http://127.0.0.1:${port}`);
+    const updated: string[] = [];
+    const subscription = client.subscribe({
+      onMessageUpdated: (message) => {
+        updated.push(message.parts?.[0]?.text ?? "");
+      },
+    });
+    await waitFor(() => fake.activeSseClients === 1);
+    fake.sendSse("message.updated", {
+      info: {
+        id: "msg-inline",
+        role: "user",
+        sessionID: "session-alpha",
+      },
+      parts: [{ type: "text", text: "内联提示" }],
+    });
+    await waitFor(() => updated.length === 1);
+    assert.deepEqual(updated, ["内联提示"]);
+    subscription.close();
+  } finally {
+    await fake.close();
+  }
+});
+
+test("pending user messages expire when no text part arrives", async () => {
+  const fake = new FakeOpenCodeServer();
+  const port = await fake.listen();
+  try {
+    const client = new OpenCodeClient(
+      `http://127.0.0.1:${port}`,
+      undefined,
+      { pendingUserMessageTtlMs: 30 },
+    );
+    const internal = client as unknown as {
+      pendingUserMessages: Map<string, unknown>;
+    };
+    const subscription = client.subscribe({});
+    await waitFor(() => fake.activeSseClients === 1);
+    fake.sendSse("message.updated", {
+      info: {
+        id: "msg-no-text",
+        role: "user",
+        sessionID: "session-alpha",
+      },
+    });
+    await waitFor(() => internal.pendingUserMessages.size === 1);
+    await waitFor(() => internal.pendingUserMessages.size === 0, 1_000);
+    subscription.close();
+  } finally {
+    await fake.close();
+  }
+});
+
 test("legacy event framing and CRLF framing still parse", async () => {
   const fake = new FakeOpenCodeServer();
   const port = await fake.listen();
@@ -400,3 +457,16 @@ test("legacy event framing and CRLF framing still parse", async () => {
     await fake.close();
   }
 });
+
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const started = Date.now();
+  while (!predicate()) {
+    if (Date.now() - started > timeoutMs) {
+      throw new Error("waitFor timed out");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}

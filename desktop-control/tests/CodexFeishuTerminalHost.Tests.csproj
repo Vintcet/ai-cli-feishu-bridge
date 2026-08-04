@@ -20,6 +20,7 @@
     <Compile Include="..\RuntimeProfile.cs" Link="RuntimeProfile.cs" />
     <Compile Include="..\RuntimeArgumentParser.cs" Link="RuntimeArgumentParser.cs" />
     <Compile Include="..\TerminalInputParser.cs" Link="TerminalInputParser.cs" />
+    <Compile Include="..\ManagedTerminalHost.cs" Link="ManagedTerminalHost.cs" />
     <Compile Include="..\Models.cs" Link="Models.cs" />
   </ItemGroup>
 </Project>

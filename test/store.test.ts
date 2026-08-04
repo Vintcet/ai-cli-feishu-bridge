@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -312,6 +312,44 @@ test("hides assistant history persistently without deleting the session", async 
   }
 });
 
+test("init repairs externally tracked sessions with stale assistant metadata", async () => {
+  const directory = await temporaryDirectory();
+  try {
+    const sessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const timestamp = "2026-01-01T00:00:00.000Z";
+    await writeFile(
+      path.join(directory, "sessions.json"),
+      JSON.stringify({
+        sessions: {
+          [sessionId]: {
+            sessionId,
+            shortId: "9b45397b",
+            cwd: directory,
+            projectName: "external",
+            status: "waiting",
+            openedAt: timestamp,
+            lastSeenAt: timestamp,
+            clientProcessId: process.pid,
+            managedByAssistant: true,
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const store = new BridgeStore(directory);
+    await store.init();
+    assert.equal(store.getSession(sessionId)?.managedByAssistant, false);
+
+    const persisted = JSON.parse(
+      await readFile(path.join(directory, "sessions.json"), "utf8"),
+    ) as { sessions: Record<string, { managedByAssistant?: boolean }> };
+    assert.equal(persisted.sessions[sessionId]?.managedByAssistant, false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("init repairs legacy hidden sessions that are already active", async () => {
   const directory = await temporaryDirectory();
   const store = new BridgeStore(directory);
@@ -491,11 +529,150 @@ test("prunes ended sessions older than the retention window", async () => {
     await store.init();
     assert.equal(store.getSession(oldId), undefined);
     assert.ok(store.getSession(freshId));
-    assert.equal(store.getSession(groupedOldId)?.feishuChatId, "old-session-chat");
+    assert.equal(store.getSession(groupedOldId), undefined);
     const persisted = JSON.parse(
       await readFile(path.join(directory, "sessions.json"), "utf8"),
     ) as { sessions: Record<string, unknown> };
-    assert.equal(Object.keys(persisted.sessions).length, 2);
+    assert.equal(Object.keys(persisted.sessions).length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("quarantines malformed stores and replaces them with valid defaults", async () => {
+  const directory = await temporaryDirectory();
+  try {
+    await writeFile(path.join(directory, "bindings.json"), "{not-json", "utf8");
+    await writeFile(path.join(directory, "sessions.json"), "null", "utf8");
+
+    const store = new BridgeStore(directory);
+    await store.init();
+    assert.ok(store.getPairingCode());
+    assert.deepEqual(store.listOpenSessions(), []);
+
+    const files = await readdir(directory);
+    assert.ok(files.some((name) => name.startsWith("bindings.json.corrupt-")));
+    assert.ok(files.some((name) => name.startsWith("sessions.json.corrupt-")));
+    const bindings = JSON.parse(
+      await readFile(path.join(directory, "bindings.json"), "utf8"),
+    ) as { users?: unknown; pairingCode?: unknown };
+    const sessions = JSON.parse(
+      await readFile(path.join(directory, "sessions.json"), "utf8"),
+    ) as { sessions?: unknown };
+    assert.equal(typeof bindings.users, "object");
+    assert.equal(typeof bindings.pairingCode, "string");
+    assert.equal(typeof sessions.sessions, "object");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("prunes stale pending and resolved approvals from memory and disk", async () => {
+  const directory = await temporaryDirectory();
+  try {
+    const store = new BridgeStore(directory, { persistDebounceMs: 10_000 });
+    await store.init();
+    const oldTimestamp = "2025-01-01T00:00:00.000Z";
+    for (const [requestId, status] of [
+      ["old-pending", "pending"],
+      ["old-resolved", "resolved"],
+    ] as const) {
+      await store.createApproval({
+        requestId,
+        sessionId: "approval-session",
+        turnId: `turn-${requestId}`,
+        cwd: directory,
+        toolName: "shell_command",
+        toolPreview: "echo test",
+        createdAt: oldTimestamp,
+        expiresAt: oldTimestamp,
+        status,
+        ...(status === "resolved"
+          ? { resolution: "allow" as const, resolvedAt: oldTimestamp }
+          : {}),
+        messageIds: [],
+      });
+    }
+    await store.flushPending();
+    assert.equal(store.getApproval("old-pending"), undefined);
+    assert.equal(store.getApproval("old-resolved"), undefined);
+    const persisted = JSON.parse(
+      await readFile(path.join(directory, "approvals.json"), "utf8"),
+    ) as { requests: Record<string, unknown> };
+    assert.deepEqual(persisted.requests, {});
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("turn notification claims are durable and recoverable", async () => {
+  const directory = await temporaryDirectory();
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    await store.upsertSession({
+      sessionId: "notification-session",
+      cwd: directory,
+      status: "waiting",
+    });
+
+    assert.equal(
+      await store.claimTurnNotification(
+        "notification-session",
+        "turn-1",
+        "error",
+        "temporary failure",
+      ),
+      true,
+    );
+    assert.equal(store.getSession("notification-session")?.lastNotificationStatus, "pending");
+    assert.equal(store.getSession("notification-session")?.pendingNotificationKind, "error");
+    assert.equal(
+      store.getSession("notification-session")?.pendingNotificationMessage,
+      "temporary failure",
+    );
+    assert.deepEqual(
+      store.listPendingTurnNotifications().map((session) => session.sessionId),
+      ["notification-session"],
+    );
+
+    await store.completeTurnNotification("notification-session", "turn-1");
+    assert.equal(store.getSession("notification-session")?.lastNotificationStatus, "sent");
+    assert.equal(
+      await store.claimTurnNotification("notification-session", "turn-1"),
+      false,
+    );
+
+    assert.equal(
+      await store.claimTurnNotification("notification-session", "turn-2"),
+      true,
+    );
+    await store.releaseTurnNotification("notification-session", "turn-2");
+    assert.equal(store.getSession("notification-session")?.lastNotificationTurnId, undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("retains dirty state and allows close to retry after a failed flush", async () => {
+  const directory = await temporaryDirectory();
+  const sessionFile = path.join(directory, "sessions.json");
+  try {
+    const store = new BridgeStore(directory, { persistDebounceMs: 10_000 });
+    await store.init();
+    await store.upsertSession({
+      sessionId: "retry-close-session",
+      cwd: directory,
+      status: "waiting",
+    });
+    await mkdir(sessionFile);
+    await assert.rejects(store.close());
+    await rm(sessionFile, { recursive: true, force: true });
+    await store.close();
+    const persisted = JSON.parse(await readFile(sessionFile, "utf8")) as {
+      sessions: Record<string, unknown>;
+    };
+    assert.ok(persisted.sessions["retry-close-session"]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

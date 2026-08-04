@@ -136,10 +136,14 @@ const controller = new BridgeController(store, feishu, codex, managedTerminals, 
   uploadsDirectory: bridgeConfig.uploadsDirectory,
   inboundFileMaxBytes: bridgeConfig.inboundFileMaxBytes,
   inboundAttachmentMaxCount: bridgeConfig.inboundAttachmentMaxCount,
+  uploadMaxFiles: bridgeConfig.uploadMaxFiles,
+  uploadMaxBytes: bridgeConfig.uploadMaxBytes,
   uploadTtlMs: bridgeConfig.uploadTtlMs,
   outboundFileMaxBytes: bridgeConfig.outboundFileMaxBytes,
   transcriptPollIntervalMs: bridgeConfig.transcriptPollIntervalMs,
   approvalLogPath: bridgeConfig.approvalLogPath,
+  approvalLogMaxBytes: bridgeConfig.approvalLogMaxBytes,
+  approvalLogMaxBackups: bridgeConfig.approvalLogMaxBackups,
 });
 
 opencode.startAutoDiscovery();
@@ -180,13 +184,14 @@ const hookServer = startHookHttpServer(
   bridgeConfig.httpHost,
   bridgeConfig.httpPort,
   {
-    health: () => ({
-      ...controller.health(),
+    health: (includeLocalSecrets) => ({
+      ...controller.health(includeLocalSecrets),
       version: bridgeVersion,
       processId: process.pid,
       startedAt: serviceStartedAt,
       feishu: wsClient.getConnectionStatus(),
     }),
+    shutdown: () => shutdown(),
     managedTerminalRegister: (payload) =>
       controller.handleManagedTerminalRegistration(payload),
     managedTerminalUnregister: (payload) =>
@@ -241,7 +246,7 @@ const shutdown = (): void => {
   opencode.stopAutoDiscovery();
   clearInterval(sessionGroupCleanupTimer);
   hookServer.close(() => {
-    void Promise.allSettled([controller.close(), store.close()])
+    void Promise.allSettled([controller.close(), codex.close(), store.close()])
       .finally(() => process.exit(0));
   });
 };

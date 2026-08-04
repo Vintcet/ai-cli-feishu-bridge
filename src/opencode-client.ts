@@ -373,7 +373,14 @@ function extractOpenCodeMessage(
   properties: Record<string, unknown>,
 ): OpenCodeMessage | undefined {
   if (isObject(properties.info)) {
-    return asOpenCodeMessage(properties.info);
+    const message = asOpenCodeMessage(properties.info);
+    if (message && Array.isArray(properties.parts)) {
+      return {
+        ...message,
+        parts: properties.parts as unknown as OpenCodeMessagePart[],
+      };
+    }
+    return message;
   }
   return asOpenCodeMessage(properties);
 }
@@ -412,12 +419,33 @@ function responseErrorMessage(
 }
 
 export class OpenCodeClient {
-  private readonly pendingUserMessages = new Map<string, string>();
+  private readonly pendingUserMessages = new Map<
+    string,
+    { sessionId: string; createdAt: number }
+  >();
+  private readonly pendingUserMessageTtlMs: number;
+  private readonly maxPendingUserMessages: number;
+  private pendingUserMessageCleanupTimer:
+    | ReturnType<typeof setTimeout>
+    | undefined;
 
   constructor(
     private readonly baseUrl: string,
     private readonly defaultDirectory?: string,
-  ) {}
+    options: {
+      pendingUserMessageTtlMs?: number;
+      maxPendingUserMessages?: number;
+    } = {},
+  ) {
+    this.pendingUserMessageTtlMs = Math.max(
+      1,
+      Math.trunc(options.pendingUserMessageTtlMs ?? 5 * 60_000),
+    );
+    this.maxPendingUserMessages = Math.max(
+      1,
+      Math.trunc(options.maxPendingUserMessages ?? 1_000),
+    );
+  }
 
   private url(path: string): string {
     return `${this.baseUrl}${path}`;
@@ -815,7 +843,7 @@ export class OpenCodeClient {
   subscribe(handlers: OpenCodeEventHandlers): { close: () => void } {
     const controller = new AbortController();
     const run = async (): Promise<void> => {
-      this.pendingUserMessages.clear();
+      this.clearPendingUserMessages();
       try {
         const response = await fetch(this.url(this.scopedPath("/event")), {
           signal: controller.signal,
@@ -833,11 +861,16 @@ export class OpenCodeClient {
           handlers.onDisconnected?.(error);
         }
       } finally {
-        this.pendingUserMessages.clear();
+        this.clearPendingUserMessages();
       }
     };
     void run();
-    return { close: () => controller.abort() };
+    return {
+      close: () => {
+        controller.abort();
+        this.clearPendingUserMessages();
+      },
+    };
   }
 
   private async consumeEventStream(
@@ -1029,7 +1062,15 @@ export class OpenCodeClient {
       return;
     }
     if (message.role === "user" && typeof message.id === "string") {
-      this.pendingUserMessages.set(message.id, message.sessionID ?? "");
+      if (
+        (message.parts ?? []).some(
+          (part) => part.type === "text" && typeof part.text === "string",
+        )
+      ) {
+        handlers.onMessageUpdated?.(message);
+        return;
+      }
+      this.rememberPendingUserMessage(message.id, message.sessionID ?? "");
       return;
     }
     handlers.onMessageUpdated?.(message);
@@ -1047,12 +1088,12 @@ export class OpenCodeClient {
       ? (properties.part as unknown as OpenCodeMessagePart)
       : undefined;
     if (part && part.type === "text" && typeof part.text === "string" && part.messageID) {
-      const pendingSessionId = this.pendingUserMessages.get(part.messageID);
-      if (pendingSessionId) {
-        this.pendingUserMessages.delete(part.messageID);
+      const pending = this.pendingUserMessages.get(part.messageID);
+      if (pending) {
+        this.deletePendingUserMessage(part.messageID);
         handlers.onMessageUpdated?.({
           id: part.messageID,
-          sessionID: pendingSessionId,
+          sessionID: pending.sessionId || sessionId || part.sessionID,
           role: "user",
           parts: [{ type: "text", text: part.text }],
         });
@@ -1063,6 +1104,77 @@ export class OpenCodeClient {
       messageID: messageID ?? part?.messageID,
       part,
     });
+  }
+
+  private rememberPendingUserMessage(messageId: string, sessionId: string): void {
+    const now = Date.now();
+    this.prunePendingUserMessages(now);
+    this.pendingUserMessages.delete(messageId);
+    while (this.pendingUserMessages.size >= this.maxPendingUserMessages) {
+      const oldest = this.pendingUserMessages.keys().next().value as
+        | string
+        | undefined;
+      if (!oldest) {
+        break;
+      }
+      this.pendingUserMessages.delete(oldest);
+    }
+    this.pendingUserMessages.set(messageId, { sessionId, createdAt: now });
+    this.schedulePendingUserMessageCleanup();
+  }
+
+  private deletePendingUserMessage(messageId: string): void {
+    this.pendingUserMessages.delete(messageId);
+    if (this.pendingUserMessages.size === 0) {
+      this.clearPendingUserMessageCleanupTimer();
+    }
+  }
+
+  private prunePendingUserMessages(now = Date.now()): void {
+    for (const [messageId, pending] of this.pendingUserMessages) {
+      if (now - pending.createdAt >= this.pendingUserMessageTtlMs) {
+        this.pendingUserMessages.delete(messageId);
+      }
+    }
+    if (this.pendingUserMessages.size === 0) {
+      this.clearPendingUserMessageCleanupTimer();
+    }
+  }
+
+  private schedulePendingUserMessageCleanup(): void {
+    if (
+      this.pendingUserMessageCleanupTimer ||
+      this.pendingUserMessages.size === 0
+    ) {
+      return;
+    }
+    let nextExpiry = Number.POSITIVE_INFINITY;
+    for (const pending of this.pendingUserMessages.values()) {
+      nextExpiry = Math.min(
+        nextExpiry,
+        pending.createdAt + this.pendingUserMessageTtlMs,
+      );
+    }
+    const delay = Math.max(1, nextExpiry - Date.now());
+    this.pendingUserMessageCleanupTimer = setTimeout(() => {
+      this.pendingUserMessageCleanupTimer = undefined;
+      this.prunePendingUserMessages();
+      this.schedulePendingUserMessageCleanup();
+    }, delay);
+    this.pendingUserMessageCleanupTimer.unref?.();
+  }
+
+  private clearPendingUserMessages(): void {
+    this.pendingUserMessages.clear();
+    this.clearPendingUserMessageCleanupTimer();
+  }
+
+  private clearPendingUserMessageCleanupTimer(): void {
+    if (!this.pendingUserMessageCleanupTimer) {
+      return;
+    }
+    clearTimeout(this.pendingUserMessageCleanupTimer);
+    this.pendingUserMessageCleanupTimer = undefined;
   }
 }
 

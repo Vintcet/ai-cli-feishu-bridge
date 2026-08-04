@@ -195,6 +195,37 @@ test("auto-discovery can be disabled via the option", async () => {
   }
 });
 
+test("stopping auto-discovery during a scan does not schedule another pass", async () => {
+  let scans = 0;
+  let releaseScan: (() => void) | undefined;
+  const scanGate = new Promise<void>((resolve) => {
+    releaseScan = resolve;
+  });
+  const manager = new OpenCodeManager(
+    {
+      onInstanceConnected: () => {},
+      onInstanceDisconnected: () => {},
+      eventHandlers: {},
+    },
+    {
+      autoDiscover: true,
+      scanIntervalMs: 10,
+      enumerateLocalPorts: async () => {
+        scans += 1;
+        await scanGate;
+        return [];
+      },
+    },
+  );
+
+  manager.startAutoDiscovery();
+  await waitFor(() => scans === 1);
+  manager.stopAutoDiscovery();
+  releaseScan?.();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(scans, 1);
+});
+
 async function waitFor(
   predicate: () => boolean,
   timeoutMs = 5_000,
