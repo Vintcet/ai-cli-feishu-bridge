@@ -318,14 +318,18 @@ test("opencode control endpoints require the persistent control token", async ()
 test("health returns only liveness data to unauthenticated callers", async () => {
   const token = "c".repeat(64);
   const custom = handlers();
-  custom.health = (includeLocalSecrets) => includeLocalSecrets
-    ? {
-        ok: true,
-        pairingCode: "SECRET1234",
-        bindingCommand: "绑定 SECRET1234",
-        activeSessions: 2,
-      }
-    : { ok: true };
+  const refreshCalls: boolean[] = [];
+  custom.health = (includeLocalSecrets, forceRefresh) => {
+    refreshCalls.push(forceRefresh);
+    return includeLocalSecrets
+      ? {
+          ok: true,
+          pairingCode: "SECRET1234",
+          bindingCommand: "绑定 SECRET1234",
+          activeSessions: 2,
+        }
+      : { ok: true };
+  };
   const server = startHookHttpServer("127.0.0.1", 0, custom, token);
   try {
     await new Promise<void>((resolve, reject) => {
@@ -336,7 +340,7 @@ test("health returns only liveness data to unauthenticated callers", async () =>
     assert.ok(address && typeof address === "object");
     const base = `http://127.0.0.1:${address.port}`;
 
-    const anonymous = await fetch(`${base}/health`);
+    const anonymous = await fetch(`${base}/health?refresh=1`);
     assert.equal(anonymous.status, 200);
     const anonymousBody = await anonymous.json() as {
       pairingCode?: string;
@@ -347,11 +351,12 @@ test("health returns only liveness data to unauthenticated callers", async () =>
     assert.equal(anonymousBody.bindingCommand, undefined);
     assert.equal(anonymousBody.activeSessions, undefined);
 
-    const authorized = await fetch(`${base}/health`, {
+    const authorized = await fetch(`${base}/health?refresh=1`, {
       headers: { "x-codex-feishu-control-token": token },
     });
     const authorizedBody = await authorized.json() as { pairingCode?: string };
     assert.equal(authorizedBody.pairingCode, "SECRET1234");
+    assert.deepEqual(refreshCalls, [false, true]);
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());

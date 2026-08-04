@@ -283,15 +283,18 @@ test("hides assistant history persistently without deleting the session", async 
     });
 
     assert.equal(store.listAssistantManagedSessions().length, 1);
+    assert.equal(store.listHistorySessions().length, 1);
     const hidden = await store.hideSessionFromHistory(sessionId);
     assert.ok(hidden?.historyHiddenAt);
     assert.equal(store.listAssistantManagedSessions().length, 0);
+    assert.equal(store.listHistorySessions().length, 0);
     assert.equal(store.getSession(sessionId)?.sessionId, sessionId);
     assert.equal(await store.hideSessionFromHistory("external-session"), undefined);
 
     reopened = new BridgeStore(directory);
     await reopened.init();
     assert.equal(reopened.listAssistantManagedSessions().length, 0);
+    assert.equal(reopened.listHistorySessions().length, 0);
     assert.ok(reopened.getSession(sessionId)?.historyHiddenAt);
     await reopened.upsertSession({
       sessionId,
@@ -299,6 +302,7 @@ test("hides assistant history persistently without deleting the session", async 
       status: "running",
     });
     assert.equal(reopened.listAssistantManagedSessions().length, 1);
+    assert.equal(reopened.listHistorySessions().length, 1);
     assert.equal(reopened.getSession(sessionId)?.historyHiddenAt, undefined);
     await reopened.upsertSession({
       sessionId,
@@ -306,6 +310,7 @@ test("hides assistant history persistently without deleting the session", async 
       status: "ended",
     });
     assert.equal(reopened.listAssistantManagedSessions().length, 1);
+    assert.equal(reopened.listHistorySessions().length, 1);
   } finally {
     await Promise.allSettled([store?.close(), reopened?.close()]);
     await rm(directory, { recursive: true, force: true });
@@ -340,11 +345,19 @@ test("init repairs externally tracked sessions with stale assistant metadata", a
     const store = new BridgeStore(directory);
     await store.init();
     assert.equal(store.getSession(sessionId)?.managedByAssistant, false);
+    assert.equal(store.getSession(sessionId)?.historyEligible, true);
+    assert.equal(store.listHistorySessions().length, 1);
 
     const persisted = JSON.parse(
       await readFile(path.join(directory, "sessions.json"), "utf8"),
-    ) as { sessions: Record<string, { managedByAssistant?: boolean }> };
+    ) as {
+      sessions: Record<
+        string,
+        { managedByAssistant?: boolean; historyEligible?: boolean }
+      >;
+    };
     assert.equal(persisted.sessions[sessionId]?.managedByAssistant, false);
+    assert.equal(persisted.sessions[sessionId]?.historyEligible, true);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -440,6 +453,55 @@ test("moves a managed placeholder's Feishu group to the real session", async () 
       "oc_session_group",
     );
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("assigns stable Feishu group ordinals per runtime and project name", async () => {
+  const directory = await temporaryDirectory();
+  let store: BridgeStore | undefined;
+  let reopened: BridgeStore | undefined;
+  try {
+    store = new BridgeStore(directory);
+    await store.init();
+    await store.upsertSession({
+      sessionId: "ordinal-first",
+      cwd: directory,
+      status: "waiting",
+      runtime: "codex",
+      openedAt: "2026-08-04T01:00:00.000Z",
+      managedByAssistant: true,
+    });
+    await store.upsertSession({
+      sessionId: "ordinal-second",
+      cwd: directory,
+      status: "waiting",
+      runtime: "codex",
+      openedAt: "2026-08-04T02:00:00.000Z",
+      managedByAssistant: true,
+    });
+    await store.upsertSession({
+      sessionId: "ordinal-claude",
+      cwd: directory,
+      status: "waiting",
+      runtime: "claudecode",
+      openedAt: "2026-08-04T03:00:00.000Z",
+      managedByAssistant: true,
+    });
+
+    await store.ensureSessionFeishuChatOrdinal("ordinal-second");
+    await store.ensureSessionFeishuChatOrdinal("ordinal-claude");
+    assert.equal(store.getSession("ordinal-first")?.feishuChatOrdinal, 1);
+    assert.equal(store.getSession("ordinal-second")?.feishuChatOrdinal, 2);
+    assert.equal(store.getSession("ordinal-claude")?.feishuChatOrdinal, 1);
+
+    await store.close();
+    store = undefined;
+    reopened = new BridgeStore(directory);
+    await reopened.init();
+    assert.equal(reopened.getSession("ordinal-second")?.feishuChatOrdinal, 2);
+  } finally {
+    await Promise.allSettled([store?.close(), reopened?.close()]);
     await rm(directory, { recursive: true, force: true });
   }
 });

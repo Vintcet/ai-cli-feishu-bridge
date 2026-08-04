@@ -18,6 +18,7 @@ import { aliasCommandUsage, type AliasCommand } from "./message-command-parser.j
 import { OpenCodeManager } from "./opencode-manager.js";
 import {
   captureLiveTrackedCodexProcessIds,
+  refreshLiveTrackedCodexProcessIds,
   type ClientProcessMetadata,
 } from "./process-tracking.js";
 import { SessionGroupCoordinator } from "./session-group-coordinator.js";
@@ -38,6 +39,9 @@ interface SessionDirectoryDependencies {
   liveClientProcessIds?: (
     clients: ClientProcessMetadata[],
   ) => ReadonlySet<number>;
+  refreshLiveClientProcessIds?: (
+    clients: ClientProcessMetadata[],
+  ) => Promise<ReadonlySet<number>>;
   queuedPromptCount: (sessionId: string) => number;
   respond: (
     sourceMessageId: string,
@@ -50,16 +54,27 @@ export class SessionDirectory {
   constructor(private readonly dependencies: SessionDirectoryDependencies) {}
 
   listActive(): SessionRecord[] {
-    const now = Date.now();
-    const registrations = this.dependencies.managedTerminals.listOnline(now);
-    const registrationById = new Map(
-      registrations.map((registration) => [
-        registration.terminalId,
-        registration,
-      ]),
-    );
     const openSessions = this.dependencies.store.listOpenSessions();
-    const trackedClients = openSessions.flatMap(
+    const trackedClients = this.trackedClients(openSessions);
+    const liveClientProcessIds = (
+      this.dependencies.liveClientProcessIds ??
+      captureLiveTrackedCodexProcessIds
+    )(trackedClients);
+    return this.buildActive(openSessions, liveClientProcessIds, Date.now());
+  }
+
+  async refreshActive(): Promise<SessionRecord[]> {
+    const openSessions = this.dependencies.store.listOpenSessions();
+    const trackedClients = this.trackedClients(openSessions);
+    const liveClientProcessIds = await (
+      this.dependencies.refreshLiveClientProcessIds ??
+      refreshLiveTrackedCodexProcessIds
+    )(trackedClients);
+    return this.buildActive(openSessions, liveClientProcessIds, Date.now());
+  }
+
+  private trackedClients(openSessions: SessionRecord[]): ClientProcessMetadata[] {
+    return openSessions.flatMap(
       (session): ClientProcessMetadata[] =>
         session.clientProcessId
           ? [{
@@ -69,10 +84,20 @@ export class SessionDirectory {
             }]
           : [],
     );
-    const liveClientProcessIds = (
-      this.dependencies.liveClientProcessIds ??
-      captureLiveTrackedCodexProcessIds
-    )(trackedClients);
+  }
+
+  private buildActive(
+    openSessions: SessionRecord[],
+    liveClientProcessIds: ReadonlySet<number>,
+    now: number,
+  ): SessionRecord[] {
+    const registrations = this.dependencies.managedTerminals.listOnline(now);
+    const registrationById = new Map(
+      registrations.map((registration) => [
+        registration.terminalId,
+        registration,
+      ]),
+    );
     const sessions = openSessions.flatMap((session): SessionRecord[] => {
       if (runtimeDefinition(session.runtime).transport === "http_event_stream") {
         const instance = this.dependencies.opencode?.findActiveInstanceBySession(
@@ -163,7 +188,7 @@ export class SessionDirectory {
     for (const session of this.listActive()) {
       sessions.set(session.sessionId, session);
     }
-    for (const session of this.dependencies.store.listAssistantManagedSessions()) {
+    for (const session of this.dependencies.store.listHistorySessions()) {
       sessions.set(session.sessionId, session);
     }
     return [...sessions.values()];

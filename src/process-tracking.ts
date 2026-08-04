@@ -195,6 +195,56 @@ export function captureLiveTrackedCodexProcessIds(
   return fallbackMatches;
 }
 
+export async function refreshLiveTrackedCodexProcessIds(
+  clients: ClientProcessMetadata[],
+): Promise<Set<number>> {
+  const uniqueClients = [
+    ...new Map(
+      clients
+        .filter(
+          (client) => Number.isSafeInteger(client.processId) && client.processId > 0,
+        )
+        .map((client) => [client.processId, client]),
+    ).values(),
+  ].sort((left, right) => left.processId - right.processId);
+  if (uniqueClients.length === 0) {
+    return new Set();
+  }
+  if (process.platform !== "win32") {
+    return new Set(
+      uniqueClients
+        .filter((client) => isProcessAlive(client.processId))
+        .map((client) => client.processId),
+    );
+  }
+
+  const cacheKey = uniqueClients
+    .map((client) => `${client.processId}:${client.startedAt ?? ""}`)
+    .join("|");
+  const pending = processMatchRefreshes.get(cacheKey);
+  if (pending) {
+    await pending;
+    const cached = processMatchCaches.get(cacheKey);
+    if (cached) {
+      cached.lastUsedAt = Date.now();
+      return new Set(cached.processIds);
+    }
+  }
+
+  try {
+    const processIds = await inspectTrackedCodexProcessIds(uniqueClients);
+    const now = Date.now();
+    processMatchCaches.set(cacheKey, {
+      expiresAt: now + processMatchCacheTtlMs,
+      lastUsedAt: now,
+      processIds,
+    });
+    return new Set(processIds);
+  } catch {
+    return captureLiveTrackedCodexProcessIds(uniqueClients);
+  }
+}
+
 function scheduleProcessMatchRefresh(
   cacheKey: string,
   clients: ClientProcessMetadata[],

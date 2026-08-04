@@ -25,12 +25,6 @@ internal sealed partial class MainForm
         });
         historyGrid.Columns.Add(new DataGridViewTextBoxColumn
         {
-            Name = "Model",
-            HeaderText = "模型",
-            Width = 125,
-        });
-        historyGrid.Columns.Add(new DataGridViewTextBoxColumn
-        {
             Name = "Mode",
             HeaderText = "启动方式",
             Width = 115,
@@ -88,7 +82,6 @@ internal sealed partial class MainForm
                 string.IsNullOrWhiteSpace(session.Alias) ? "—" : $"@{session.Alias}",
                 session.ProjectName,
                 $"#{session.ShortId}",
-                string.IsNullOrWhiteSpace(session.Model) ? "—" : session.Model,
                 HistoryModeLabel(session),
                 FeishuGroupLabel(session),
                 session.Cwd,

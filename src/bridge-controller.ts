@@ -425,7 +425,17 @@ export class BridgeController {
     if (!includeLocalDetails) {
       return { ok: true };
     }
-    const sessions = this.sessionDirectory.listActive();
+    return this.buildHealth(this.sessionDirectory.listActive());
+  }
+
+  async refreshHealth(includeLocalDetails = true): Promise<Record<string, unknown>> {
+    if (!includeLocalDetails) {
+      return { ok: true };
+    }
+    return this.buildHealth(await this.sessionDirectory.refreshActive());
+  }
+
+  private buildHealth(sessions: SessionRecord[]): Record<string, unknown> {
     const displayedSessions = [...sessions].sort(
       (left, right) =>
         left.openedAt.localeCompare(right.openedAt) ||
@@ -433,7 +443,7 @@ export class BridgeController {
     );
     const activeSessionIds = new Set(sessions.map((session) => session.sessionId));
     const historySessions = this.store
-      .listAssistantManagedSessions()
+      .listHistorySessions()
       .filter(
         (session) =>
           !activeSessionIds.has(session.sessionId) &&

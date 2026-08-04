@@ -38,9 +38,21 @@ export class SessionGroupCoordinator {
           session.managedByAssistant === true &&
           (Boolean(session.feishuChatId) ||
             now - sessionGroupActivityTime(session) < this.inactiveMs),
+      )
+      .sort(
+        (left, right) =>
+          Date.parse(left.openedAt) - Date.parse(right.openedAt) ||
+          left.sessionId.localeCompare(right.sessionId),
       );
     for (const session of sessions) {
-      await this.ensure(session.sessionId);
+      const numbered = await this.store.ensureSessionFeishuChatOrdinal(
+        session.sessionId,
+      );
+      if (numbered?.feishuChatId) {
+        await this.rename(numbered);
+      } else {
+        await this.ensure(session.sessionId);
+      }
     }
   }
 
@@ -124,7 +136,7 @@ export class SessionGroupCoordinator {
       return session;
     }
     if (session.feishuChatId) {
-      return session;
+      return await this.store.ensureSessionFeishuChatOrdinal(sessionId) ?? session;
     }
     // Persisted failures are retried only from the desktop action. This keeps
     // ordinary notifications from repeatedly calling the create-chat API
@@ -155,12 +167,18 @@ export class SessionGroupCoordinator {
     if (!session.feishuChatId) {
       return;
     }
-    const name = this.groupName(session);
-    await this.feishu.updateSessionGroupName(session.feishuChatId, name);
-    await this.store.setSessionFeishuChat(session.sessionId, {
-      chatId: session.feishuChatId,
+    const numbered = await this.store.ensureSessionFeishuChatOrdinal(
+      session.sessionId,
+    ) ?? session;
+    const name = this.groupName(numbered);
+    if (numbered.feishuChatName === name) {
+      return;
+    }
+    await this.feishu.updateSessionGroupName(numbered.feishuChatId!, name);
+    await this.store.setSessionFeishuChat(numbered.sessionId, {
+      chatId: numbered.feishuChatId!,
       chatName: name,
-      createdAt: session.feishuChatCreatedAt,
+      createdAt: numbered.feishuChatCreatedAt,
     });
   }
 
@@ -176,15 +194,18 @@ export class SessionGroupCoordinator {
     session: SessionRecord,
     ownerOpenId: string,
   ): Promise<SessionRecord | undefined> {
-    const name = this.groupName(session);
-    const kind = runtimeDisplayName(session.runtime);
+    const numbered = await this.store.ensureSessionFeishuChatOrdinal(
+      session.sessionId,
+    ) ?? session;
+    const name = this.groupName(numbered);
+    const kind = runtimeDisplayName(numbered.runtime);
     try {
       const group = await this.feishu.createSessionGroup(
         ownerOpenId,
         name,
-        `${kind} 会话 ${session.shortId} · ${session.cwd}`,
+        `${kind} 会话 ${numbered.shortId} · ${numbered.cwd}`,
       );
-      const updated = await this.store.setSessionFeishuChat(session.sessionId, {
+      const updated = await this.store.setSessionFeishuChat(numbered.sessionId, {
         chatId: group.chatId,
         chatName: group.name,
       });
@@ -220,10 +241,11 @@ export class SessionGroupCoordinator {
 
   private groupName(session: SessionRecord): string {
     const prefix = runtimeGroupPrefix(session.runtime);
-    return `${prefix}${session.alias || session.projectName || session.shortId}`.slice(
-      0,
-      60,
-    );
+    const base = session.alias || session.projectName || session.shortId;
+    const suffix = !session.alias && (session.feishuChatOrdinal ?? 1) > 1
+      ? `（${session.feishuChatOrdinal}）`
+      : "";
+    return `${prefix}${base.slice(0, Math.max(0, 60 - prefix.length - suffix.length))}${suffix}`;
   }
 }
 

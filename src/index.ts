@@ -186,8 +186,10 @@ const hookServer = startHookHttpServer(
   bridgeConfig.httpHost,
   bridgeConfig.httpPort,
   {
-    health: (includeLocalSecrets) => ({
-      ...controller.health(includeLocalSecrets),
+    health: async (includeLocalSecrets, forceRefresh) => ({
+      ...(forceRefresh
+        ? await controller.refreshHealth(includeLocalSecrets)
+        : controller.health(includeLocalSecrets)),
       version: bridgeVersion,
       processId: process.pid,
       startedAt: serviceStartedAt,

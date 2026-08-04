@@ -1058,7 +1058,9 @@ internal sealed partial class MainForm : Form
         refreshing = true;
         try
         {
-            var status = await bridgeClient.GetStatusAsync(lifetime.Token);
+            var status = await bridgeClient.GetStatusAsync(
+                lifetime.Token,
+                forceRefresh: force);
             if (status is null)
             {
                 ApplyOfflineStatus();

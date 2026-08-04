@@ -217,6 +217,13 @@ export class BridgeStore {
         session.openedAt = session.lastSeenAt || new Date(now).toISOString();
         sessionsChanged = true;
       }
+      if (
+        session.historyEligible !== true &&
+        (session.managedByAssistant === true || Boolean(session.transcriptPath))
+      ) {
+        session.historyEligible = true;
+        sessionsChanged = true;
+      }
       if (session.managedTerminalId && session.managedByAssistant !== true) {
         session.managedByAssistant = true;
         sessionsChanged = true;
@@ -230,7 +237,6 @@ export class BridgeStore {
       }
       if (
         session.historyHiddenAt &&
-        session.managedByAssistant === true &&
         session.status !== "ended"
       ) {
         delete session.historyHiddenAt;
@@ -254,7 +260,8 @@ export class BridgeStore {
     const pruneChanges = this.pruneInMemory(now, "all", true);
     routesChanged ||= pruneChanges.routesChanged;
     approvalsChanged ||= pruneChanges.approvalsChanged;
-    sessionsChanged ||= this.pruneEndedSessions(now);
+    const endedSessionsPruned = this.pruneEndedSessions(now);
+    sessionsChanged ||= endedSessionsPruned;
     await Promise.all([
       bindingsChanged ? this.writeJson(this.bindingFile, this.bindings) : Promise.resolve(),
       routesChanged ? this.writeJson(this.routeFile, this.routes) : Promise.resolve(),
@@ -432,6 +439,21 @@ export class BridgeStore {
       );
   }
 
+  listHistorySessions(): SessionRecord[] {
+    return Object.values(this.sessions.sessions)
+      .filter(
+        (session) =>
+          session.historyEligible === true &&
+          !session.historyHiddenAt &&
+          !session.sessionId.startsWith("managed-terminal-"),
+      )
+      .sort(
+        (left, right) =>
+          Date.parse(right.endedAt ?? right.lastSeenAt) -
+          Date.parse(left.endedAt ?? left.lastSeenAt),
+      );
+  }
+
   listSessionsWithFeishuGroups(): SessionRecord[] {
     return Object.values(this.sessions.sessions)
       .filter(
@@ -466,11 +488,13 @@ export class BridgeStore {
     managedTerminalId?: string | null;
     managedTerminalElevated?: boolean | null;
     managedByAssistant?: boolean;
+    historyEligible?: boolean;
     transcriptPath?: string | null;
     openedAt?: string;
     feishuChatId?: string;
     feishuChatName?: string;
     feishuChatCreatedAt?: string;
+    feishuChatOrdinal?: number;
     feishuChatError?: string | null;
     feishuChatErrorAt?: string | null;
   }): Promise<SessionRecord> {
@@ -509,6 +533,10 @@ export class BridgeStore {
         input.managedByAssistant ??
         current?.managedByAssistant ??
         Boolean(input.managedTerminalId);
+      const historyEligible =
+        input.historyEligible ??
+        current?.historyEligible ??
+        managedByAssistant;
       const next: SessionRecord = {
         sessionId: input.sessionId,
         shortId: shortSessionId(input.sessionId),
@@ -549,17 +577,20 @@ export class BridgeStore {
           ? input.managedTerminalElevated ?? undefined
           : current?.managedTerminalElevated,
         managedByAssistant,
+        historyEligible,
         transcriptPath: hasTranscriptPath
           ? input.transcriptPath ?? undefined
           : current?.transcriptPath,
         historyHiddenAt:
-          input.status !== "ended" && managedByAssistant
+          input.status !== "ended" && historyEligible
             ? undefined
             : current?.historyHiddenAt,
         feishuChatId: input.feishuChatId ?? current?.feishuChatId,
         feishuChatName: input.feishuChatName ?? current?.feishuChatName,
         feishuChatCreatedAt:
           input.feishuChatCreatedAt ?? current?.feishuChatCreatedAt,
+        feishuChatOrdinal:
+          input.feishuChatOrdinal ?? current?.feishuChatOrdinal,
         feishuChatError: hasFeishuChatError
           ? input.feishuChatError ?? undefined
           : current?.feishuChatError,
@@ -614,6 +645,56 @@ export class BridgeStore {
       delete session.feishuChatErrorAt;
       await this.writeJson(this.sessionFile, this.sessions);
       return session;
+    });
+  }
+
+  async ensureSessionFeishuChatOrdinal(
+    sessionId: string,
+  ): Promise<SessionRecord | undefined> {
+    return this.mutate(async () => {
+      const target = this.sessions.sessions[sessionId];
+      if (!target) {
+        return undefined;
+      }
+      const scope = sessionGroupScopeKey(target);
+      const siblings = Object.values(this.sessions.sessions)
+        .filter(
+          (session) =>
+            sessionGroupScopeKey(session) === scope &&
+            (session.sessionId === sessionId ||
+              session.managedByAssistant === true ||
+              Boolean(session.feishuChatId) ||
+              validChatOrdinal(session.feishuChatOrdinal) !== undefined),
+        )
+        .sort(
+          (left, right) =>
+            Date.parse(left.feishuChatCreatedAt ?? left.openedAt) -
+              Date.parse(right.feishuChatCreatedAt ?? right.openedAt) ||
+            left.sessionId.localeCompare(right.sessionId),
+        );
+      const used = new Set(
+        siblings.flatMap((session) => {
+          const ordinal = validChatOrdinal(session.feishuChatOrdinal);
+          return ordinal === undefined ? [] : [ordinal];
+        }),
+      );
+      let changed = false;
+      for (const session of siblings) {
+        if (validChatOrdinal(session.feishuChatOrdinal) !== undefined) {
+          continue;
+        }
+        let ordinal = 1;
+        while (used.has(ordinal)) {
+          ordinal += 1;
+        }
+        session.feishuChatOrdinal = ordinal;
+        used.add(ordinal);
+        changed = true;
+      }
+      if (changed) {
+        await this.writeJson(this.sessionFile, this.sessions);
+      }
+      return this.sessions.sessions[sessionId];
     });
   }
 
@@ -682,7 +763,7 @@ export class BridgeStore {
       const session = this.sessions.sessions[sessionId];
       if (
         !session ||
-        session.managedByAssistant !== true ||
+        session.historyEligible !== true ||
         session.sessionId.startsWith("managed-terminal-")
       ) {
         return undefined;
@@ -706,10 +787,12 @@ export class BridgeStore {
       if (sourceSession && targetSession) {
         targetSession.alias ??= sourceSession.alias;
         targetSession.managedByAssistant ??= sourceSession.managedByAssistant;
+        targetSession.historyEligible ??= sourceSession.historyEligible;
         targetSession.transcriptPath ??= sourceSession.transcriptPath;
         targetSession.feishuChatId ??= sourceSession.feishuChatId;
         targetSession.feishuChatName ??= sourceSession.feishuChatName;
         targetSession.feishuChatCreatedAt ??= sourceSession.feishuChatCreatedAt;
+        targetSession.feishuChatOrdinal ??= sourceSession.feishuChatOrdinal;
         targetSession.feishuChatError ??= sourceSession.feishuChatError;
         targetSession.feishuChatErrorAt ??= sourceSession.feishuChatErrorAt;
       }
@@ -1114,6 +1197,16 @@ export class BridgeStore {
       this.schedulePersist(this.sessionFile);
     }
   }
+}
+
+function sessionGroupScopeKey(session: SessionRecord): string {
+  const runtime = session.runtime ?? "codex";
+  const project = session.projectName.trim().normalize("NFC").toLocaleLowerCase("en-US");
+  return `${runtime}\u0000${project}`;
+}
+
+function validChatOrdinal(value: number | undefined): number | undefined {
+  return Number.isSafeInteger(value) && (value ?? 0) > 0 ? value : undefined;
 }
 
 function createPairingCode(): string {

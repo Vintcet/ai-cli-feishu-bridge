@@ -111,11 +111,13 @@ export interface SessionRecord {
   managedTerminalId?: string;
   managedTerminalElevated?: boolean;
   managedByAssistant?: boolean;
+  historyEligible?: boolean;
   transcriptPath?: string;
   historyHiddenAt?: string;
   feishuChatId?: string;
   feishuChatName?: string;
   feishuChatCreatedAt?: string;
+  feishuChatOrdinal?: number;
   feishuChatError?: string;
   feishuChatErrorAt?: string;
 }

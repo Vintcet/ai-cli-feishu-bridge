@@ -17,7 +17,10 @@ import {
 } from "./domain.js";
 
 export interface HookHttpHandlers {
-  health: (includeLocalSecrets: boolean) => Record<string, unknown>;
+  health: (
+    includeLocalSecrets: boolean,
+    forceRefresh: boolean,
+  ) => Record<string, unknown> | Promise<Record<string, unknown>>;
   shutdown: () => void;
   managedTerminalRegister: (payload: Record<string, unknown>) => Record<string, unknown>;
   managedTerminalUnregister: (
@@ -93,7 +96,9 @@ async function routeRequest(
   if (method === "GET" && url.pathname === "/health") {
     // Unauthenticated callers get the same view minus the pairing code, which
     // would otherwise let any local process claim the Feishu owner binding.
-    sendJson(response, 200, handlers.health(hasValidControlToken(request, controlToken)));
+    const authenticated = hasValidControlToken(request, controlToken);
+    const forceRefresh = authenticated && url.searchParams.get("refresh") === "1";
+    sendJson(response, 200, await handlers.health(authenticated, forceRefresh));
     return;
   }
 

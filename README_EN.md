@@ -2,11 +2,17 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
-Current version: `0.18.1`
+Current version: `0.18.2`
 
 This is an unofficial Windows-local bridge that connects Codex CLI, Claude Code, and OpenCode sessions to your own Feishu custom app. Each assistant session can have a private Feishu group, so you can receive completion and error notifications, handle approval or follow-up prompts, and continue the original CLI conversation while away from the computer.
 
 The bridge service, session index, credentials, and settings stay on your computer. This project does not provide a cloud relay and does not bundle Codex CLI, Claude Code, OpenCode, or a Feishu app. You install and sign in to the CLI tools yourself and create your own Feishu custom app.
+
+## What's new in 0.18.2
+
+- The desktop Refresh button now waits for a fresh process scan, so externally closed Codex and Claude Code windows leave the active list promptly.
+- Externally resumed sessions enter History after closing; continuing them from History relaunches them as managed sessions with two-way Feishu control.
+- History no longer shows a model column that can become stale across resumes, and same-project Feishu groups receive stable suffixes such as `Codex｜project` and `Codex｜project（2）`.
 
 ## What's new in 0.18.1
 
@@ -67,7 +73,7 @@ Main features:
 
 ### Use the Release ZIP
 
-Windows users can download `codex-feishu-bridge-v0.18.1-windows-x64.zip` from [GitHub Releases](https://github.com/Vintcet/codex-feishu-bridge/releases). The archive includes the compiled bridge, production dependencies, and both desktop executables. Extract the complete archive instead of copying only the main executable. Before the first run, copy `.env.example` to `.env`, add your Feishu app settings, then launch `Codex飞书助手.exe` from the archive root.
+Windows users can download `codex-feishu-bridge-v0.18.2-windows-x64.zip` from [GitHub Releases](https://github.com/Vintcet/codex-feishu-bridge/releases). The archive includes the compiled bridge, production dependencies, and both desktop executables. Extract the complete archive instead of copying only the main executable. Before the first run, copy `.env.example` to `.env`, add your Feishu app settings, then launch `Codex飞书助手.exe` from the archive root.
 
 ### Build from source
 
@@ -211,7 +217,7 @@ If you want a desktop entry, manually create a shortcut named `Codex飞书助手
 - Real bridge-process and Feishu long-connection status.
 - Bound-account count.
 - Active session details including runtime, alias, project, short ID, status, queue length, model, source, working directory, open time, and last activity.
-- History containing offline Codex/Claude Code sessions previously launched by the panel, plus the current conversations of OpenCode instances that were connected through a local port. Manually launched external Codex/Claude Code sessions are excluded.
+- History containing offline Codex/Claude Code sessions previously launched by the panel or identified by hooks, plus the current conversations of OpenCode instances connected through a local port. Continuing an external session from History relaunches it as managed.
 - One-click or double-click resume in the original directory and administrator mode.
 - Automatic recovery requests claimed when a message is sent to a closed session's Feishu group.
 - Alias management from either Active Sessions or History without changing the original session or Feishu group binding, plus Open Directory for the selected session.
@@ -233,7 +239,7 @@ Low-risk automatic approval uses the same risk rules for Codex, Claude Code, and
 
 Every launch creates an independent terminal. The managed host uses a local named pipe restricted to the current Windows user, so Feishu input is written into the same visible Codex window. Administrator elevation affects only that window and its children.
 
-When the window closes, the session moves from Active Sessions to History. Resume reuses the saved directory and administrator mode and safely passes `resume <session-id>`. Online sessions do not also appear in History. Codex/Claude Code sessions opened manually in another terminal are excluded; the current conversation of an OpenCode instance connected through a local port is recoverable and enters History after disconnecting. If Delete History was used, that ended record stays hidden until the conversation is reopened. Reopening clears the hidden marker, so the next close returns it to History; bridge startup also repairs legacy records that are active but still hidden.
+When a window closes, its session moves from Active Sessions to History. Resume reuses the saved directory and administrator mode and safely passes `resume <session-id>`. Codex/Claude Code sessions resumed with arguments in an external terminal also enter History after closing, but ordinary Feishu text remains disabled while the external window is online. Continuing one from History relaunches it as a managed window with two-way Feishu control. Online sessions do not also appear in History. If Delete History was used, that ended record stays hidden until the conversation is reopened. Reopening clears the hidden marker, so the next close returns it to History; bridge startup also repairs legacy records that are active but still hidden.
 
 The argument field is parsed only as Codex CLI arguments; it is never executed as a PowerShell command. A manually launched external Codex session can still be discovered by hooks for notifications and structured approvals, but ordinary Feishu text is not injected and no temporary second process is started.
 

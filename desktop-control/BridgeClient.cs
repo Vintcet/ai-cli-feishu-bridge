@@ -18,7 +18,7 @@ internal sealed class BridgeClient : IDisposable
         httpClient = new HttpClient
         {
             BaseAddress = new Uri($"http://127.0.0.1:{Port}/"),
-            Timeout = TimeSpan.FromSeconds(2),
+            Timeout = TimeSpan.FromSeconds(5),
         };
     }
 
@@ -26,7 +26,9 @@ internal sealed class BridgeClient : IDisposable
 
     public int Port { get; }
 
-    public async Task<BridgeStatus?> GetStatusAsync(CancellationToken cancellationToken = default)
+    public async Task<BridgeStatus?> GetStatusAsync(
+        CancellationToken cancellationToken = default,
+        bool forceRefresh = false)
     {
         if (!TryReadControlToken(BridgeRoot, out var controlToken))
         {
@@ -35,7 +37,9 @@ internal sealed class BridgeClient : IDisposable
 
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, "health");
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get,
+                forceRefresh ? "health?refresh=1" : "health");
             request.Headers.Add(
                 "X-Codex-Feishu-Control-Token",
                 controlToken);

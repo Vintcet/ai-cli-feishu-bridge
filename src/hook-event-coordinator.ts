@@ -112,6 +112,7 @@ export class HookEventCoordinator {
       managedTerminalId,
       managedTerminalElevated,
       managedByAssistant: managedTerminalId ? true : false,
+      historyEligible: true,
       transcriptPath: payload.transcript_path,
       openedAt,
     });
@@ -163,6 +164,7 @@ export class HookEventCoordinator {
       cwd: payload.cwd,
       status: "ended",
       runtime: payload.runtime,
+      historyEligible: true,
       transcriptPath: payload.transcript_path,
       ...(payload.managed_terminal_id !== undefined
         ? { managedTerminalId: payload.managed_terminal_id }

@@ -449,6 +449,79 @@ test("creates one private session group and routes group replies to that session
   }
 });
 
+test("numbers same-name session groups and preserves the number on resume", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-group-number-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      { openId: "owner", chatId: "chat-owner", chatType: "p2p", boundAt: new Date().toISOString() },
+      code,
+    );
+    const firstSessionId = "019faef0-d0bb-7703-af82-17ee9b45397b";
+    const secondSessionId = "019faef0-d0bb-7703-af82-17ee9b45398c";
+    await store.upsertSession({
+      sessionId: firstSessionId,
+      cwd: directory,
+      status: "waiting",
+      runtime: "codex",
+      openedAt: "2026-08-04T01:00:00.000Z",
+      managedTerminalId: "terminal-group-number-one",
+      managedByAssistant: true,
+    });
+    await store.upsertSession({
+      sessionId: secondSessionId,
+      cwd: directory,
+      status: "waiting",
+      runtime: "codex",
+      openedAt: "2026-08-04T02:00:00.000Z",
+      managedTerminalId: "terminal-group-number-two",
+      managedByAssistant: true,
+    });
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+
+    await controller.initializeSessionGroups();
+    const baseName = `Codex｜${path.basename(directory)}`;
+    assert.deepEqual(
+      feishu.createdGroups.map((group) => group.name),
+      [baseName, `${baseName}（2）`],
+    );
+    assert.equal(store.getSession(firstSessionId)?.feishuChatOrdinal, 1);
+    assert.equal(store.getSession(secondSessionId)?.feishuChatOrdinal, 2);
+    const secondChatId = store.getSession(secondSessionId)?.feishuChatId;
+
+    await store.upsertSession({
+      sessionId: secondSessionId,
+      cwd: directory,
+      status: "ended",
+    });
+    await store.upsertSession({
+      sessionId: secondSessionId,
+      cwd: directory,
+      status: "waiting",
+      runtime: "codex",
+      managedTerminalId: "terminal-group-number-resume",
+      managedByAssistant: true,
+    });
+    await controller.initializeSessionGroups();
+    assert.equal(feishu.createdGroups.length, 2);
+    assert.equal(store.getSession(secondSessionId)?.feishuChatId, secondChatId);
+    assert.equal(store.getSession(secondSessionId)?.feishuChatOrdinal, 2);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("dissolves assistant session groups after one inactive week", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-group-cleanup-"));
   try {
@@ -854,7 +927,7 @@ test("a failed session group create waits for an explicit desktop retry", async 
   }
 });
 
-test("history removal hides only assistant-managed sessions", async () => {
+test("history removal hides managed and externally tracked sessions", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-history-hide-"));
   try {
     const store = new BridgeStore(directory);
@@ -875,7 +948,13 @@ test("history removal hides only assistant-managed sessions", async () => {
       managedByAssistant: true,
     });
     await store.upsertSession({
-      sessionId: "external-session",
+      sessionId: "external-history-session",
+      cwd: directory,
+      status: "ended",
+      historyEligible: true,
+    });
+    await store.upsertSession({
+      sessionId: "untracked-session",
       cwd: directory,
       status: "ended",
     });
@@ -885,8 +964,14 @@ test("history removal hides only assistant-managed sessions", async () => {
       false,
     );
     assert.equal(
-      (await controller.handleSessionHistoryHide({ sessionId: "external-session" })).ok,
+      (await controller.handleSessionHistoryHide({ sessionId: "untracked-session" })).ok,
       false,
+    );
+    assert.equal(
+      (await controller.handleSessionHistoryHide({
+        sessionId: "external-history-session",
+      })).ok,
+      true,
     );
     assert.equal(
       (await controller.handleSessionHistoryHide({ sessionId: managedSessionId })).ok,
@@ -3685,7 +3770,7 @@ test("an explicit managed terminal id wins when two windows share a cwd", async 
   }
 });
 
-test("resuming outside the helper clears stale managed-window metadata", async () => {
+test("resuming outside the helper keeps history but clears managed-window metadata", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "codex-feishu-external-"));
   try {
     const store = new BridgeStore(directory);
@@ -3738,6 +3823,7 @@ test("resuming outside the helper clears stale managed-window metadata", async (
     assert.equal(resumed?.managedTerminalId, undefined);
     assert.equal(resumed?.managedTerminalElevated, undefined);
     assert.equal(resumed?.managedByAssistant, false);
+    assert.equal(resumed?.historyEligible, true);
     assert.notEqual(resumed?.openedAt, "2020-01-01T00:00:00.000Z");
     await controller.handleFeishuMessage(
       groupMessageEvent(
@@ -3754,6 +3840,21 @@ test("resuming outside the helper clears stale managed-window metadata", async (
     assert.equal(
       (controller.handleRuntimeLaunchClaim() as { request?: unknown }).request,
       undefined,
+    );
+    await controller.handleSessionEndHook({
+      hook_event_name: "SessionEnd",
+      session_id: sessionId,
+      cwd: directory,
+      reason: "other",
+      transcript_path: null,
+    });
+    const history = (controller.health() as {
+      historySessions: Array<{ sessionId: string; managedByAssistant: boolean }>;
+    }).historySessions;
+    assert.equal(history.some((item) => item.sessionId === sessionId), true);
+    assert.equal(
+      history.find((item) => item.sessionId === sessionId)?.managedByAssistant,
+      false,
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
