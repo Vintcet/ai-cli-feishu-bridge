@@ -2660,6 +2660,103 @@ test("Claude AskUserQuestion answers are returned as updatedInput", async () => 
   }
 });
 
+test("Claude PreToolUse resolves the matching local approval and updates its Feishu card", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-claude-local-approval-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      {
+        openId: "owner",
+        chatId: "chat-owner",
+        chatType: "p2p",
+        boundAt: new Date().toISOString(),
+      },
+      code,
+    );
+    const sessionId = "claude-session-local-approval";
+    const toolUseId = "claude-tool-local-approval";
+    const turnId = `claudecode-${sessionId}-${toolUseId}`;
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+
+    const approvalPromise = controller.handlePermissionHook({
+      hook_event_name: "PermissionRequest",
+      session_id: sessionId,
+      turn_id: turnId,
+      cwd: directory,
+      model: "claude-code",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+      tool_use_id: toolUseId,
+      transcript_path: null,
+      runtime: "claudecode",
+    });
+    while (feishu.cards.length === 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const approval = store.listApprovals().find(
+      (item) => item.sessionId === sessionId,
+    );
+    assert.ok(approval);
+    assert.equal(approval.toolUseId, toolUseId);
+    assert.match(JSON.stringify(feishu.cards[0]?.card), /批准一次/);
+
+    await controller.handleActivityHook({
+      hook_event_name: "PreToolUse",
+      session_id: sessionId,
+      turn_id: `claudecode-${sessionId}-another-tool`,
+      cwd: directory,
+      runtime: "claudecode",
+      tool_name: "Bash",
+      tool_use_id: "another-tool",
+    });
+    assert.equal(store.getApproval(approval.requestId)?.status, "pending");
+    assert.equal(feishu.patchedCards.length, 0);
+
+    await controller.handleActivityHook({
+      hook_event_name: "PreToolUse",
+      session_id: sessionId,
+      turn_id: turnId,
+      cwd: directory,
+      runtime: "claudecode",
+      tool_name: "Bash",
+      tool_use_id: toolUseId,
+    });
+
+    const hookResult = await approvalPromise;
+    assert.match(JSON.stringify(hookResult), /"behavior":"allow"/);
+    assert.equal(store.getApproval(approval.requestId)?.status, "resolved");
+    assert.equal(store.getApproval(approval.requestId)?.resolution, "allow");
+    for (
+      let attempt = 0;
+      attempt < 30 && feishu.patchedCards.length === 0;
+      attempt += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const patchedCard = feishu.patchedCards.find(
+      (item) => item.messageId === feishu.cards[0]?.messageId,
+    )?.card;
+    assert.ok(patchedCard);
+    assert.match(JSON.stringify(patchedCard), /审批已处理/);
+    assert.match(JSON.stringify(patchedCard), /已批准/);
+    assert.doesNotMatch(JSON.stringify(patchedCard), /批准一次/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Claude SessionEnd releases pending hooks without reviving the ended session", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-claude-end-"));
   try {

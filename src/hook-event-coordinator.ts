@@ -215,6 +215,7 @@ export class HookEventCoordinator {
       requestId: randomUUID(),
       sessionId: payload.session_id,
       turnId: payload.turn_id,
+      ...(payload.tool_use_id ? { toolUseId: payload.tool_use_id } : {}),
       cwd: payload.cwd,
       toolName: payload.tool_name,
       toolPreview: previewJson(payload.tool_input),
@@ -430,6 +431,29 @@ export class HookEventCoordinator {
   async handleActivity(
     payload: ActivityHookPayload,
   ): Promise<Record<string, unknown>> {
+    if (
+      payload.runtime === "claudecode" &&
+      payload.hook_event_name === "PreToolUse"
+    ) {
+      const matchingApprovals = this.dependencies.store
+        .listApprovals()
+        .filter(
+          (approval) =>
+            approval.status === "pending" &&
+            approval.sessionId === payload.session_id &&
+            (payload.tool_use_id
+              ? approval.toolUseId === payload.tool_use_id ||
+                (!approval.toolUseId && approval.turnId === payload.turn_id)
+              : approval.turnId === payload.turn_id),
+        );
+      for (const approval of matchingApprovals) {
+        await this.dependencies.approvals.complete(
+          approval.requestId,
+          "allow",
+          { source: "claudecode_runtime" },
+        );
+      }
+    }
     const settings = this.dependencies.store.getSettings();
     if (payload.hook_event_name === "UserPromptSubmit") {
       void this.handleUserPromptSubmit(payload, settings).catch((error) => {

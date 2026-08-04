@@ -156,6 +156,7 @@ export interface ApprovalRecord {
   requestId: string;
   sessionId: string;
   turnId: string;
+  toolUseId?: string;
   cwd: string;
   toolName: string;
   toolPreview: string;
@@ -187,6 +188,7 @@ export interface PermissionHookPayload {
   tool_input: unknown;
   transcript_path: string | null;
   runtime?: RuntimeName;
+  tool_use_id?: string;
   agent_id?: string;
   agent_type?: string;
   managed_terminal_id?: string;
@@ -266,6 +268,7 @@ export interface ActivityHookPayload {
   tool_preview?: string;
   tool_response_preview?: string;
   runtime?: RuntimeName;
+  tool_use_id?: string;
   transcript_path?: string | null;
   managed_terminal_id?: string;
   managed_terminal_elevated?: boolean;

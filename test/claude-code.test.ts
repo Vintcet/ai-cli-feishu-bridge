@@ -113,6 +113,7 @@ test("compacts Claude Code failure and compaction activity payloads", () => {
     error: "command failed",
   })) as Record<string, unknown>;
   assert.equal(failure.hook_event_name, "PostToolUseFailure");
+  assert.equal(failure.tool_use_id, "tool-2");
   assert.equal(failure.tool_response_preview, '"command failed"');
   assert.match(String(failure.turn_id), /tool-2/);
 

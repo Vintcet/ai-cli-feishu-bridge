@@ -240,6 +240,7 @@ export function compactActivityPayload(value: unknown): unknown {
     model: item.model,
     prompt: item.prompt,
     tool_name: item.tool_name,
+    tool_use_id: item.tool_use_id,
     tool_preview: compactPreview(item.tool_input),
     tool_response_preview: compactPreview(
       item.tool_response ??

@@ -33,6 +33,7 @@ export type ApprovalDecisionSource =
   | "feishu_card"
   | "feishu_text"
   | "opencode_runtime"
+  | "claudecode_runtime"
   | "timeout"
   | "session_closed"
   | "shutdown";
