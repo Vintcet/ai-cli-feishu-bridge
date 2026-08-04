@@ -2,11 +2,17 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
-当前版本：`0.18.0`
+当前版本：`0.18.1`
 
 这是一个运行在 Windows 本机的非官方桥接器，把 Codex CLI、Claude Code 和 OpenCode 会话连接到你自己的飞书企业自建应用。每个助手会话可以绑定一个独立私有群，让你在电脑外接收完成或错误通知、处理权限审批和补充问题，并继续向原会话发送消息。
 
 桥接服务、会话索引和配置都保存在本机；项目不提供云端中转服务，也不捆绑 Codex CLI、Claude Code、OpenCode 或飞书应用。使用者需要自行安装并登录目标 CLI，并自行创建飞书应用。
+
+## 0.18.1 更新摘要
+
+- 为长期运行增加会话、审批、消息路由和去重记录的容量与保留期上限，待处理审批不会被容量清理误删；
+- Codex 转录监控会对闲置会话降低轮询频率，并正确处理文件替换、部分 UTF-8 内容及停止前最后一次扫描；
+- Windows 构建基线升级到 Node.js 24，并让路径测试兼容长路径和 8.3 短路径的等价表示。
 
 ## 0.18.0 更新摘要
 
@@ -67,7 +73,7 @@
 
 ### 使用 Release ZIP
 
-Windows 用户可以从 [GitHub Releases](https://github.com/Vintcet/codex-feishu-bridge/releases) 下载 `codex-feishu-bridge-v0.18.0-windows-x64.zip`。压缩包已包含编译后的桥接服务、生产依赖和两个桌面 EXE；请完整解压后使用，不要只拿主程序一个文件。首次运行前，把 `.env.example` 复制为 `.env` 并填写飞书应用配置，然后双击根目录的 `Codex飞书助手.exe`。
+Windows 用户可以从 [GitHub Releases](https://github.com/Vintcet/codex-feishu-bridge/releases) 下载 `codex-feishu-bridge-v0.18.1-windows-x64.zip`。压缩包已包含编译后的桥接服务、生产依赖和两个桌面 EXE；请完整解压后使用，不要只拿主程序一个文件。首次运行前，把 `.env.example` 复制为 `.env` 并填写飞书应用配置，然后双击根目录的 `Codex飞书助手.exe`。
 
 ### 从源码构建
 

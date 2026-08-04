@@ -1,6 +1,6 @@
 {
   "name": "codex-feishu-bridge",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "private": true,
   "description": "A Windows-local bridge for Feishu notifications, approvals, questions, and conversation control across Codex CLI, Claude Code, and OpenCode.",
   "license": "MIT",

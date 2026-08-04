@@ -2,11 +2,17 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
-Current version: `0.18.0`
+Current version: `0.18.1`
 
 This is an unofficial Windows-local bridge that connects Codex CLI, Claude Code, and OpenCode sessions to your own Feishu custom app. Each assistant session can have a private Feishu group, so you can receive completion and error notifications, handle approval or follow-up prompts, and continue the original CLI conversation while away from the computer.
 
 The bridge service, session index, credentials, and settings stay on your computer. This project does not provide a cloud relay and does not bundle Codex CLI, Claude Code, OpenCode, or a Feishu app. You install and sign in to the CLI tools yourself and create your own Feishu custom app.
+
+## What's new in 0.18.1
+
+- Long-running state now has bounded retention for sessions, approvals, message routes, and inbound deduplication records without evicting pending approvals.
+- Codex transcript monitoring backs off inactive sessions and safely handles file replacement, partial UTF-8 content, and the final scan during shutdown.
+- The Windows build baseline now uses Node.js 24, and path assertions accept equivalent long and 8.3 short-path representations.
 
 ## What's new in 0.18.0
 
@@ -61,7 +67,7 @@ Main features:
 
 ### Use the Release ZIP
 
-Windows users can download `codex-feishu-bridge-v0.18.0-windows-x64.zip` from [GitHub Releases](https://github.com/Vintcet/codex-feishu-bridge/releases). The archive includes the compiled bridge, production dependencies, and both desktop executables. Extract the complete archive instead of copying only the main executable. Before the first run, copy `.env.example` to `.env`, add your Feishu app settings, then launch `Codex飞书助手.exe` from the archive root.
+Windows users can download `codex-feishu-bridge-v0.18.1-windows-x64.zip` from [GitHub Releases](https://github.com/Vintcet/codex-feishu-bridge/releases). The archive includes the compiled bridge, production dependencies, and both desktop executables. Extract the complete archive instead of copying only the main executable. Before the first run, copy `.env.example` to `.env`, add your Feishu app settings, then launch `Codex飞书助手.exe` from the archive root.
 
 ### Build from source
 
