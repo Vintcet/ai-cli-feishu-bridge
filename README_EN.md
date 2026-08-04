@@ -13,8 +13,11 @@ The bridge service, session index, credentials, and settings stay on your comput
 - All local HTTP control paths now use the persistent control token; anonymous health checks no longer expose pairing or session details, and cross-site or non-JSON writes are rejected.
 - Codex, Claude Code, and OpenCode share one low-risk automatic-approval policy, while high-risk operations still require a Feishu or local decision.
 - Aliases can be set, changed, or cleared directly from History without changing the session ID, Feishu group binding, or resume directory.
+- Temporary 400/408/409/429/5xx, busy-service, and timeout failures share one automatic-retry policy; each error card can stop the remaining attempts, and Codex transcript monitoring covers failures that skip the `Stop` hook.
 - Long-running reliability fixes cover reused process IDs, cross-device approval state, attachment quotas, approval-log rotation, storage recovery, and OpenCode reconnect behavior.
 - The desktop executable manages Node.js directly and performs authenticated graceful shutdown. X collapses to the tray, minimize stays in the taskbar, and tray activation restores the window to the foreground.
+
+## Runtime support and features
 
 All three runtimes share the same session, routing, card, approval, and status management. Only the local transport to the CLI differs:
 
@@ -43,10 +46,10 @@ Main features:
 - Route multiple simultaneous windows strictly by session alias or session ID.
 - Treat externally launched Codex/Claude Code sessions as notification-only, preventing Feishu and a local terminal from advancing the same conversation independently.
 
-### Requirements
+## Requirements
 
 - Windows 10/11 x64.
-- Git, or a source ZIP downloaded from GitHub.
+- Git only when cloning the source or contributing; it is not required for a downloaded Release ZIP.
 - Node.js 20 or later.
 - PowerShell 7, available as `pwsh.exe`.
 - .NET 8 Windows Desktop Runtime; building the desktop app from source requires the .NET 8 SDK.
@@ -54,9 +57,13 @@ Main features:
 - A Feishu custom app whose bot capability, permissions, events, availability, and published version you can manage.
 - Windows Terminal is recommended; the launcher falls back to a normal console when it is unavailable.
 
-## Get the desktop app and build it for the first time
+## Get the desktop app and run it for the first time
+
+### Use the Release ZIP
 
 Windows users can download `codex-feishu-bridge-v0.18.0-windows-x64.zip` from [GitHub Releases](https://github.com/Vintcet/codex-feishu-bridge/releases). The archive includes the compiled bridge, production dependencies, and both desktop executables. Extract the complete archive instead of copying only the main executable. Before the first run, copy `.env.example` to `.env`, add your Feishu app settings, then launch `Codex飞书助手.exe` from the archive root.
+
+### Build from source
 
 To build from source instead, run:
 
@@ -206,7 +213,7 @@ If you want a desktop entry, manually create a shortcut named `Codex飞书助手
 
 Clicking the window's X button uses a native collapse animation and hides the panel in the bottom-right system tray; ordinary minimize remains in the taskbar. Double-clicking the tray icon restores the window directly to the foreground, while only Exit from the tray menu terminates the panel process. Starting the EXE again also brings the existing panel forward. Exiting the panel still does not automatically stop an already running background bridge service.
 
-Temporary-error retry handles recognizable 400/408/409/429/5xx, high-demand, busy-service, and timeout failures that are safe to replay. Configure 1–20 retries per consecutive failure batch, a 1–600 second base delay, and 0–120 seconds of random jitter. Codex, Claude Code, and OpenCode ask the same session to retry its previous task. Retry error cards include **Stop automatic retry**; if an attempt has already started, the action stops every later attempt in that batch. Any successful completion immediately resets the batch, so a later failure starts again at attempt 1 even when it happens moments later. Codex sampling failures may write `task_complete.error` without running the `Stop` hook, so the bridge polls each active transcript from its current end and processes only newly appended errors.
+Temporary-error retry handles recognizable 400/408/409/429/5xx, high-demand, busy-service, and timeout failures that are safe to replay. Configure 1–20 retries per consecutive failure batch, a 1–600 second base delay, and 0–120 seconds of random jitter. Codex, Claude Code, and OpenCode ask the same session to retry its previous task. Retry error cards include **Stop automatic retry**; if an attempt has already started, the action stops every later attempt in that batch. Any successful completion immediately resets the batch, so a later failure starts again at attempt 1 even when it happens moments later. Automatic retry writes only to a live assistant-managed window or a connected OpenCode session. Externally launched Codex/Claude Code sessions receive the error notification but are never injected with a retry and never resumed in a second background process. Codex sampling failures may write `task_complete.error` without running the `Stop` hook, so the bridge polls each active transcript from its current end and processes only newly appended errors.
 
 Low-risk automatic approval uses the same risk rules for Codex, Claude Code, and OpenCode and is disabled by default. Only explicitly recognized tools whose complete input can be inspected are eligible. Unknown tools, oversized or incomplete input, deletion, destructive Git operations, dependency installation or publishing, network or cloud actions, permission or system changes, sensitive paths, and paths outside the project remain manual. Manual requests appear in Feishu first; the PC dialog opens only after **Transfer to PC approval** is selected, or automatically when Feishu delivery is unavailable. Successful low-risk approvals are silent by default; enable the separate audit-card setting to send one resolved information card without action buttons. Automatic processing never silently allows an uncertain operation.
 
@@ -281,91 +288,6 @@ When several sessions are active, the bridge does not guess. Send `会话` to li
 - Each OpenCode listening port registers only the conversation currently open in that instance. Historical conversations merely returned by its API are not active. The current conversation is removed when the window or instance disconnects.
 - Codex or Claude Code opened manually in another terminal may appear as External Session. The bridge validates the real CLI PID, executable name, and start time and removes the entry after the process exits. Rare sessions whose process information cannot be read expire after about five minutes.
 
-## Local configuration
-
-Create `.env` in the project directory from `.env.example`. Never share or commit `FEISHU_APP_SECRET`.
-
-```env
-FEISHU_APP_ID=cli_xxxxx
-FEISHU_APP_SECRET=xxxxx
-FEISHU_BIND_COMMAND=绑定
-BRIDGE_HTTP_PORT=8765
-CODEX_APPROVAL_TIMEOUT_MS=1200000
-CODEX_SESSION_ACTIVE_MS=86400000
-CODEX_TRANSCRIPT_POLL_INTERVAL_MS=750
-FEISHU_SESSION_GROUP_INACTIVE_MS=604800000
-FEISHU_SESSION_GROUP_CLEANUP_INTERVAL_MS=3600000
-RUNTIME_AUTO_LAUNCH_TIMEOUT_MS=120000
-DEFAULT_WORKSPACE_ROOT=
-CODEX_COMMAND=codex
-```
-
-When `DEFAULT_WORKSPACE_ROOT` is empty, the default is the parent directory of the bridge. You can select any real directory in desktop `设置` (Settings); do not copy a drive-specific path from another computer.
-
-Codex and Claude Code hook scripts connect to `http://127.0.0.1:8765` by default. If you change the port, set `CODEX_FEISHU_BRIDGE_URL` in the CLI launch environment or update the hook configuration accordingly.
-
-## Installation and startup
-
-Automatic Windows login startup is not currently installed. For normal use, run the desktop executable or your shortcut and click Connect. The desktop executable now starts Node.js directly and uses an authenticated local endpoint for graceful shutdown, without VBS or bridge lifecycle PowerShell wrappers. For automation without opening the panel, use `Codex飞书助手.exe --bridge-start` and `Codex飞书助手.exe --bridge-stop`.
-
-To run or debug only the Node.js bridge service:
-
-The following commands do not provide the desktop panel. For managed windows, History, and automatic recovery, also build and run the desktop app as described in “Get the desktop app and build it for the first time”.
-
-```powershell
-cd <project-directory>\codex-feishu-bridge
-npm install
-npm run build
-npm start
-```
-
-Development mode:
-
-```powershell
-npm run dev
-```
-
-Before submitting changes, run the full local validation:
-
-```powershell
-npm run lint
-npm run format:check
-npm test
-npm run build
-dotnet test .\desktop-control\tests\CodexFeishuTerminalHost.Tests.csproj -c Release
-dotnet build .\desktop-control\CodexFeishuControl.csproj -c Release
-```
-
-`npm run format:check` is a zero-dependency text hygiene check for trailing whitespace and final newlines. The Windows CI workflow runs the same Node.js and .NET validation.
-
-The bridge starts a Feishu WebSocket connection, a hook HTTP server bound only to `127.0.0.1`, and a health endpoint at `http://127.0.0.1:8765/health` by default.
-
-## Codex hooks
-
-The user-level Codex hook file is `%USERPROFILE%\.codex\hooks.json`. Connect runs `scripts/install-hooks.ps1`, removes only older entries installed by this bridge, and preserves unrelated hooks.
-
-Installed hook events include `SessionStart`, `SessionEnd`, `PermissionRequest`, `Stop`, `PreToolUse` including `request_user_input`, `PostToolUse`, `PreCompact`, `PostCompact`, and `UserPromptSubmit`.
-
-`Stop` covers normal completion and follow-up notifications, but Codex does not run it for every sampling failure. For newly appended `task_complete.error` records, the bridge polls active JSONL transcripts and reuses the same Feishu error-card, deduplication, and optional retry path. Polling starts at the current end of each transcript to avoid replaying old failures and defaults to `CODEX_TRANSCRIPT_POLL_INTERVAL_MS=750`.
-
-On the first new Codex window, Codex may ask you to review and trust the hook. Verify its path and content and approve normally; do not use unsafe flags to bypass hook trust. After hook configuration or compiled hook output changes, reconnect/restart the bridge and open a new Codex window.
-
-## Claude Code hooks
-
-The user-level Claude Code settings file is `%USERPROFILE%\.claude\settings.json`. Connect runs `scripts/install-claude-code-hooks.ps1` and merges matcher-group command hooks while preserving existing user and plugin hooks.
-
-Installed events include `SessionStart`, `SessionEnd`, `PermissionRequest`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, and `Stop`. `AskUserQuestion` is converted to a Feishu follow-up card, and `Stop` reads the final assistant message from the JSONL transcript referenced by `transcript_path`.
-
-The installer removes only obsolete entries from earlier versions of this bridge and is idempotent. Run `claude doctor` in any safe directory; a healthy configuration should include `No installation issues found.`. Reconnect and open a new Claude Code window after configuration or `dist/hooks` changes.
-
-### Rebuild the desktop executables
-
-```powershell
-dotnet publish .\desktop-control\CodexFeishuControl.csproj -c Release -o .\desktop-control\publish
-```
-
-The output contains `CodexFeishuControl.exe` and `CodexFeishuTerminalHost.exe`. Keep both in the same directory. They use the locally installed .NET 8 Windows Desktop Runtime. You may copy or rename the main UI executable to `Codex飞书助手.exe` for the documented shortcut name, but do not rename or omit the terminal host.
-
 ## Feishu commands
 
 The bot currently uses the following Chinese commands. Send management commands in a direct chat with the bot:
@@ -395,17 +317,110 @@ Approval cards also accept quoted replies `批准` (approve), `拒绝` (reject),
 
 For attachments, send the image or file in a per-session group and then send `analyze this attachment` directly. In the bot DM with several active sessions, follow the attachment with `@alias analyze this attachment`. A minimal file-return test is `发文件 生成一个 test.txt 并发回来` in a session group, or `发文件 @alias 生成一个 test.txt 并发回来` in the bot DM. Staged files are stored under `data/uploads/<month>/`, limited to 25 MiB each by default, and cleaned after seven days.
 
+## Local configuration
+
+Create `.env` in the project directory from `.env.example`. Never share or commit `FEISHU_APP_SECRET`.
+
+```env
+FEISHU_APP_ID=cli_xxxxx
+FEISHU_APP_SECRET=xxxxx
+FEISHU_BIND_COMMAND=绑定
+BRIDGE_HTTP_PORT=8765
+CODEX_APPROVAL_TIMEOUT_MS=1200000
+CODEX_SESSION_ACTIVE_MS=86400000
+CODEX_TRANSCRIPT_POLL_INTERVAL_MS=750
+FEISHU_SESSION_GROUP_INACTIVE_MS=604800000
+FEISHU_SESSION_GROUP_CLEANUP_INTERVAL_MS=3600000
+RUNTIME_AUTO_LAUNCH_TIMEOUT_MS=120000
+DEFAULT_WORKSPACE_ROOT=
+CODEX_COMMAND=codex
+```
+
+When `DEFAULT_WORKSPACE_ROOT` is empty, the default is the parent directory of the bridge. You can select any real directory in desktop `设置` (Settings); do not copy a drive-specific path from another computer.
+
+Codex and Claude Code hook scripts connect to `http://127.0.0.1:8765` by default. If you change the port, set `CODEX_FEISHU_BRIDGE_URL` in the CLI launch environment or update the hook configuration accordingly.
+
+## Installation and startup
+
+Windows login startup is not installed by default. For normal use, run the desktop executable or your shortcut and click Connect. The desktop executable starts Node.js directly and uses an authenticated local endpoint for graceful shutdown, without VBS or bridge lifecycle PowerShell wrappers. For automation without opening the panel, use `Codex飞书助手.exe --bridge-start` and `Codex飞书助手.exe --bridge-stop`.
+
+The Release ZIP includes optional login-startup scripts. They create a limited, current-user scheduled task and do not elevate the bridge:
+
+```powershell
+pwsh -NoProfile -File .\scripts\install-autostart.ps1
+pwsh -NoProfile -File .\scripts\uninstall-autostart.ps1
+```
+
+To run or debug only the Node.js bridge service:
+
+The following commands do not provide the desktop panel. For managed windows, History, and automatic recovery, also build and run the desktop app as described in “Get the desktop app and run it for the first time”.
+
+```powershell
+cd <project-directory>\codex-feishu-bridge
+npm install
+npm run build
+npm start
+```
+
+Development mode:
+
+```powershell
+npm run dev
+```
+
+Before submitting changes, run the full local validation:
+
+```powershell
+npm run lint
+npm run format:check
+npm test
+npm run build
+dotnet test .\desktop-control\tests\CodexFeishuTerminalHost.Tests.csproj -c Release
+dotnet build .\desktop-control\CodexFeishuControl.csproj -c Release
+```
+
+`npm run format:check` is a zero-dependency text hygiene check for trailing whitespace and final newlines. The Windows CI workflow runs the same Node.js and .NET validation.
+
+The bridge starts a Feishu WebSocket connection, a hook HTTP server bound only to `127.0.0.1`, and a health endpoint at `http://127.0.0.1:8765/health` by default.
+
+### Rebuild the desktop executables
+
+```powershell
+dotnet publish .\desktop-control\CodexFeishuControl.csproj -c Release -o .\desktop-control\publish
+```
+
+The output contains `CodexFeishuControl.exe` and `CodexFeishuTerminalHost.exe`. Keep both in the same directory. They use the locally installed .NET 8 Windows Desktop Runtime. You may copy or rename the main UI executable to `Codex飞书助手.exe` for the documented shortcut name, but do not rename or omit the terminal host.
+
+## Codex hooks
+
+The user-level Codex hook file is `%USERPROFILE%\.codex\hooks.json`. Connect runs `scripts/install-hooks.ps1`, removes only older entries installed by this bridge, and preserves unrelated hooks.
+
+Installed hook events include `SessionStart`, `SessionEnd`, `PermissionRequest`, `Stop`, `PreToolUse` including `request_user_input`, `PostToolUse`, `PreCompact`, `PostCompact`, and `UserPromptSubmit`.
+
+`Stop` covers normal completion and follow-up notifications, but Codex does not run it for every sampling failure. For newly appended `task_complete.error` records, the bridge polls active JSONL transcripts and reuses the same Feishu error-card, deduplication, and optional retry path. Polling starts at the current end of each transcript to avoid replaying old failures and defaults to `CODEX_TRANSCRIPT_POLL_INTERVAL_MS=750`.
+
+On the first new Codex window, Codex may ask you to review and trust the hook. Verify its path and content and approve normally; do not use unsafe flags to bypass hook trust. After hook configuration or compiled hook output changes, reconnect/restart the bridge and open a new Codex window.
+
+## Claude Code hooks
+
+The user-level Claude Code settings file is `%USERPROFILE%\.claude\settings.json`. Connect runs `scripts/install-claude-code-hooks.ps1` and merges matcher-group command hooks while preserving existing user and plugin hooks.
+
+Installed events include `SessionStart`, `SessionEnd`, `PermissionRequest`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, and `Stop`. `AskUserQuestion` is converted to a Feishu follow-up card, and `Stop` reads the final assistant message from the JSONL transcript referenced by `transcript_path`.
+
+The installer removes only obsolete entries from earlier versions of this bridge and is idempotent. Run `claude doctor` in any safe directory; a healthy configuration should include `No installation issues found.`. Reconnect and open a new Claude Code window after configuration or `dist/hooks` changes.
+
 ## Data and security
 
-Local state is stored in `data/`, including `bindings.json`, `sessions.json`, `message-routes.json`, `approvals.json`, and `settings.json`. These files and `.env` are ignored by Git.
+Runtime state and audit data stay under `data/`, while Feishu credentials remain in `.env` at the project root. The project provides and uses no project-operated relay server:
 
-The hook HTTP service listens only on the loopback interface. Before approval content is sent, the bridge performs basic redaction of common token, secret, password, and API-key fields and applies message-length limits.
+- `bindings.json`, `sessions.json`, `message-routes.json`, `approvals.json`, and `settings.json` hold binding, session, routing, approval, and settings state.
+- `control-token.json` stores the random local-control token generated on first startup.
+- `approval-events.log` and rotated backups provide a local audit trail for approval requests, notification delivery, and decision sources.
+- `uploads/` contains files received from Feishu or staged for an explicit return.
 
-## License and project notice
+These files, rotated logs, quarantined corrupt files, and `.env` are ignored by Git. Release ZIPs explicitly exclude `.env`, `data/`, and internal review files. JSON state is written through a temporary file and atomically replaced. A file that fails structural validation is preserved as `*.corrupt-*`, while the bridge starts from safe defaults instead of overwriting the evidence.
 
-The source code is released under the [MIT License](LICENSE). You may use, modify, and distribute it while retaining the copyright and license notice. The software is provided “as is”, without express or implied warranties.
-
-This is an unofficial community project and is not affiliated with, authorized by, or endorsed by OpenAI, Anthropic, OpenCode, or Feishu. Their names and trademarks belong to their respective owners. Third-party CLIs, SDKs, online services, and generated content remain subject to their own licenses, terms of service, and usage policies; this project's MIT License grants no rights to those products.
+The hook HTTP service listens only on `127.0.0.1`. Anonymous health checks omit pairing codes, sessions, approvals, and settings. Control and hook writes require the persistent random token and a JSON content type, and cross-site browser requests are rejected. Approval content receives basic redaction of common token, secret, password, and API-key fields plus length limits. Approval logs rotate at 5 MiB by default with up to five backups. The attachment staging area defaults to 500 files and 1 GiB total and cleans files older than seven days.
 
 ## Behavior notes
 
@@ -448,3 +463,9 @@ When a complete known session ID is entered in a New-window argument field, the 
 - An administrator window does not launch: complete UAC locally; Feishu cannot approve UAC.
 - New hooks do not take effect: click Connect again, close old CLI windows, and open new ones. Codex also requires hook trust approval.
 - Received attachments fail: downloading requires published `im:message:readonly`; uploading a returned file requires published `im:resource`. Also check the local file-size limit.
+
+## License and project notice
+
+The source code is released under the [MIT License](LICENSE). You may use, modify, and distribute it while retaining the copyright and license notice. The software is provided “as is”, without express or implied warranties.
+
+This is an unofficial community project and is not affiliated with, authorized by, or endorsed by OpenAI, Anthropic, OpenCode, or Feishu. Their names and trademarks belong to their respective owners. Third-party CLIs, SDKs, online services, and generated content remain subject to their own licenses, terms of service, and usage policies; this project's MIT License grants no rights to those products.
