@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <NuGetAudit>false</NuGetAudit>
+    <AssemblyName>AiCliFeishuBridgeHost</AssemblyName>
+    <RootNamespace>AiCliFeishu.Bridge.Host</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AiCliFeishu.Bridge.Core\AiCliFeishu.Bridge.Core.csproj" />
+    <ProjectReference Include="..\AiCliFeishu.Bridge.Adapters.Feishu\AiCliFeishu.Bridge.Adapters.Feishu.csproj" />
+    <ProjectReference Include="..\AiCliFeishu.Bridge.Adapters.ManagedTerminal\AiCliFeishu.Bridge.Adapters.ManagedTerminal.csproj" />
+    <ProjectReference Include="..\AiCliFeishu.Bridge.Adapters.OpenCode\AiCliFeishu.Bridge.Adapters.OpenCode.csproj" />
+    <ProjectReference Include="..\AiCliFeishu.Bridge.Adapters.Storage\AiCliFeishu.Bridge.Adapters.Storage.csproj" />
+  </ItemGroup>
+</Project>

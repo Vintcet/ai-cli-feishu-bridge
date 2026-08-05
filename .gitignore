@@ -8,6 +8,7 @@ data/*.out
 data/uploads/
 data/hook-test-home/
 data/migration-recordings/
+data/bridge-host-*.lock
 *.log
 *.log.*
 desktop-control/**/bin/

@@ -306,6 +306,23 @@ dotnet test .\bridge-dotnet\tests\AiCliFeishu.Bridge.FeishuAdapter.Tests\AiCliFe
 
 验收：控制面板重启不影响桥接；安装包无需 Node；三种 CLI、飞书、开机启动和版本化 TerminalHost 全链路通过。
 
+M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界：
+
+- Generic Host / Kestrel 只监听回环地址，默认使用与当前生产端口隔离的 `8876`；
+- `data/bridge-host-{instance}.lock` 使用跨进程独占写句柄实现单实例租约，进程退出后可重新取得；
+- `/health` 无令牌时只返回存活结果，携带既有本机控制令牌时才返回进程、生命周期、组件和所有权状态；
+- `/control/shutdown` 沿用 JSON Content-Type、Fetch Metadata 和定时比较控制令牌的安全边界；
+- 后台子系统按注册顺序启动、逆序停止，启动失败会清理已启动组件并保留 `faulted` 健康状态；
+- 当前 `active` 所有权被硬性拒绝，Host 不连接真实飞书、不启动 CLI、不写生产 Store，Node 仍是唯一 Active Owner。
+
+被动 Host 的本地无外部副作用验证：
+
+```powershell
+dotnet test .\bridge-dotnet\tests\AiCliFeishu.Bridge.Host.Tests\AiCliFeishu.Bridge.Host.Tests.csproj -c Release
+```
+
+后续 M5 纵切片需要先补齐 Host 内部的 Core / Adapter 运行时装配和完整本机 API，再由控制面板通过显式灰度开关管理 C# Host。只有停止 Node、完成 Store 刷盘并验证锁交接后，才能解除 `active` 闸门；任何时刻仍只允许一个生产写入者。
+
 ### M6：删除旧实现
 
 - 删除 Node 入口、TypeScript 业务代码和 npm 发布步骤；
