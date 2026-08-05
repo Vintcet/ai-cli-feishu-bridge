@@ -172,16 +172,6 @@ export class CardActionHandler {
       return { toast: { type: "error", content: "新建会话卡片参数不完整。" } };
     }
 
-    const ownerBinding = this.store.listBindings()[0];
-    if (!ownerBinding || ownerBinding.chatId !== context.chatId) {
-      return {
-        toast: {
-          type: "warning",
-          content: "新建会话只能在管理员与机器人的私聊中操作。",
-        },
-      };
-    }
-
     const state = this.runtimeNewFlows.get(flowId);
     if (action === "runtime_new_select") {
       if (state) {

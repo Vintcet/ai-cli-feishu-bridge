@@ -28,7 +28,7 @@ const session: SessionRecord = {
   lastSeenAt: "2026-07-31T08:05:00.000Z",
 };
 
-test("/new uses one card with three runtime choices", () => {
+test("/新建 uses one card with three runtime choices", () => {
   const card = buildRuntimeSelectionCard("K:\\workspace", {
     flowId: "runtime-flow",
     sourceMessageId: "slash-new-message",
@@ -50,7 +50,7 @@ test("/new uses one card with three runtime choices", () => {
     3,
   );
   const rendered = JSON.stringify(card);
-  assert.match(rendered, /三个运行环境都是 \/new 的二级选项/);
+  assert.match(rendered, /三个运行环境都是 \/新建 的二级选项/);
   assert.doesNotMatch(rendered, /\/(?:codex|claude|opencode)/i);
 });
 

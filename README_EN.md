@@ -327,7 +327,7 @@ The bot currently uses the following Chinese commands. Send management commands 
 - `排队 @别名 内容` or `排队 #短ID 内容`: queue for the next turn in a managed window.
 - `发文件 @别名 内容` or `@别名 /sendfile 内容`: ask the assistant to return a generated file.
 
-`新建` works only in the bot DM and only for a bound administrator. The project name must be one folder name: Chinese characters and spaces are allowed, but drive letters, slashes, `..`, and Windows-reserved filename characters are rejected. The desktop panel must still be running or in the tray. Remote launch always uses normal Windows privileges and never triggers UAC. Change the default workspace in desktop Settings.
+The Feishu slash command `/新建` works in the bot DM and session groups for the bound administrator; `/new` remains supported. The project name must be one folder name: Chinese characters and spaces are allowed, but drive letters, slashes, `..`, and Windows-reserved filename characters are rejected. The desktop panel must still be running or in the tray. Remote launch always uses normal Windows privileges and never triggers UAC. Change the default workspace in desktop Settings.
 
 Aliases are 1–20 characters and may contain Chinese characters, letters, digits, underscores, and hyphens, but no spaces. Active aliases must be unique and Latin letters are case-insensitive.
 

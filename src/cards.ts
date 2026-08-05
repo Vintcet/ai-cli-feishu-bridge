@@ -73,7 +73,7 @@ export function buildRuntimeSelectionCard(
         tag: "note",
         elements: [{
           tag: "plain_text",
-          content: "三个运行环境都是 /new 的二级选项。",
+          content: "三个运行环境都是 /新建 的二级选项。",
         }],
       },
     ],
@@ -181,7 +181,7 @@ export function buildRuntimeLaunchCancelledCard(runtime: RuntimeName): Card {
   return buildRuntimeNewResultCard(
     "grey",
     "已取消新建",
-    `未创建 ${runtimeCardDisplayName(runtime)} 会话。需要时可再次发送 /new。`,
+    `未创建 ${runtimeCardDisplayName(runtime)} 会话。需要时可再次发送 /新建。`,
   );
 }
 

@@ -440,9 +440,12 @@ test("creates one private session group and routes group replies to that session
     await controller.handleFeishuMessage(
       groupMessageEvent("group-unbind-prompt", "owner", groupId, "解绑"),
     );
+    await controller.handleFeishuMessage(
+      groupMessageEvent("group-unknown-slash-prompt", "owner", groupId, "/story 继续写"),
+    );
     assert.deepEqual(
-      terminals.sends.slice(-4).map((item) => item.prompt),
-      ["状态", "帮助", "绑定", "解绑"],
+      terminals.sends.slice(-5).map((item) => item.prompt),
+      ["状态", "帮助", "绑定", "解绑", "/story 继续写"],
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -1241,6 +1244,77 @@ test("/new card reports a missing default workspace without queuing a launch", a
       (controller.handleRuntimeLaunchClaim() as { request?: unknown }).request,
       undefined,
     );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Chinese Feishu slash commands bypass session routing in private and group chats", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-slash-routing-"));
+  const dataDirectory = path.join(directory, "data");
+  const workspaceRoot = path.join(directory, "workspace");
+  try {
+    const store = new BridgeStore(dataDirectory, { defaultWorkspaceRoot: workspaceRoot });
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      { openId: "owner", chatId: "chat-owner", chatType: "p2p", boundAt: new Date().toISOString() },
+      code,
+    );
+    for (const index of [1, 2]) {
+      await store.upsertSession({
+        sessionId: `slash-active-session-${index}`,
+        cwd: path.join(directory, `project-${index}`),
+        status: "waiting",
+        source: "startup",
+        clientProcessId: process.pid,
+      });
+    }
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(dataDirectory),
+    );
+
+    await controller.handleFeishuMessage(
+      messageEvent("slash-new-private-cn", "owner", "/新建"),
+    );
+    const privateCard = feishu.cards.at(-1);
+    assert.ok(privateCard);
+    assert.equal(privateCard.chatId, "chat-owner");
+    assert.equal(
+      feishu.replies.some((reply) => reply.text.includes("有多个活跃会话")),
+      false,
+    );
+
+    await controller.handleFeishuMessage(
+      groupMessageEvent("slash-new-group-cn", "owner", "control-group", "/新建"),
+    );
+    const groupCard = feishu.cards.at(-1);
+    assert.ok(groupCard);
+    assert.equal(groupCard.chatId, "control-group");
+    const groupSelection = findCardAction(groupCard.card, "runtime_new_select");
+    assert.ok(groupSelection);
+    const selected = await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      context: {
+        open_message_id: groupCard.messageId,
+        open_chat_id: "control-group",
+      },
+      action: { value: groupSelection },
+    });
+    assert.equal(selected.toast.type, "info");
+    assert.ok(findCardAction(selected.card ?? {}, "runtime_new_submit"));
+
+    await controller.handleFeishuMessage(
+      groupMessageEvent("slash-status-group-cn", "owner", "control-group", "/状态"),
+    );
+    assert.match(feishu.replies.at(-1)?.text ?? "", /活跃会话 2 个/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
