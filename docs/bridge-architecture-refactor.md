@@ -250,12 +250,23 @@ M2 仍不建立后台 Host，也不连接 CLI 或飞书。Node 继续独占生�
 
 ### M3：Runtime Adapter
 
-- 迁移 Codex 和 Claude Code Hook HTTP；
-- 将 TerminalHost IPC 接入标准命令；
-- 迁移 OpenCode HTTP / SSE；
-- 迁移启动、恢复、停止和实时消息纵切片。
+- 新增 `AiCliFeishu.Bridge.Adapters.ManagedTerminal`，由 Codex 和 Claude Code 共用；
+- 新增 `AiCliFeishu.Bridge.Adapters.OpenCode`，隔离 OpenCode HTTP、权限 API 回退和 SSE；
+- TerminalHost 命名管道只在 Managed Adapter 内处理，Core 只看到 `prompt.send` / `approval.resolve` /
+  `input.resolve` / `session.*` 标准命令；
+- Hook 字段、OpenCode `properties`、SSE 分块和 CLI 私有错误均先在 Adapter 归一化，再交给标准事件；
+- `RuntimeCommandContext` 在所有端口间携带 `commandId`、`traceId` 和 `correlationId`；
+- 同步 Hook 的等待、重复请求缓存以及 Claude Code `updatedInput` 回包留在 Managed Adapter；
+- OpenCode 的事件源、启动/恢复后的 `WaitUntilReadyAsync` 留在 OpenCode Adapter；仅对带稳定
+  request / part ID 的一次性交互和消息部件更新做有界去重，`session.idle` 等轮次事件不去重；
+- Node 仍是唯一 Active Owner。M3 只编译和回放，不启动生产 Host、不连接真实飞书、不写生产 Store、不操作真实 CLI。
 
-验收：三种 CLI 的标准契约测试共享同一测试集；Core 不出现 CLI 私有 payload 或 Manager。
+验收：三种 CLI 的标准契约测试共享同一组命令断言；命名管道、OpenCode HTTP 回退、SSE 分块、Hook
+同步回包和重复事件均有 Fake 线协议测试；Core 不出现 CLI 私有 payload 或 Manager。运行：
+
+```powershell
+dotnet test .\bridge-dotnet\tests\AiCliFeishu.Bridge.RuntimeAdapters.Tests\AiCliFeishu.Bridge.RuntimeAdapters.Tests.csproj -c Release
+```
 
 ### M4：飞书 Adapter
 
