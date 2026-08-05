@@ -36,8 +36,13 @@ public static class BridgeHostApplication
             services.GetRequiredService<BridgeBoundaryCatalog>().BuildRuntimeRegistry());
         builder.Services.AddSingleton<RuntimeCommandDispatcher>();
         builder.Services.AddSingleton<IBridgeRuntimeCommandGateway, BridgeRuntimeCommandGateway>();
+        builder.Services.AddSingleton<ReadOnlyNodeStoreShadow>();
+        builder.Services.AddSingleton<IBridgeStoreShadow>(services =>
+            services.GetRequiredService<ReadOnlyNodeStoreShadow>());
         builder.Services.AddSingleton<IBridgeHostSubsystem, PassiveOwnerGuardSubsystem>();
         builder.Services.AddSingleton<IBridgeHostSubsystem, BridgeBoundarySubsystem>();
+        builder.Services.AddSingleton<IBridgeHostSubsystem>(services =>
+            services.GetRequiredService<ReadOnlyNodeStoreShadow>());
         builder.Services.AddHostedService<BridgeInstanceLeaseService>();
         builder.Services.AddHostedService<BridgeRuntimeWorker>();
         configureServices?.Invoke(builder.Services);

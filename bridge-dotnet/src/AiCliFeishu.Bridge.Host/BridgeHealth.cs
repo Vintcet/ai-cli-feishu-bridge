@@ -85,6 +85,11 @@ public interface IBridgeHostSubsystem
     Task StopAsync(CancellationToken cancellationToken);
 }
 
+public interface IBridgeHostSubsystemHealth
+{
+    BridgeComponentHealth ComponentHealth { get; }
+}
+
 public sealed class PassiveOwnerGuardSubsystem : IBridgeHostSubsystem
 {
     public string Name => "production-owner";
@@ -111,9 +116,12 @@ public sealed class BridgeRuntimeWorker(
             {
                 await subsystem.StartAsync(stoppingToken);
                 started.Add(subsystem);
-                health.Report(
-                    subsystem.Name,
-                    subsystem is PassiveOwnerGuardSubsystem ? "passive" : "ready");
+                var component = subsystem is IBridgeHostSubsystemHealth provider
+                    ? provider.ComponentHealth
+                    : new BridgeComponentHealth(
+                        subsystem.Name,
+                        subsystem is PassiveOwnerGuardSubsystem ? "passive" : "ready");
+                health.Report(component.Name, component.Status, component.Detail);
             }
             health.SetLifecycle(BridgeHostLifecycleState.Ready);
             await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken);
