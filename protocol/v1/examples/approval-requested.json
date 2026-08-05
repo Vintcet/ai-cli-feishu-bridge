@@ -1,0 +1,18 @@
+{
+  "protocolVersion": 1,
+  "eventId": "event-approval-1",
+  "eventType": "approval.requested",
+  "occurredAt": "2026-08-05T10:00:00.000Z",
+  "runtime": "codex",
+  "session": {
+    "externalId": "session-12345678",
+    "cwd": "K:\\AI\\project"
+  },
+  "traceId": "trace-approval-1",
+  "correlationId": "approval-1",
+  "payload": {
+    "requestId": "approval-1",
+    "title": "执行本机命令",
+    "description": "等待用户决定"
+  }
+}

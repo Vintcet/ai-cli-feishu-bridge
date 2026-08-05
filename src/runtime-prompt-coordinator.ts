@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { ApprovalCoordinator } from "./approval-coordinator.js";
+import type { RuntimeAdapterRegistry } from "./bridge-protocol/runtime-adapter-registry.js";
 import type { CodexExitResult } from "./codex-runner.js";
 import { CodexRunner } from "./codex-runner.js";
 import {
@@ -34,6 +35,7 @@ interface PendingRemotePrompt {
 interface RuntimePromptCoordinatorDependencies {
   store: BridgeStore;
   codex: CodexRunner;
+  runtimeAdapters: RuntimeAdapterRegistry;
   managedTerminals: ManagedTerminalRouter;
   opencode?: OpenCodeManager;
   approvals: ApprovalCoordinator;
@@ -124,14 +126,7 @@ export class RuntimePromptCoordinator {
   }
 
   isRuntimeReadyForRetry(session: SessionRecord): boolean {
-    if (runtimeDefinition(session.runtime).transport === "http_event_stream") {
-      return Boolean(
-        this.dependencies.opencode?.findActiveInstanceBySession(
-          session.sessionId,
-        ),
-      );
-    }
-    return this.dependencies.managedTerminals.isReady(session);
+    return this.dependencies.runtimeAdapters.forSession(session).isReady(session);
   }
 
   async sendRetry(session: SessionRecord, retryPrompt: string): Promise<void> {
@@ -150,24 +145,9 @@ export class RuntimePromptCoordinator {
     this.inputLocks.add(session.sessionId);
     this.rememberRemotePrompt(session.sessionId, retryPrompt);
     try {
-      if (
-        runtimeDefinition(runningSession.runtime).transport ===
-        "http_event_stream"
-      ) {
-        if (!this.dependencies.opencode) {
-          throw new Error("opencode 支持未启用。");
-        }
-        await this.dependencies.opencode.sendPrompt(
-          runningSession.sessionId,
-          retryPrompt,
-        );
-      } else {
-        await this.dependencies.managedTerminals.send(
-          runningSession,
-          retryPrompt,
-          "steer",
-        );
-      }
+      await this.dependencies.runtimeAdapters
+        .requireCapability(runningSession.runtime ?? "codex", "prompt.send")
+        .sendPrompt(runningSession, retryPrompt, "steer");
     } catch (error) {
       this.inputLocks.delete(session.sessionId);
       this.forgetRemotePrompt(session.sessionId, retryPrompt);
@@ -214,7 +194,7 @@ export class RuntimePromptCoordinator {
     queueRequested = false,
     requestFileReturn = false,
   ): Promise<void> {
-    const { store, inputs, runtimeRetries, managedTerminals } =
+    const { store, inputs, runtimeRetries, managedTerminals, runtimeAdapters } =
       this.dependencies;
     if (store.hasPendingApprovalForSession(session.sessionId)) {
       await this.respond(
@@ -244,7 +224,7 @@ export class RuntimePromptCoordinator {
       return;
     }
     const managedTerminal = managedTerminals.isManaged(session);
-    if (managedTerminal && !managedTerminals.isReady(session)) {
+    if (managedTerminal && !runtimeAdapters.forSession(session).isReady(session)) {
       await this.respond(
         sourceMessageId,
         chatId,
@@ -291,7 +271,12 @@ export class RuntimePromptCoordinator {
         this.inputLocks.add(session.sessionId);
         this.rememberRemotePrompt(session.sessionId, prompt);
         try {
-          await managedTerminals.send(runningSession, prompt, submitMode);
+          await runtimeAdapters
+            .requireCapability(
+              runningSession.runtime ?? "codex",
+              submitMode === "queue" ? "prompt.queue" : "prompt.send",
+            )
+            .sendPrompt(runningSession, prompt, submitMode);
         } catch (error) {
           this.forgetRemotePrompt(session.sessionId, prompt);
           if (submitMode === "queue") {
@@ -427,7 +412,8 @@ export class RuntimePromptCoordinator {
       );
       return;
     }
-    if (!this.dependencies.opencode?.findActiveInstanceBySession(sessionId)) {
+    const runtimeAdapter = this.dependencies.runtimeAdapters.forSession(session);
+    if (!runtimeAdapter.isReady(session)) {
       this.inputLocks.add(sessionId);
       await this.respond(
         item.sourceMessageId,
@@ -450,7 +436,9 @@ export class RuntimePromptCoordinator {
         managedByAssistant: true,
       });
       this.rememberRemotePrompt(session.sessionId, item.prompt);
-      await this.dependencies.opencode.sendPrompt(session.sessionId, item.prompt);
+      await this.dependencies.runtimeAdapters
+        .requireCapability("opencode", "prompt.send")
+        .sendPrompt(runningSession, item.prompt, "steer");
       if (item.requestFileReturn) {
         this.dependencies.files.registerReturnRequest(
           session.sessionId,
@@ -534,7 +522,8 @@ export class RuntimePromptCoordinator {
     chatId: string,
     requestFileReturn: boolean,
   ): Promise<void> {
-    if (!this.dependencies.opencode?.findActiveInstanceBySession(session.sessionId)) {
+    const runtimeAdapter = this.dependencies.runtimeAdapters.forSession(session);
+    if (!runtimeAdapter.isReady(session)) {
       await this.respond(
         sourceMessageId,
         chatId,
@@ -562,7 +551,9 @@ export class RuntimePromptCoordinator {
         managedByAssistant: true,
       });
       this.rememberRemotePrompt(session.sessionId, prompt);
-      await this.dependencies.opencode.sendPrompt(session.sessionId, prompt);
+      await this.dependencies.runtimeAdapters
+        .requireCapability("opencode", "prompt.send")
+        .sendPrompt(runningSession, prompt, "steer");
       if (requestFileReturn) {
         this.dependencies.files.registerReturnRequest(
           session.sessionId,

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-cli-feishu.local/protocol/v1/common.schema.json",
+  "title": "AI CLI Feishu Bridge Protocol Common Types",
+  "$defs": {
+    "runtime": {
+      "type": "string",
+      "enum": ["codex", "claudecode", "opencode"]
+    },
+    "sessionReference": {
+      "type": "object",
+      "properties": {
+        "externalId": { "type": "string", "minLength": 1 },
+        "cwd": { "type": "string" }
+      },
+      "required": ["externalId"],
+      "additionalProperties": false
+    },
+    "envelope": {
+      "type": "object",
+      "properties": {
+        "protocolVersion": { "const": 1 },
+        "runtime": { "$ref": "#/$defs/runtime" },
+        "session": { "$ref": "#/$defs/sessionReference" },
+        "traceId": { "type": "string", "minLength": 1 },
+        "correlationId": { "type": "string", "minLength": 1 }
+      },
+      "required": ["protocolVersion", "runtime", "session", "traceId"]
+    }
+  }
+}

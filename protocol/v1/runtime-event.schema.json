@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-cli-feishu.local/protocol/v1/runtime-event.schema.json",
+  "title": "AI CLI Feishu Runtime Event",
+  "allOf": [
+    { "$ref": "common.schema.json#/$defs/envelope" },
+    {
+      "type": "object",
+      "properties": {
+        "eventId": { "type": "string", "minLength": 1 },
+        "eventType": {
+          "type": "string",
+          "enum": [
+            "session.started",
+            "session.ended",
+            "turn.started",
+            "turn.activity",
+            "turn.completed",
+            "turn.failed",
+            "approval.requested",
+            "approval.resolved_externally",
+            "input.requested",
+            "input.resolved_externally",
+            "runtime.connected",
+            "runtime.disconnected"
+          ]
+        },
+        "occurredAt": { "type": "string", "format": "date-time" },
+        "payload": { "type": "object" }
+      },
+      "required": ["eventId", "eventType", "occurredAt", "payload"]
+    },
+    {
+      "oneOf": [
+        {
+          "properties": {
+            "eventType": { "const": "session.started" },
+            "payload": {
+              "type": "object",
+              "properties": { "model": { "type": "string" } },
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "eventType": { "const": "session.ended" },
+            "payload": {
+              "type": "object",
+              "properties": { "reason": { "type": "string" } },
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "eventType": { "const": "turn.started" },
+            "payload": {
+              "type": "object",
+              "properties": { "turnId": { "type": "string" } },
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "eventType": { "const": "turn.activity" },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "turnId": { "type": "string" },
+                "summary": { "type": "string", "minLength": 1 }
+              },
+              "required": ["summary"],
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "eventType": { "const": "turn.completed" },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "turnId": { "type": "string" },
+                "message": { "type": "string" }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "eventType": { "const": "turn.failed" },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "turnId": { "type": "string" },
+                "error": { "type": "string", "minLength": 1 },
+                "code": { "type": "string" }
+              },
+              "required": ["error"],
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "eventType": { "const": "approval.requested" },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "requestId": { "type": "string", "minLength": 1 },
+                "title": { "type": "string", "minLength": 1 },
+                "description": { "type": "string" }
+              },
+              "required": ["requestId", "title"],
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "eventType": { "const": "approval.resolved_externally" },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "requestId": { "type": "string", "minLength": 1 },
+                "outcome": { "enum": ["allowed", "denied", "cancelled"] }
+              },
+              "required": ["requestId", "outcome"],
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "eventType": { "const": "input.requested" },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "requestId": { "type": "string", "minLength": 1 },
+                "questions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": { "type": "string", "minLength": 1 },
+                      "prompt": { "type": "string", "minLength": 1 },
+                      "options": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                      },
+                      "multiple": { "type": "boolean" }
+                    },
+                    "required": ["id", "prompt"],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": ["requestId", "questions"],
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "eventType": { "const": "input.resolved_externally" },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "requestId": { "type": "string", "minLength": 1 }
+              },
+              "required": ["requestId"],
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "eventType": { "const": "runtime.connected" },
+            "payload": {
+              "type": "object",
+              "properties": { "endpoint": { "type": "string" } },
+              "additionalProperties": false
+            }
+          }
+        },
+        {
+          "properties": {
+            "eventType": { "const": "runtime.disconnected" },
+            "payload": {
+              "type": "object",
+              "properties": { "reason": { "type": "string" } },
+              "additionalProperties": false
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -11,6 +11,8 @@ data/hook-test-home/
 *.log.*
 desktop-control/**/bin/
 desktop-control/**/obj/
+bridge-dotnet/**/bin/
+bridge-dotnet/**/obj/
 desktop-control/publish/
 desktop-control/**/publish*/
 /publish/

@@ -1,0 +1,16 @@
+{
+  "protocolVersion": 1,
+  "commandId": "command-prompt-1",
+  "commandType": "prompt.send",
+  "createdAt": "2026-08-05T10:00:01.000Z",
+  "runtime": "claudecode",
+  "session": {
+    "externalId": "session-12345678",
+    "cwd": "K:\\AI\\project"
+  },
+  "traceId": "trace-prompt-1",
+  "payload": {
+    "prompt": "继续执行并汇报结果",
+    "mode": "steer"
+  }
+}

@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 
 import { ApprovalCoordinator } from "./approval-coordinator.js";
+import { RuntimeAdapterRegistry } from "./bridge-protocol/runtime-adapter-registry.js";
 import {
   CardActionHandler,
   type CardActionResult,
@@ -58,6 +59,8 @@ import { BridgeStore } from "./store.js";
 import { RuntimeRetryCoordinator } from "./runtime-retry-coordinator.js";
 import { RuntimeLaunchCoordinator } from "./runtime-launch-coordinator.js";
 import { RuntimePromptCoordinator } from "./runtime-prompt-coordinator.js";
+import { ManagedTerminalRuntimeAdapter } from "./runtime-adapters/managed-terminal-runtime-adapter.js";
+import { OpenCodeRuntimeAdapter } from "./runtime-adapters/opencode-runtime-adapter.js";
 import { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import { SessionDirectory } from "./session-directory.js";
 import { UserInputCoordinator } from "./user-input-coordinator.js";
@@ -120,6 +123,14 @@ export class BridgeController {
     private readonly opencode: OpenCodeManager | undefined,
     private readonly config: ControllerConfig,
   ) {
+    const runtimeAdapters = new RuntimeAdapterRegistry();
+    runtimeAdapters.register(
+      new ManagedTerminalRuntimeAdapter("codex", managedTerminals),
+    );
+    runtimeAdapters.register(
+      new ManagedTerminalRuntimeAdapter("claudecode", managedTerminals),
+    );
+    runtimeAdapters.register(new OpenCodeRuntimeAdapter(opencode));
     this.files = new FileTransferCoordinator({
       feishu,
       uploadsDirectory: config.uploadsDirectory,
@@ -245,6 +256,7 @@ export class BridgeController {
     this.runtimePrompts = new RuntimePromptCoordinator({
       store,
       codex,
+      runtimeAdapters,
       managedTerminals,
       opencode,
       approvals: this.approvals,

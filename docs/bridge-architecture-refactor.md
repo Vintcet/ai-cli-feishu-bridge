@@ -1,0 +1,261 @@
+# AI CLI 飞书助手 C# 架构与迁移方案
+
+## 1. 决策
+
+项目最终统一迁移到 C#，删除生产包中的 Node.js、npm、`dist` 和 JavaScript 运行时依赖。
+
+迁移采用渐进替换，不同时重写全部功能。现有 Node 桥接服务在对应功能被 C# 实现、回放测试和实际验收前继续作为唯一生产执行者；C# 新实现先建立协议与纯业务核心，再依次接管运行时、存储和飞书链路。
+
+这项决策解决的是长期维护成本，但当前故障的根因仍然是边界混乱，而不是 TypeScript 语言本身。因此迁移过程中仍遵守“CLI 差异只进入 Adapter、核心只处理标准协议”的原则。
+
+## 2. 最终进程结构
+
+```text
+                             Feishu Cloud
+                                  ↕
+┌────────────────── AiCliFeishuBridgeHost.exe ──────────────────┐
+│  Feishu Adapter                                               │
+│         ↕                                                     │
+│  Bridge Core ── Session / Approval / Input / Retry / Launch   │
+│         ↕                                                     │
+│  Bridge Protocol + Runtime Adapter Registry                   │
+│         ↕                         ↕                           │
+│  Codex / Claude Adapter          OpenCode Adapter              │
+│  Hook HTTP + Terminal IPC        HTTP API + SSE                │
+└───────────────↕────────────────────────────↕───────────────────┘
+                ↕                            ↕
+     AiCliFeishuTerminalHost.exe       OpenCode Process
+                ↕
+        Codex / Claude Code
+
+          AiCliFeishuControl.exe
+          WinForms control plane
+                    ↕
+          Local authenticated API
+                    ↕
+          AiCliFeishuBridgeHost.exe
+```
+
+三个进程均为 C#：
+
+- `AiCliFeishuBridgeHost.exe` 是后台宿主，使用 .NET Generic Host / ASP.NET Core，承载飞书长连接、本机 Hook HTTP、后台 Worker、核心状态机和持久化；
+- `AiCliFeishuControl.exe` 是 WinForms 控制面板，只展示和修改状态，不承担后台任务调度；
+- `AiCliFeishuTerminalHost.exe` 保留为终端 Sidecar，隔离 CLI 控制台、输入和生命周期。版本化宿主逻辑继续保留。
+
+控制面板退出或重启不应中断后台桥接；终端宿主异常不应带崩后台服务。
+
+## 3. 代码结构
+
+迁移期间新增代码放在 `bridge-dotnet/`，避免与现有桌面端和 Node 代码混杂：
+
+```text
+protocol/v1/                         语言无关 JSON Schema 与样例
+bridge-dotnet/src/
+  AiCliFeishu.Bridge.Protocol/       C# 协议模型、序列化和验证
+  AiCliFeishu.Bridge.Core/           纯业务、能力模型、端口接口
+  AiCliFeishu.Bridge.Adapters.*/     CLI、飞书、存储的实现（后续）
+  AiCliFeishu.Bridge.Host/           后台进程装配（后续）
+bridge-dotnet/tests/
+  AiCliFeishu.Bridge.Core.Tests/     协议与核心契约测试
+desktop-control/                     WinForms 与 TerminalHost
+src/                                 迁移期间保留的 Node 实现
+```
+
+依赖只能向内：Host 和 Adapter 可以依赖 Core / Protocol，Core 只能依赖 Protocol，Protocol 不依赖任何 SDK、桌面 UI 或基础设施。
+
+## 4. 标准桥接协议
+
+`protocol/v1/` 是跨语言事实来源。协议版本初始固定为 `1`，TypeScript 与 C# 都必须通过相同样例和字段契约测试。
+
+事件和命令使用统一信封：
+
+```json
+{
+  "protocolVersion": 1,
+  "runtime": "codex",
+  "session": {
+    "externalId": "session-id",
+    "cwd": "K:\\project"
+  },
+  "traceId": "trace-id",
+  "correlationId": "optional-related-id"
+}
+```
+
+`traceId` 串联一次完整链路；`correlationId` 关联审批请求与结果、补充问题与答案、命令与执行结果。
+
+### 标准事件
+
+- `session.started`、`session.ended`
+- `turn.started`、`turn.activity`、`turn.completed`、`turn.failed`
+- `approval.requested`、`approval.resolved_externally`
+- `input.requested`、`input.resolved_externally`
+- `runtime.connected`、`runtime.disconnected`
+
+### 标准命令
+
+- `prompt.send`
+- `approval.resolve`
+- `input.resolve`
+- `session.launch`
+- `session.resume`
+- `session.stop`
+
+协议只表达桥接层语义。例如核心层只表达“本次允许”“会话内允许”“拒绝”，Codex、Claude Code 和 OpenCode Adapter 分别翻译为自己的原生参数。
+
+## 5. 分层职责
+
+### Runtime Adapter
+
+- 接收原生 Hook、SSE、HTTP 响应或终端状态；
+- 将原始输入翻译为标准 `RuntimeEvent`；
+- 将标准 `RuntimeCommand` 翻译为 API、终端输入或 Hook 响应；
+- 声明运行时能力；
+- 不负责飞书卡片、群聊路由、业务重试或持久化策略。
+
+### Bridge Core
+
+- 统一管理会话、轮次、审批、补充问题、消息队列、重试、启动任务和通知状态；
+- 只接收标准事件，只发出标准命令；
+- 决定业务“做什么”，不决定某个 CLI“怎么做”；
+- 不引用 WinForms、飞书 SDK、Hook payload、SSE payload 或具体 CLI Client。
+
+### Feishu Adapter
+
+- 将核心标准视图渲染成文字或卡片；
+- 将飞书消息和卡片回调翻译为核心输入；
+- 负责飞书长连接、发送、更新和回调协议；
+- 不直接调用任何 CLI Adapter。
+
+## 6. 同步 Hook 与异步 SSE
+
+传输可以不同，业务语义必须相同。
+
+同步 Hook 的审批请求在原 HTTP 请求中等待结果：Adapter 产生 `approval.requested`，等待核心返回对应的 `approval.resolve`，再转换为 Hook 响应。异步 SSE 产生相同事件，之后 Adapter 将标准决定调用到 CLI API。
+
+Bridge Core 不区分审批来自阻塞 Hook 还是 SSE。超时、重复点击、本地已处理和飞书卡片失效由同一审批状态机处理；等待方式和响应格式留在 Adapter 内。
+
+## 7. 运行时能力
+
+```text
+prompt.send       发送实时消息
+prompt.queue      CLI 原生支持消息排队
+approval.resolve  执行审批决定
+input.resolve     回答补充问题
+session.launch    新建会话
+session.resume    恢复已有会话
+session.stop      停止会话
+activity.stream   持续产生结构化活动事件
+```
+
+Core 创建命令前必须检查能力。能力缺失时返回明确错误，不能静默套用其他 CLI 的行为。外部或历史 Codex 通过一次性进程恢复属于 `session.resume`，不与已连接终端的 `prompt.send` 混为一条路径。
+
+## 8. 状态所有权与切换原则
+
+迁移期间最危险的是 Node 和 C# 同时修改状态或同时响应飞书，因此遵守以下规则：
+
+- 任一功能在任一时刻只有一个 Active Owner；
+- C# 影子模式可以读取、归一化、记录和对比，但不得发送飞书消息、执行 CLI 命令或写生产状态；
+- 功能切换以完整纵切片进行，例如“OpenCode 实时消息”从输入到状态到输出整体切换；
+- 切换必须有回退开关，回退时仍只有一个写入者；
+- 迁移前保持现有 JSON 数据格式可读，不顺带更换数据库；
+- 最终切换前停止 Node、刷盘、由 C# 取得单实例锁，然后启动 C# Active Owner。
+
+## 9. 可观测性
+
+标准日志阶段为：
+
+```text
+ingress.received
+adapter.normalized
+core.accepted
+core.persisted
+feishu.sent
+feishu.callback_received
+core.command_created
+adapter.command_started
+adapter.command_completed
+adapter.command_failed
+```
+
+每条跨层链路使用同一个 `traceId`。日志至少包含阶段、运行时、内部会话 ID、外部会话 ID、事件或命令类型和耗时；不得包含令牌、完整敏感命令、秘密答案、附件内容或不必要的文件正文。
+
+## 10. 迁移阶段
+
+### M0：协议与 C# 核心骨架
+
+- 建立版本化 JSON Schema 和跨语言样例；
+- 建立 C# Protocol / Core / Tests 工程；
+- 实现能力模型、Adapter 注册表、命令调度边界和协议验证；
+- 保留 TypeScript Adapter 作为迁移期隔离层。
+
+验收：Node 全套测试和桌面端测试不回退；C# 能反序列化并验证共享样例；调度器不会将命令交给能力不匹配的 Adapter。
+
+### M1：行为录制与回放基线
+
+- 对现有 Node 的 Hook、SSE、核心状态变化、飞书输出建立脱敏录制；
+- 建立 C# 影子归一化和差异报告；
+- 为审批、问答、消息、重试和启动建立黄金样例。
+
+验收：C# 对同一输入生成与 Node 等价的标准事件和业务决定，且影子模式没有外部副作用。
+
+### M2：存储与纯业务状态机
+
+- 在 C# 实现现有 JSON 存储的兼容读取和原子写入；
+- 迁移会话目录、审批、补充问题、消息路由、重试和启动任务；
+- WinForms 继续通过本机 API 读取，不直接访问存储文件。
+
+验收：使用生产数据副本可无损启动；状态迁移和保留策略通过回放测试；Node 与 C# 不同时写文件。
+
+### M3：Runtime Adapter
+
+- 迁移 Codex 和 Claude Code Hook HTTP；
+- 将 TerminalHost IPC 接入标准命令；
+- 迁移 OpenCode HTTP / SSE；
+- 迁移启动、恢复、停止和实时消息纵切片。
+
+验收：三种 CLI 的标准契约测试共享同一测试集；Core 不出现 CLI 私有 payload 或 Manager。
+
+### M4：飞书 Adapter
+
+- 迁移飞书长连接、消息接收、附件、群聊和卡片；
+- 统一审批与问答状态机；
+- CLI 本地处理后，飞书卡片自动更新为已处理；
+- 所有回调保持幂等。
+
+验收：Node 与 C# 的卡片和路由行为对比通过；飞书与本地任一端先操作，另一端均不能重复执行。
+
+### M5：后台 Host 与正式切换
+
+- 建立独立 Bridge Host 生命周期、单实例锁和健康检查；
+- 控制面板切换为启动和管理 C# Host；
+- 发布包改为纯 .NET，不再携带 Node、npm、`dist` 或 `node_modules`；
+- 灰度运行后执行正式切换和回退演练。
+
+验收：控制面板重启不影响桥接；安装包无需 Node；三种 CLI、飞书、开机启动和版本化 TerminalHost 全链路通过。
+
+### M6：删除旧实现
+
+- 删除 Node 入口、TypeScript 业务代码和 npm 发布步骤；
+- 保留必要的协议样例和迁移记录；
+- 更新 CI、安装脚本和文档。
+
+验收：生产和 CI 均不调用 Node；仓库只保留 C# 生产实现；旧数据完成备份和兼容验证。
+
+## 11. 明确不做
+
+- 不做一次性“大爆炸”重写；
+- 不把所有职责塞进 WinForms；
+- 不在迁移中同时更换数据库；
+- 不拆远程微服务；
+- 不允许 Node 与 C# 双写或重复发送飞书消息；
+- 不为了表面统一而删除历史会话恢复和版本化终端宿主。
+
+## 12. 最终完成定义
+
+- 生产包完全不依赖 Node.js 和 npm；
+- Bridge Core 不包含 Codex、Claude Code、OpenCode 或飞书协议特例；
+- 新增 CLI 主要只需新增 Adapter、运行时清单项和契约测试；
+- UI、后台 Host 和 TerminalHost 生命周期互相隔离；
+- 任一次消息、审批或问答故障能由 `traceId` 定位到明确层级；
+- 同一业务语义在所有 CLI 上共享核心状态机和验收测试。
