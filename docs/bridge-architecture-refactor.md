@@ -270,12 +270,32 @@ dotnet test .\bridge-dotnet\tests\AiCliFeishu.Bridge.RuntimeAdapters.Tests\AiCli
 
 ### M4：飞书 Adapter
 
-- 迁移飞书长连接、消息接收、附件、群聊和卡片；
-- 统一审批与问答状态机；
-- CLI 本地处理后，飞书卡片自动更新为已处理；
-- 所有回调保持幂等。
+- 新增 `AiCliFeishu.Bridge.Adapters.Feishu`，把飞书 HTTP、WebSocket、protobuf、消息、附件、
+  群聊和卡片限制在同一个外层 Adapter；
+- 飞书原生事件必须先经 `FeishuEventNormalizer` 转换为 `FeishuIntent`，再进入 Core；`/`、
+  `/新建` 等全局命令不依赖某个活跃 CLI 会话；命令目录、新建运行时选择和项目表单由 C#
+  Renderer 生成，卡片 action 只允许登记过的白名单；
+- 飞书 Adapter 只能调用 Core 的标准输入端口，不能引用或直接调用 ManagedTerminal / OpenCode
+  Runtime Adapter。Core 产生标准 `RuntimeCommand` 后，再由 M3 的 Adapter Registry 分派；
+- `ApprovalStateMachine` 和 `InputStateMachine` 是审批、问答的唯一业务决策方。飞书先操作时 Core
+  完成状态迁移，本地重复操作无效；CLI 本地先处理时 Core 完成状态迁移，关联飞书卡片全部更新为
+  无按钮的“已处理”，飞书重复点击无效；
+- 卡片同步使用 `(messageId, revision)` 幂等台账。发送失败释放 claim，允许同一 revision 重试；
+- WebSocket 实现与飞书 Node SDK 的 `pbbp2.Frame` 字段号、0 起始分片、callback ACK 和 ping 契约
+  对齐；协议编解码不引入额外 protobuf 包；
+- 附件下载采用流式大小限制，超限或失败删除半文件；上传在 401 / 403 刷新 token 后重新创建
+  文件流和 multipart，不复用已经消费或释放的请求体；
+- Node 仍是唯一生产 Active Owner。M4 只运行 Fake HTTP、内存 WebSocket 和协议回放，不连接真实
+  飞书、不发送真实消息、不写生产 Store、不启动或停止真实 CLI。
 
-验收：Node 与 C# 的卡片和路由行为对比通过；飞书与本地任一端先操作，另一端均不能重复执行。
+验收：飞书事件只能经过“原生线协议 → 标准意图 → Core → 标准命令 → Runtime Adapter”；
+消息命令、命令目录和新建流程卡片、卡片白名单、HTTP token 刷新、群聊、附件、protobuf、
+乱序/重复分片、接收或 ping 故障后的断线重连、
+事件 ACK、审批/问答双端幂等和卡片 revision 均有无外部副作用的契约测试。运行：
+
+```powershell
+dotnet test .\bridge-dotnet\tests\AiCliFeishu.Bridge.FeishuAdapter.Tests\AiCliFeishu.Bridge.FeishuAdapter.Tests.csproj -c Release
+```
 
 ### M5：后台 Host 与正式切换
 
