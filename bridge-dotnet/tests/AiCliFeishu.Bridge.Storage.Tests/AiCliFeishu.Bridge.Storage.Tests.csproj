@@ -6,7 +6,7 @@
     <NuGetAudit>false</NuGetAudit>
     <IsTestProject>true</IsTestProject>
     <IsPackable>false</IsPackable>
-    <RootNamespace>AiCliFeishu.Bridge.Core.Tests</RootNamespace>
+    <RootNamespace>AiCliFeishu.Bridge.Storage.Tests</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,13 +16,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\AiCliFeishu.Bridge.Adapters.Storage\AiCliFeishu.Bridge.Adapters.Storage.csproj" />
     <ProjectReference Include="..\..\src\AiCliFeishu.Bridge.Core\AiCliFeishu.Bridge.Core.csproj" />
-    <ProjectReference Include="..\..\src\AiCliFeishu.Bridge.Protocol\AiCliFeishu.Bridge.Protocol.csproj" />
-    <None Include="..\..\..\protocol\v1\examples\*.json"
-          Link="ProtocolExamples\%(Filename)%(Extension)"
-          CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\..\..\protocol\migration\v1\state-transitions.jsonl"
-          Link="MigrationExamples\state-transitions.jsonl"
-          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

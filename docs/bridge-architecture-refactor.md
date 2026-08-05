@@ -223,6 +223,31 @@ C# 仅做影子归一化和对比。
 
 验收：使用生产数据副本可无损启动；状态迁移和保留策略通过回放测试；Node 与 C# 不同时写文件。
 
+M2 的 C# Storage Adapter 默认以 `ReadOnly` 打开 Node Store，只兼容读取
+`bindings.json`、`sessions.json`、`message-routes.json`、`approvals.json`、
+`settings.json` 和 `control-token.json`。未显式建模的 JSON 字段通过扩展字段原样保留；
+非法结构只报告错误，不隔离、不覆盖生产文件。只有测试或迁移工具创建的独立副本才能显式使用
+`ReadWriteCopy`，写入采用同目录临时文件刷盘后原子替换。
+
+会话、审批、补充问题、消息路由、重试和启动任务已作为无 IO 的不可变状态转换放入 Core。
+审批、补充问题、消息去重、重试和启动均使用“创建/领取/完成”边界，重复完成不会再次产生业务决定；
+路由和审批保留策略与 Node 的时间和数量限制保持一致，待审批记录不受已完成记录数量上限影响。
+
+可只读检查现有 Store；该命令不会写入 `data`：
+
+```powershell
+dotnet run --project .\bridge-dotnet\src\AiCliFeishu.Bridge.StoreVerify\AiCliFeishu.Bridge.StoreVerify.csproj -- .\data
+```
+
+需要验证原子写回时，必须提供一个不存在或为空、且不同于生产 Store 的副本目录：
+
+```powershell
+dotnet run --project .\bridge-dotnet\src\AiCliFeishu.Bridge.StoreVerify\AiCliFeishu.Bridge.StoreVerify.csproj -- .\data --roundtrip-copy .\.m2-store-copy
+```
+
+M2 仍不建立后台 Host，也不连接 CLI 或飞书。Node 继续独占生产 Store；C# 的写入能力仅用于
+副本验收，正式取得 Active Owner 要等 M5 的停止 Node、刷盘和单实例锁切换流程。
+
 ### M3：Runtime Adapter
 
 - 迁移 Codex 和 Claude Code Hook HTTP；
