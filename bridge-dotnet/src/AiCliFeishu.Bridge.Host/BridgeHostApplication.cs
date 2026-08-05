@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using AiCliFeishu.Bridge.Adapters.Feishu;
+using AiCliFeishu.Bridge.Core;
 
 namespace AiCliFeishu.Bridge.Host;
 
@@ -23,7 +25,19 @@ public static class BridgeHostApplication
         builder.Services.AddSingleton<BridgeHealthRegistry>();
         builder.Services.AddSingleton<IBridgeInstanceLease, FileBridgeInstanceLease>();
         builder.Services.AddSingleton<IBridgeControlTokenProvider, FileBridgeControlTokenProvider>();
+        builder.Services.AddSingleton<BridgeRuntimeEventIngress>();
+        builder.Services.AddSingleton<IRuntimeEventSink>(services =>
+            services.GetRequiredService<BridgeRuntimeEventIngress>());
+        builder.Services.AddSingleton<BridgeFeishuIntentIngress>();
+        builder.Services.AddSingleton<IFeishuIntentSink>(services =>
+            services.GetRequiredService<BridgeFeishuIntentIngress>());
+        builder.Services.AddSingleton<BridgeBoundaryCatalog>();
+        builder.Services.AddSingleton<RuntimeAdapterRegistry>(services =>
+            services.GetRequiredService<BridgeBoundaryCatalog>().BuildRuntimeRegistry());
+        builder.Services.AddSingleton<RuntimeCommandDispatcher>();
+        builder.Services.AddSingleton<IBridgeRuntimeCommandGateway, BridgeRuntimeCommandGateway>();
         builder.Services.AddSingleton<IBridgeHostSubsystem, PassiveOwnerGuardSubsystem>();
+        builder.Services.AddSingleton<IBridgeHostSubsystem, BridgeBoundarySubsystem>();
         builder.Services.AddHostedService<BridgeInstanceLeaseService>();
         builder.Services.AddHostedService<BridgeRuntimeWorker>();
         configureServices?.Invoke(builder.Services);

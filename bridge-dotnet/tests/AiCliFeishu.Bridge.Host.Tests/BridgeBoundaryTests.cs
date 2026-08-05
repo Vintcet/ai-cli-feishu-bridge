@@ -1,0 +1,288 @@
+using System.Text.Json;
+using AiCliFeishu.Bridge.Adapters.Feishu;
+using AiCliFeishu.Bridge.Core;
+using AiCliFeishu.Bridge.Protocol;
+
+namespace AiCliFeishu.Bridge.Host.Tests;
+
+[TestClass]
+public sealed class BridgeBoundaryTests
+{
+    [TestMethod]
+    public async Task RuntimeIngressValidatesSerializesAndDeduplicatesCompletedEvents()
+    {
+        var handler = new RecordingRuntimeEventHandler();
+        using var ingress = new BridgeRuntimeEventIngress([handler]);
+        var runtimeEvent = Event("event-1");
+
+        await Task.WhenAll(
+            ingress.PublishAsync(runtimeEvent),
+            ingress.PublishAsync(runtimeEvent));
+
+        Assert.AreEqual(1, handler.Events.Count);
+        Assert.AreEqual(1, handler.MaximumConcurrency);
+    }
+
+    [TestMethod]
+    public async Task RuntimeIngressReleasesFailedEventForRetry()
+    {
+        var handler = new RecordingRuntimeEventHandler { FailuresRemaining = 1 };
+        using var ingress = new BridgeRuntimeEventIngress([handler]);
+        var runtimeEvent = Event("retry-event");
+
+        await Assert.ThrowsExceptionAsync<InvalidOperationException>(() =>
+            ingress.PublishAsync(runtimeEvent));
+        await ingress.PublishAsync(runtimeEvent);
+
+        Assert.AreEqual(2, handler.Attempts);
+        Assert.AreEqual(1, handler.Events.Count);
+    }
+
+    [TestMethod]
+    public async Task RuntimeIngressRejectsInvalidProtocolBeforeBusinessHandler()
+    {
+        var handler = new RecordingRuntimeEventHandler();
+        using var ingress = new BridgeRuntimeEventIngress([handler]);
+
+        await Assert.ThrowsExceptionAsync<InvalidDataException>(() =>
+            ingress.PublishAsync(Event("invalid") with { TraceId = "" }));
+
+        Assert.AreEqual(0, handler.Attempts);
+    }
+
+    [TestMethod]
+    public async Task FeishuIngressHasExactlyOneBusinessDecisionHandler()
+    {
+        var handler = new RecordingFeishuIntentHandler();
+        var ingress = new BridgeFeishuIntentIngress([handler]);
+        var intent = Intent();
+
+        var result = await ingress.PublishAsync(intent);
+
+        Assert.AreSame(intent, handler.Intents.Single());
+        Assert.AreEqual("已处理", result!.ToastContent);
+    }
+
+    [TestMethod]
+    public async Task UnknownFeishuIntentNeverReachesBusinessHandler()
+    {
+        var handler = new RecordingFeishuIntentHandler();
+        var ingress = new BridgeFeishuIntentIngress([handler]);
+
+        await Assert.ThrowsExceptionAsync<InvalidDataException>(() =>
+            ingress.PublishAsync(Intent() with { IntentType = "unknown.intent" }));
+
+        Assert.AreEqual(0, handler.Intents.Count);
+    }
+
+    [TestMethod]
+    public void DuplicateBusinessHandlersAreRejectedAtStartup()
+    {
+        using var runtimeIngress = new BridgeRuntimeEventIngress(
+            [new RecordingRuntimeEventHandler(), new RecordingRuntimeEventHandler()]);
+        var feishuIngress = new BridgeFeishuIntentIngress(
+            [new RecordingFeishuIntentHandler(), new RecordingFeishuIntentHandler()]);
+
+        Assert.ThrowsException<InvalidOperationException>(runtimeIngress.ValidateConfiguration);
+        Assert.ThrowsException<InvalidOperationException>(feishuIngress.ValidateConfiguration);
+    }
+
+    [TestMethod]
+    public async Task StandardCommandGatewayDispatchesOnlyToMatchingRuntimeAdapter()
+    {
+        var codex = new RecordingRuntimeAdapter(RuntimeNames.Codex);
+        var openCode = new RecordingRuntimeAdapter(RuntimeNames.OpenCode);
+        var registry = new RuntimeAdapterRegistry();
+        registry.Register(codex);
+        registry.Register(openCode);
+        IBridgeRuntimeCommandGateway gateway = new BridgeRuntimeCommandGateway(
+            new RuntimeCommandDispatcher(registry));
+
+        await gateway.DispatchAsync(Command(RuntimeNames.OpenCode));
+
+        Assert.IsNull(codex.LastCommand);
+        Assert.AreEqual(RuntimeNames.OpenCode, openCode.LastCommand!.Runtime);
+    }
+
+    [TestMethod]
+    public async Task FeishuIntentCanOnlyReachCliThroughStandardCommandGateway()
+    {
+        var codex = new RecordingRuntimeAdapter(RuntimeNames.Codex);
+        var openCode = new RecordingRuntimeAdapter(RuntimeNames.OpenCode);
+        var registry = new RuntimeAdapterRegistry();
+        registry.Register(codex);
+        registry.Register(openCode);
+        var gateway = new BridgeRuntimeCommandGateway(new RuntimeCommandDispatcher(registry));
+        var businessHandler = new PromptIntentHandler(gateway, RuntimeNames.OpenCode);
+        var ingress = new BridgeFeishuIntentIngress([businessHandler]);
+
+        await ingress.PublishAsync(Intent() with
+        {
+            IntentType = FeishuIntentTypes.MessagePrompt,
+            Text = "继续",
+        });
+
+        Assert.IsNull(codex.LastCommand);
+        Assert.AreEqual(RuntimeCommandTypes.PromptSend, openCode.LastCommand!.CommandType);
+        Assert.AreEqual("trace-feishu", openCode.LastCommand.TraceId);
+        Assert.AreEqual("继续", openCode.LastCommand.Payload.GetProperty("prompt").GetString());
+    }
+
+    [TestMethod]
+    public void PassiveBoundaryCatalogAcceptsMissingHandlersButRejectsDuplicateRuntimeAdapters()
+    {
+        using var runtimeIngress = new BridgeRuntimeEventIngress([]);
+        var feishuIngress = new BridgeFeishuIntentIngress([]);
+        var passive = BridgeHostOptions.Passive(Path.GetTempPath());
+        var catalog = new BridgeBoundaryCatalog(
+            [],
+            runtimeIngress,
+            feishuIngress,
+            passive);
+
+        var snapshot = catalog.Validate();
+
+        Assert.IsTrue(snapshot.Passive);
+        Assert.AreEqual(0, snapshot.RuntimeEventHandlers);
+        Assert.AreEqual(0, snapshot.FeishuIntentHandlers);
+
+        var duplicates = new BridgeBoundaryCatalog(
+            [
+                new RecordingRuntimeAdapter(RuntimeNames.Codex),
+                new RecordingRuntimeAdapter(RuntimeNames.Codex),
+            ],
+            runtimeIngress,
+            feishuIngress,
+            passive);
+        Assert.ThrowsException<InvalidOperationException>(duplicates.Validate);
+    }
+
+    private static RuntimeEventEnvelope Event(string eventId) => new()
+    {
+        ProtocolVersion = BridgeProtocolVersion.Current,
+        Runtime = RuntimeNames.Codex,
+        Session = new RuntimeSessionReference { ExternalId = "session-1", Cwd = "C:/repo" },
+        TraceId = "trace-1",
+        EventId = eventId,
+        EventType = RuntimeEventTypes.RuntimeConnected,
+        OccurredAt = "2026-08-06T10:00:00.000Z",
+        Payload = JsonSerializer.SerializeToElement(new { }),
+    };
+
+    private static RuntimeCommandEnvelope Command(string runtime) => new()
+    {
+        ProtocolVersion = BridgeProtocolVersion.Current,
+        Runtime = runtime,
+        Session = new RuntimeSessionReference { ExternalId = "session-1", Cwd = "C:/repo" },
+        TraceId = "trace-command",
+        CommandId = "command-1",
+        CommandType = RuntimeCommandTypes.PromptSend,
+        CreatedAt = "2026-08-06T10:00:00.000Z",
+        Payload = JsonSerializer.SerializeToElement(new { prompt = "继续", mode = "steer" }),
+    };
+
+    private static FeishuIntent Intent() => new(
+        "feishu-event-1",
+        FeishuIntentTypes.CommandMenu,
+        "owner-open-id",
+        "chat-1",
+        "message-1",
+        "group",
+        "trace-feishu");
+
+    private sealed class RecordingRuntimeEventHandler : IBridgeRuntimeEventHandler
+    {
+        private int concurrency;
+
+        public List<RuntimeEventEnvelope> Events { get; } = [];
+
+        public int Attempts { get; private set; }
+
+        public int FailuresRemaining { get; set; }
+
+        public int MaximumConcurrency { get; private set; }
+
+        public async Task HandleAsync(
+            RuntimeEventEnvelope runtimeEvent,
+            CancellationToken cancellationToken = default)
+        {
+            Attempts++;
+            var current = Interlocked.Increment(ref concurrency);
+            MaximumConcurrency = Math.Max(MaximumConcurrency, current);
+            try
+            {
+                await Task.Yield();
+                if (FailuresRemaining > 0)
+                {
+                    FailuresRemaining--;
+                    throw new InvalidOperationException("synthetic failure");
+                }
+                Events.Add(runtimeEvent);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref concurrency);
+            }
+        }
+    }
+
+    private sealed class RecordingFeishuIntentHandler : IBridgeFeishuIntentHandler
+    {
+        public List<FeishuIntent> Intents { get; } = [];
+
+        public Task<FeishuCallbackResult?> HandleAsync(
+            FeishuIntent intent,
+            CancellationToken cancellationToken = default)
+        {
+            Intents.Add(intent);
+            return Task.FromResult<FeishuCallbackResult?>(new("success", "已处理"));
+        }
+    }
+
+    private sealed class RecordingRuntimeAdapter(string runtime) : IRuntimeAdapter
+    {
+        public string Runtime => runtime;
+
+        public IReadOnlySet<RuntimeCapability> Capabilities { get; } =
+            new HashSet<RuntimeCapability>
+            {
+                RuntimeCapability.PromptSend,
+            };
+
+        public RuntimeCommandEnvelope? LastCommand { get; private set; }
+
+        public bool IsReady(RuntimeSession session) => true;
+
+        public Task ExecuteAsync(
+            RuntimeCommandEnvelope command,
+            CancellationToken cancellationToken = default)
+        {
+            LastCommand = command;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class PromptIntentHandler(
+        IBridgeRuntimeCommandGateway commands,
+        string runtime) : IBridgeFeishuIntentHandler
+    {
+        public async Task<FeishuCallbackResult?> HandleAsync(
+            FeishuIntent intent,
+            CancellationToken cancellationToken = default)
+        {
+            var command = Command(runtime) with
+            {
+                TraceId = intent.TraceId,
+                CommandId = $"feishu:{intent.EventId}",
+                CorrelationId = intent.MessageId,
+                Payload = JsonSerializer.SerializeToElement(new
+                {
+                    prompt = intent.Text,
+                    mode = "steer",
+                }),
+            };
+            await commands.DispatchAsync(command, cancellationToken);
+            return new("success", "已发送");
+        }
+    }
+}

@@ -313,6 +313,7 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 - `/health` 无令牌时只返回存活结果，携带既有本机控制令牌时才返回进程、生命周期、组件和所有权状态；
 - `/control/shutdown` 沿用 JSON Content-Type、Fetch Metadata 和定时比较控制令牌的安全边界；
 - 后台子系统按注册顺序启动、逆序停止，启动失败会清理已启动组件并保留 `faulted` 健康状态；
+- Host 装配只暴露三条标准边界：`IRuntimeEventSink → IBridgeRuntimeEventHandler`、`IFeishuIntentSink → IBridgeFeishuIntentHandler`、`IBridgeRuntimeCommandGateway → RuntimeCommandDispatcher → IRuntimeAdapter`；Runtime 事件先通过 Bridge Protocol 校验，再串行进入唯一状态处理器，成功事件有界去重、失败事件允许重试；飞书意图必须属于登记类型且只能进入唯一业务决策处理器；
 - 当前 `active` 所有权被硬性拒绝，Host 不连接真实飞书、不启动 CLI、不写生产 Store，Node 仍是唯一 Active Owner。
 
 被动 Host 的本地无外部副作用验证：

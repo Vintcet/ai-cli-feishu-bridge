@@ -23,6 +23,29 @@ public static class FeishuIntentTypes
     public const string RuntimeNewSelect = "runtime.new.select";
     public const string RuntimeNewSubmit = "runtime.new.submit";
     public const string RuntimeNewCancel = "runtime.new.cancel";
+
+    public static IReadOnlySet<string> All { get; } = new HashSet<string>(
+        [
+            MessagePrompt,
+            CommandMenu,
+            CommandNew,
+            CommandWorkspace,
+            CommandStatus,
+            CommandSessions,
+            CommandAliases,
+            CommandHelp,
+            ApprovalResolve,
+            ApprovalDeferToLocal,
+            InputAnswer,
+            InputToggle,
+            InputSubmit,
+            InputDeferToLocal,
+            RetryStop,
+            RuntimeNewSelect,
+            RuntimeNewSubmit,
+            RuntimeNewCancel,
+        ],
+        StringComparer.Ordinal);
 }
 
 public static class FeishuCardActions
