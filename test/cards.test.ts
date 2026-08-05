@@ -45,6 +45,18 @@ test("/新建 uses one card with three runtime choices", () => {
     ["codex", "claudecode", "opencode"],
   );
   assert.ok(actions.every((action) => action.flowId === "runtime-flow"));
+  const runtimeButtons = findCardRecords(card, (record) => record.tag === "button");
+  assert.ok(runtimeButtons.every((button) => {
+    const behaviors = button.behaviors;
+    return Array.isArray(behaviors) &&
+      behaviors.some((behavior) =>
+        behavior &&
+        typeof behavior === "object" &&
+        (behavior as Record<string, unknown>).type === "callback" &&
+        (behavior as Record<string, unknown>).value &&
+        typeof (behavior as Record<string, unknown>).value === "object"
+      );
+  }));
   assert.equal(
     findCardRecords(card, (record) => record.tag === "button").length,
     3,
@@ -94,6 +106,13 @@ test("runtime project cards submit a required project name form", () => {
     );
     assert.equal(submitButtons.length, 1);
     assert.equal(submitButtons[0]?.complex_interaction, true);
+    for (const button of [submitButtons[0], ...findCardRecords(card, (record) =>
+      record.tag === "button" && record.name === "runtime_new_cancel"
+    )]) {
+      const behaviors = button?.behaviors;
+      assert.ok(Array.isArray(behaviors));
+      assert.equal((behaviors[0] as Record<string, unknown>)?.type, "callback");
+    }
   }
 });
 
@@ -119,6 +138,12 @@ test("approval cards keep PC approval behind an explicit transfer action", () =>
   assert.match(rendered, /拒绝/);
   assert.match(rendered, /转回 PC 审批/);
   assert.match(rendered, /"action":"approval_desktop"/);
+  const buttons = findCardRecords(buildApprovalCard(session, approval), (record) => record.tag === "button");
+  assert.equal(buttons.length, 3);
+  assert.ok(buttons.every((button) =>
+    Array.isArray(button.behaviors) &&
+    (button.behaviors as Array<Record<string, unknown>>).some((behavior) => behavior.type === "callback")
+  ));
 });
 
 test("retryable error cards expose a stop action only while retrying", () => {

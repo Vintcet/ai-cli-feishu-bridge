@@ -103,6 +103,9 @@ export class RuntimeLaunchCoordinator {
       return { ok: true };
     }
     request.status = "claimed";
+    console.log(
+      `[runtime-launch] claimed request=${request.requestId.slice(0, 12)} kind=${request.kind} runtime=${request.runtime}`,
+    );
     return {
       ok: true,
       request: {
@@ -132,6 +135,9 @@ export class RuntimeLaunchCoordinator {
     if (!request) {
       return { ok: true, alreadyResolved: true };
     }
+    console.log(
+      `[runtime-launch] completed request=${request.requestId.slice(0, 12)} success=${success}`,
+    );
     if (success) {
       if (request.kind === "new") {
         this.clearRequest(request);
@@ -249,6 +255,9 @@ export class RuntimeLaunchCoordinator {
     };
     this.requests.set(requestId, request);
     this.requestIdsBySession.set(session.sessionId, requestId);
+    console.log(
+      `[runtime-launch] queued request=${requestId.slice(0, 12)} kind=resume runtime=${request.runtime} session=${session.sessionId.slice(0, 12)} status=${request.status}`,
+    );
     await this.dependencies.respond(
       item.sourceMessageId,
       item.chatId,
@@ -311,6 +320,9 @@ export class RuntimeLaunchCoordinator {
       timer,
     };
     this.requests.set(requestId, request);
+    console.log(
+      `[runtime-launch] queued request=${requestId.slice(0, 12)} kind=new runtime=${runtime} project=${projectName}`,
+    );
     await this.dependencies.respond(
       sourceMessageId,
       chatId,
@@ -351,6 +363,9 @@ export class RuntimeLaunchCoordinator {
     request: RuntimeLaunchRequest,
     detail: string,
   ): Promise<void> {
+    console.warn(
+      `[runtime-launch] failed request=${request.requestId.slice(0, 12)} kind=${request.kind} detail=${truncate(detail, 160)}`,
+    );
     this.clearRequest(request);
     if (request.kind === "new") {
       if (request.sourceMessageId && request.chatId) {

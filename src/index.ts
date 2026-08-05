@@ -159,6 +159,13 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
     }
   },
   "card.action.trigger": async (data: FeishuEvent) => {
+    const action = data.action?.value;
+    const actionName = action && typeof action === "object" && !Array.isArray(action)
+      ? action.action
+      : undefined;
+    console.log(
+      `[card] received action=${typeof actionName === "string" ? actionName : "unknown"} tag=${typeof data.action?.tag === "string" ? data.action.tag : "unknown"}`,
+    );
     try {
       return await controller.handleCardAction(data);
     } catch (error) {

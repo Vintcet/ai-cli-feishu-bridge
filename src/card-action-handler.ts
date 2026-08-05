@@ -46,6 +46,9 @@ export class CardActionHandler {
   async handle(data: FeishuEvent): Promise<CardActionResult> {
     const actionValue = normalizeActionValue(data.action?.value);
     const operatorOpenId = data.operator?.open_id;
+    console.log(
+      `[card] handling action=${typeof actionValue?.action === "string" ? actionValue.action : "unknown"} operator=${typeof operatorOpenId === "string" ? "present" : "missing"}`,
+    );
 
     if (!operatorOpenId || !this.store.isBound(operatorOpenId)) {
       return { toast: { type: "warning", content: "只有已绑定的管理员可以操作。" } };
@@ -177,6 +180,7 @@ export class CardActionHandler {
       if (state) {
         return { toast: { type: "warning", content: "这次新建操作已经处理或失效。" } };
       }
+      console.log(`[runtime-new] selected runtime=${runtime} flow=${flowId.slice(0, 12)}`);
       return {
         toast: {
           type: "info",
@@ -194,6 +198,7 @@ export class CardActionHandler {
       if (state === "submitting" || state === "submitted") {
         return { toast: { type: "warning", content: "启动请求已经提交，不能再取消。" } };
       }
+      console.log(`[runtime-new] cancelled runtime=${runtime} flow=${flowId.slice(0, 12)}`);
       this.rememberRuntimeNewFlow(flowId, "cancelled");
       return {
         toast: {
@@ -238,6 +243,7 @@ export class CardActionHandler {
     }
 
     this.rememberRuntimeNewFlow(flowId, "submitting");
+    console.log(`[runtime-new] submitting runtime=${runtime} project=${projectName} flow=${flowId.slice(0, 12)}`);
     let queued: boolean;
     try {
       queued = await this.runtimeLaunches.handleNewCommand(

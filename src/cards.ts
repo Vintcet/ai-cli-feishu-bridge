@@ -19,6 +19,17 @@ import {
 
 type Card = Record<string, unknown>;
 
+function callbackButton(
+  properties: Record<string, unknown>,
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    tag: "button",
+    ...properties,
+    behaviors: [{ type: "callback", value }],
+  };
+}
+
 export interface ActivityCardEvent {
   at: string;
   label: string;
@@ -58,16 +69,16 @@ export function buildRuntimeSelectionCard(
       },
       {
         tag: "action",
-        actions: runtimes.map(({ runtime, label }) => ({
-          tag: "button",
-          type: runtime === "codex" ? "primary" : "default",
-          text: { tag: "plain_text", content: label },
-          value: {
+        actions: runtimes.map(({ runtime, label }) =>
+          callbackButton({
+            type: runtime === "codex" ? "primary" : "default",
+            text: { tag: "plain_text", content: label },
+          }, {
             action: "runtime_new_select",
             runtime,
             ...context,
-          },
-        })),
+          })
+        ),
       },
       {
         tag: "note",
@@ -129,33 +140,29 @@ export function buildRuntimeProjectFormCard(
               {
                 tag: "column",
                 width: "auto",
-                elements: [{
-                  tag: "button",
+                elements: [callbackButton({
                   type: "primary",
                   text: { tag: "plain_text", content: "确认新建" },
                   complex_interaction: true,
                   action_type: "form_submit",
                   name: "runtime_new_submit",
-                  value: {
+                }, {
                     action: "runtime_new_submit",
                     ...actionContext,
-                  },
-                }],
+                })],
               },
               {
                 tag: "column",
                 width: "auto",
-                elements: [{
-                  tag: "button",
+                elements: [callbackButton({
                   type: "default",
                   text: { tag: "plain_text", content: "取消" },
                   complex_interaction: true,
                   name: "runtime_new_cancel",
-                  value: {
+                }, {
                     action: "runtime_new_cancel",
                     ...actionContext,
-                  },
-                }],
+                })],
               },
             ],
           },
@@ -273,36 +280,30 @@ export function buildApprovalCard(
       {
         tag: "action",
         actions: [
-          {
-            tag: "button",
+          callbackButton({
             type: "primary",
             text: { tag: "plain_text", content: "批准一次" },
-            value: {
+          }, {
               action: "approval_allow",
               requestId: approval.requestId,
               sessionId: approval.sessionId,
-            },
-          },
-          {
-            tag: "button",
+          }),
+          callbackButton({
             type: "danger",
             text: { tag: "plain_text", content: "拒绝" },
-            value: {
+          }, {
               action: "approval_deny",
               requestId: approval.requestId,
               sessionId: approval.sessionId,
-            },
-          },
-          {
-            tag: "button",
+          }),
+          callbackButton({
             type: "default",
             text: { tag: "plain_text", content: "转回 PC 审批" },
-            value: {
+          }, {
               action: "approval_desktop",
               requestId: approval.requestId,
               sessionId: approval.sessionId,
-            },
-          },
+          }),
         ],
       },
     ],
@@ -445,8 +446,7 @@ export function buildUserInputQuestionCard(
   } else {
     const actions: Record<string, unknown>[] = question.options.map((option, optionIndex) => {
       const isSelected = selected.includes(option.label);
-      return {
-        tag: "button",
+      return callbackButton({
         ...(question.multiple
           ? isSelected
             ? { type: "primary" }
@@ -460,39 +460,34 @@ export function buildUserInputQuestionCard(
             ? `✓ ${truncate(option.label, 36)}`
             : truncate(option.label, 40),
         },
-        value: {
+      }, {
           action: question.multiple ? "input_toggle" : "input_answer",
           requestId,
           sessionId: session.sessionId,
           questionId: question.id,
           answer: option.label,
           ...(selectionKey ? { selectionKey } : {}),
-        },
-      };
+      });
     });
     if (question.multiple) {
-      actions.push({
-        tag: "button",
+      actions.push(callbackButton({
         type: "primary",
         text: { tag: "plain_text", content: "提交选择" },
-        value: {
+      }, {
           action: "input_submit",
           requestId,
           sessionId: session.sessionId,
           questionId: question.id,
           ...(selectionKey ? { selectionKey } : {}),
-        },
-      });
+      }));
     }
-    actions.push({
-      tag: "button",
+    actions.push(callbackButton({
       text: { tag: "plain_text", content: "转回本机回答" },
-      value: {
+    }, {
         action: "input_local",
         requestId,
         sessionId: session.sessionId,
-      },
-    });
+    }));
 
     if (question.options.length === 0) {
       elements.push({
@@ -725,8 +720,7 @@ export function buildErrorCards(
       partCount: Math.max(1, chunks.length),
       actions:
         index === Math.max(1, chunks.length) - 1 && retry && retry.state !== "stopped"
-          ? [{
-              tag: "button",
+          ? [callbackButton({
               type: "danger",
               text: {
                 tag: "plain_text",
@@ -734,12 +728,11 @@ export function buildErrorCards(
                   ? "停止后续自动重试"
                   : "停止自动重试",
               },
-              value: {
+            }, {
                 action: "retry_stop",
                 sessionId: session.sessionId,
                 retryCycleId: retry?.cycleId,
-              },
-            }]
+            })]
           : undefined,
       footer:
         index === Math.max(1, chunks.length) - 1 && retry?.state === "stopped"
