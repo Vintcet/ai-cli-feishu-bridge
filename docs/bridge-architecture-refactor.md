@@ -315,6 +315,7 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 - 后台子系统按注册顺序启动、逆序停止，启动失败会清理已启动组件并保留 `faulted` 健康状态；
 - Host 装配只暴露三条标准边界：`IRuntimeEventSink → IBridgeRuntimeEventHandler`、`IFeishuIntentSink → IBridgeFeishuIntentHandler`、`IBridgeRuntimeCommandGateway → RuntimeCommandDispatcher → IRuntimeAdapter`；Runtime 事件先通过 Bridge Protocol 校验，再串行进入唯一状态处理器，成功事件有界去重、失败事件允许重试；飞书意图必须属于登记类型且只能进入唯一业务决策处理器；
 - `ReadOnlyNodeStoreShadow` 只用 M2 的 `NodeStoreAccess.ReadOnly` 加载现有 Store 并生成 C# Core 投影；缺失 Store 不创建文件，非法 Store 不隔离、不修复、不覆盖，健康摘要只包含文件、会话、路由、审批和绑定数量或不兼容文件名，不暴露令牌、路径和业务标识；
+- C# Host 将业务状态从生命周期探针中分离：`GET /control/status` 必须携带本机控制令牌并通过 Fetch Metadata 检查，只返回 Host 身份、生命周期和 Store 聚合计数，`?refresh=1` 会从磁盘重新执行一次只读投影；会话 ID、工作目录、Open ID、Chat ID、消息/请求 ID、工具预览、用户内容、控制令牌及完整路径均不会进入响应；公开 `/health` 的语义和响应保持不变；
 - Node 与 C# Host 的认证健康响应统一声明 `hostKind`、`managementApiVersion`、`ownershipMode`、`activeOwner` 和进程号；公开 `/health` 仍只返回 `{ ok: true }`。停止请求必须回传预期 Host 类型、管理 API 版本和刚探测到的进程号，Host 会和自身身份再次比对，防止控制面板因端口复用或进程重启停错目标；
 - 控制面板新增显式 `AI_CLI_FEISHU_BRIDGE_HOST=dotnet-shadow` 灰度入口：仅在设置该值时才启动 `AiCliFeishuBridgeHost.exe --ownership passive --instance desktop-shadow`，固定使用隔离端口 `8876`，不安装生产 Hook，也不开放 CLI 启动、审批或设置写操作；未设置或设置为 `node` 时仍严格使用现有 Node 生产 Host 和 `.env` 中的端口，不会静默回退到 C#；
 - 当前 `active` 所有权被硬性拒绝，Host 不连接真实飞书、不启动 CLI、不写生产 Store，Node 仍是唯一 Active Owner。

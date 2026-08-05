@@ -60,6 +60,35 @@ public static class BridgeControlApi
                 : Results.Ok(new PublicBridgeHealth(true));
         });
 
+        app.MapGet("/control/status", async (
+            HttpRequest request,
+            BridgeControlStatusReader status,
+            IBridgeStoreShadow storeShadow,
+            BridgeHealthRegistry health,
+            IBridgeControlTokenProvider tokenProvider,
+            CancellationToken cancellationToken) =>
+        {
+            if (IsCrossSite(request))
+            {
+                return Results.Json(
+                    new ControlError(false, "拒绝跨站请求。"),
+                    statusCode: StatusCodes.Status403Forbidden);
+            }
+            if (!await IsAuthenticatedAsync(request, tokenProvider, cancellationToken))
+            {
+                return Results.Json(
+                    new ControlError(false, "本机控制令牌无效。"),
+                    statusCode: StatusCodes.Status401Unauthorized);
+            }
+            if (request.Query["refresh"].ToString() == "1")
+            {
+                await storeShadow.RefreshAsync(cancellationToken);
+                var component = storeShadow.ComponentHealth;
+                health.Report(component.Name, component.Status, component.Detail);
+            }
+            return Results.Ok(status.Snapshot());
+        });
+
         app.MapPost("/control/shutdown", async (
             HttpContext context,
             IBridgeControlTokenProvider tokenProvider,

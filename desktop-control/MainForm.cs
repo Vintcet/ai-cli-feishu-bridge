@@ -1229,6 +1229,7 @@ internal sealed partial class MainForm : Form
         {
             operationLabel.Text =
                 $"{bridgeClient.HostDisplayName} · {status.OwnershipMode} · " +
+                $"只读会话 {status.ActiveSessions} · 待审批 {status.PendingApprovals} · " +
                 $"版本 {status.Version}";
         }
         else if (status.PendingDesktopApprovals > 0)

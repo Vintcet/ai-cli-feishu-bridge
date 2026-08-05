@@ -39,6 +39,7 @@ public static class BridgeHostApplication
         builder.Services.AddSingleton<ReadOnlyNodeStoreShadow>();
         builder.Services.AddSingleton<IBridgeStoreShadow>(services =>
             services.GetRequiredService<ReadOnlyNodeStoreShadow>());
+        builder.Services.AddSingleton<BridgeControlStatusReader>();
         builder.Services.AddSingleton<IBridgeHostSubsystem, PassiveOwnerGuardSubsystem>();
         builder.Services.AddSingleton<IBridgeHostSubsystem, BridgeBoundarySubsystem>();
         builder.Services.AddSingleton<IBridgeHostSubsystem>(services =>

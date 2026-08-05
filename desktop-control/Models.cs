@@ -120,6 +120,88 @@ internal sealed class BridgeStatus
     public BridgeSettings Settings { get; set; } = new();
 }
 
+internal sealed class BridgeShadowStoreStatus
+{
+    [JsonPropertyName("status")]
+    public string Status { get; set; } = "not_loaded";
+
+    [JsonPropertyName("files")]
+    public int Files { get; set; }
+
+    [JsonPropertyName("bindings")]
+    public int Bindings { get; set; }
+
+    [JsonPropertyName("sessions")]
+    public int Sessions { get; set; }
+
+    [JsonPropertyName("activeSessions")]
+    public int ActiveSessions { get; set; }
+
+    [JsonPropertyName("endedSessions")]
+    public int EndedSessions { get; set; }
+
+    [JsonPropertyName("routes")]
+    public int Routes { get; set; }
+
+    [JsonPropertyName("processedInbound")]
+    public int ProcessedInbound { get; set; }
+
+    [JsonPropertyName("approvals")]
+    public int Approvals { get; set; }
+
+    [JsonPropertyName("pendingApprovals")]
+    public int PendingApprovals { get; set; }
+}
+
+internal sealed class BridgeShadowStatus
+{
+    [JsonPropertyName("ok")]
+    public bool Ok { get; set; }
+
+    [JsonPropertyName("hostKind")]
+    public string HostKind { get; set; } = "";
+
+    [JsonPropertyName("managementApiVersion")]
+    public int ManagementApiVersion { get; set; }
+
+    [JsonPropertyName("instanceName")]
+    public string InstanceName { get; set; } = "";
+
+    [JsonPropertyName("lifecycle")]
+    public string Lifecycle { get; set; } = "";
+
+    [JsonPropertyName("version")]
+    public string Version { get; set; } = "";
+
+    [JsonPropertyName("processId")]
+    public int ProcessId { get; set; }
+
+    [JsonPropertyName("ownershipMode")]
+    public string OwnershipMode { get; set; } = "";
+
+    [JsonPropertyName("activeOwner")]
+    public bool ActiveOwner { get; set; }
+
+    [JsonPropertyName("store")]
+    public BridgeShadowStoreStatus Store { get; set; } = new();
+
+    public BridgeStatus ToBridgeStatus() => new()
+    {
+        Ok = Ok,
+        HostKind = HostKind,
+        ManagementApiVersion = ManagementApiVersion,
+        InstanceName = InstanceName,
+        OwnershipMode = OwnershipMode,
+        ActiveOwner = ActiveOwner,
+        Status = Lifecycle,
+        Version = Version,
+        ProcessId = ProcessId,
+        Bindings = Store.Bindings,
+        ActiveSessions = Store.ActiveSessions,
+        PendingApprovals = Store.PendingApprovals,
+    };
+}
+
 internal sealed class BridgeSettings
 {
     [JsonPropertyName("workspaceRoot")]

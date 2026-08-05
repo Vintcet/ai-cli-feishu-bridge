@@ -27,11 +27,16 @@ public sealed record BridgeStoreShadowSnapshot(
 public interface IBridgeStoreShadow
 {
     BridgeStoreShadowSnapshot Snapshot { get; }
+
+    BridgeComponentHealth ComponentHealth { get; }
+
+    Task RefreshAsync(CancellationToken cancellationToken = default);
 }
 
 public sealed class ReadOnlyNodeStoreShadow(BridgeHostOptions options)
     : IBridgeStoreShadow, IBridgeHostSubsystem, IBridgeHostSubsystemHealth
 {
+    private readonly SemaphoreSlim refreshLock = new(1, 1);
     private BridgeStoreShadowSnapshot snapshot = BridgeStoreShadowSnapshot.NotLoaded;
 
     public string Name => "node-store-shadow";
@@ -61,58 +66,69 @@ public sealed class ReadOnlyNodeStoreShadow(BridgeHostOptions options)
         }
     }
 
-    public async Task StartAsync(CancellationToken cancellationToken)
-    {
-        var existingFiles = NodeStoreFile.All.Count(file =>
-            File.Exists(Path.Combine(options.DataDirectory, file.FileName)));
-        if (existingFiles == 0)
-        {
-            Volatile.Write(
-                ref snapshot,
-                new BridgeStoreShadowSnapshot(
-                    BridgeStoreShadowStatuses.Missing,
-                    NodeStoreCoreProjection.Project(await new NodeJsonStoreRepository(
-                        options.DataDirectory,
-                        NodeStoreAccess.ReadOnly).LoadAsync(cancellationToken)),
-                    0,
-                    0));
-            return;
-        }
+    public Task StartAsync(CancellationToken cancellationToken) =>
+        RefreshAsync(cancellationToken);
 
+    public async Task RefreshAsync(CancellationToken cancellationToken = default)
+    {
+        await refreshLock.WaitAsync(cancellationToken);
         try
         {
-            var store = await new NodeJsonStoreRepository(
-                options.DataDirectory,
-                NodeStoreAccess.ReadOnly).LoadAsync(cancellationToken);
-            Volatile.Write(
-                ref snapshot,
-                new BridgeStoreShadowSnapshot(
-                    BridgeStoreShadowStatuses.Loaded,
-                    NodeStoreCoreProjection.Project(store),
-                    existingFiles,
-                    store.Bindings.Users.Count));
+            var existingFiles = NodeStoreFile.All.Count(file =>
+                File.Exists(Path.Combine(options.DataDirectory, file.FileName)));
+            if (existingFiles == 0)
+            {
+                Volatile.Write(
+                    ref snapshot,
+                    new BridgeStoreShadowSnapshot(
+                        BridgeStoreShadowStatuses.Missing,
+                        NodeStoreCoreProjection.Project(await new NodeJsonStoreRepository(
+                            options.DataDirectory,
+                            NodeStoreAccess.ReadOnly).LoadAsync(cancellationToken)),
+                        0,
+                        0));
+                return;
+            }
+
+            try
+            {
+                var store = await new NodeJsonStoreRepository(
+                    options.DataDirectory,
+                    NodeStoreAccess.ReadOnly).LoadAsync(cancellationToken);
+                Volatile.Write(
+                    ref snapshot,
+                    new BridgeStoreShadowSnapshot(
+                        BridgeStoreShadowStatuses.Loaded,
+                        NodeStoreCoreProjection.Project(store),
+                        existingFiles,
+                        store.Bindings.Users.Count));
+            }
+            catch (NodeStoreValidationException error)
+            {
+                Volatile.Write(
+                    ref snapshot,
+                    new BridgeStoreShadowSnapshot(
+                        BridgeStoreShadowStatuses.Incompatible,
+                        null,
+                        existingFiles,
+                        0,
+                        error.FileName));
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                Volatile.Write(
+                    ref snapshot,
+                    new BridgeStoreShadowSnapshot(
+                        BridgeStoreShadowStatuses.Incompatible,
+                        null,
+                        existingFiles,
+                        0,
+                        "json"));
+            }
         }
-        catch (NodeStoreValidationException error)
+        finally
         {
-            Volatile.Write(
-                ref snapshot,
-                new BridgeStoreShadowSnapshot(
-                    BridgeStoreShadowStatuses.Incompatible,
-                    null,
-                    existingFiles,
-                    0,
-                    error.FileName));
-        }
-        catch (System.Text.Json.JsonException)
-        {
-            Volatile.Write(
-                ref snapshot,
-                new BridgeStoreShadowSnapshot(
-                    BridgeStoreShadowStatuses.Incompatible,
-                    null,
-                    existingFiles,
-                    0,
-                    "json"));
+            refreshLock.Release();
         }
     }
 

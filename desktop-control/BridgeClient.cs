@@ -46,24 +46,31 @@ internal sealed class BridgeClient : IDisposable
 
         try
         {
+            var endpoint = target.IsProduction ? "health" : "control/status";
             using var request = new HttpRequestMessage(
                 HttpMethod.Get,
-                forceRefresh ? "health?refresh=1" : "health");
+                forceRefresh ? $"{endpoint}?refresh=1" : endpoint);
             request.Headers.Add(ControlTokenHeader, controlToken);
             using var response = await httpClient.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
                 AppLog.WarnThrottled(
-                    $"/health 返回 HTTP {(int)response.StatusCode} {response.ReasonPhrase}",
+                    $"/{endpoint} 返回 HTTP {(int)response.StatusCode} {response.ReasonPhrase}",
                     TimeSpan.FromSeconds(10));
                 return null;
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            var status = await JsonSerializer.DeserializeAsync<BridgeStatus>(
-                stream,
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
-                cancellationToken);
+            var jsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var status = target.IsProduction
+                ? await JsonSerializer.DeserializeAsync<BridgeStatus>(
+                    stream,
+                    jsonOptions,
+                    cancellationToken)
+                : (await JsonSerializer.DeserializeAsync<BridgeShadowStatus>(
+                    stream,
+                    jsonOptions,
+                    cancellationToken))?.ToBridgeStatus();
             if (status is not null && !target.Matches(status))
             {
                 throw new InvalidOperationException(
@@ -77,7 +84,7 @@ internal sealed class BridgeClient : IDisposable
             error is HttpRequestException or TaskCanceledException or JsonException)
         {
             AppLog.WarnThrottled(
-                $"/health 请求失败 {error.GetType().Name}: {error.Message}",
+                $"Bridge 状态请求失败 {error.GetType().Name}: {error.Message}",
                 TimeSpan.FromSeconds(10));
             return null;
         }

@@ -94,4 +94,28 @@ public sealed class BridgeStoreShadowTests
         Assert.AreEqual("incompatible file=json", shadow.ComponentHealth.Detail);
         Assert.IsFalse(shadow.ComponentHealth.Detail!.Contains(directory!, StringComparison.OrdinalIgnoreCase));
     }
+
+    [TestMethod]
+    public async Task RefreshReplacesSnapshotWithoutCreatingOrMutatingStoreFiles()
+    {
+        var shadow = new ReadOnlyNodeStoreShadow(BridgeHostOptions.Passive(directory!));
+        await shadow.StartAsync(CancellationToken.None);
+        Assert.AreEqual(BridgeStoreShadowStatuses.Missing, shadow.Snapshot.Status);
+
+        Directory.CreateDirectory(directory!);
+        var sessions = Path.Combine(directory!, "sessions.json");
+        const string source = """
+            {"sessions":{"secret-session":{"sessionId":"secret-session","cwd":"K:\\secret","status":"waiting","lastSeenAt":"2026-08-06T00:00:00Z"}}}
+            """;
+        await File.WriteAllTextAsync(sessions, source);
+
+        await shadow.RefreshAsync(CancellationToken.None);
+
+        Assert.AreEqual(BridgeStoreShadowStatuses.Loaded, shadow.Snapshot.Status);
+        Assert.AreEqual(1, shadow.Snapshot.Core!.Sessions.Sessions.Count);
+        Assert.AreEqual(source, await File.ReadAllTextAsync(sessions));
+        CollectionAssert.AreEqual(
+            new[] { "sessions.json" },
+            Directory.EnumerateFiles(directory!).Select(Path.GetFileName).ToArray());
+    }
 }

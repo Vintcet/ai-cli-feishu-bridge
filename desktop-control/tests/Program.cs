@@ -234,6 +234,48 @@ public sealed class RuntimeAndTerminalTests
     }
 
     [TestMethod]
+    public void ShadowStatusMapsOnlyRedactedAggregateState()
+    {
+        const string json = """
+            {
+              "ok": true,
+              "hostKind": "dotnet",
+              "managementApiVersion": 1,
+              "instanceName": "desktop-shadow",
+              "lifecycle": "ready",
+              "version": "1.2.3.4",
+              "processId": 4321,
+              "ownershipMode": "passive",
+              "activeOwner": false,
+              "store": {
+                "status": "loaded",
+                "files": 6,
+                "bindings": 2,
+                "sessions": 5,
+                "activeSessions": 3,
+                "endedSessions": 2,
+                "routes": 7,
+                "processedInbound": 8,
+                "approvals": 4,
+                "pendingApprovals": 1
+              }
+            }
+            """;
+
+        var shadow = JsonSerializer.Deserialize<BridgeShadowStatus>(json);
+        var status = shadow?.ToBridgeStatus();
+
+        Assert.IsNotNull(status);
+        Assert.AreEqual("dotnet", status.HostKind);
+        Assert.AreEqual("ready", status.Status);
+        Assert.AreEqual(2, status.Bindings);
+        Assert.AreEqual(3, status.ActiveSessions);
+        Assert.AreEqual(1, status.PendingApprovals);
+        Assert.AreEqual(0, status.Sessions.Count);
+        Assert.AreEqual(0, status.Approvals.Count);
+    }
+
+    [TestMethod]
     public void BridgeTargetsKeepProductionAndShadowOwnershipSeparated()
     {
         var production = BridgeHostTarget.FromConfiguration(null, 8765);
