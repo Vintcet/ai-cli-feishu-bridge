@@ -9,6 +9,7 @@ interface JsonFilePersistenceDependencies {
   runMutation: <T>(operation: () => Promise<T>) => Promise<T>;
   awaitMutations: () => Promise<void>;
   onSafetyFlush: () => void;
+  onCommitted?: (filePath: string, value: unknown) => void;
 }
 
 export class JsonFilePersistence {
@@ -97,6 +98,7 @@ export class JsonFilePersistence {
       if (trackedState) {
         this.dirtyFiles.delete(filePath);
       }
+      this.dependencies.onCommitted?.(filePath, value);
     } catch (error) {
       await rm(temporaryPath, { force: true }).catch(() => undefined);
       throw error;

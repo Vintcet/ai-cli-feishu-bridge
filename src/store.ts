@@ -23,6 +23,7 @@ import {
   stringifyModel,
 } from "./domain.js";
 import { JsonFilePersistence } from "./json-file-persistence.js";
+import type { BehaviorRecorder } from "./migration/behavior-recorder.js";
 import {
   isApprovalStoreValue,
   isBindingStoreValue,
@@ -75,6 +76,8 @@ export interface BridgeStoreOptions extends StoreRetentionOptions {
   persistDebounceMs?: number;
   /** 已结束会话的保留时长（毫秒），超过后从 sessions.json 中清理。 */
   endedSessionRetentionMs?: number;
+  /** M1 迁移期旁路录制器；只记录脱敏后的状态提交摘要。 */
+  behaviorRecorder?: BehaviorRecorder;
 }
 
 const defaultPersistDebounceMs = 500;
@@ -128,6 +131,13 @@ export class BridgeStore {
       runMutation: (operation) => this.mutate(operation),
       awaitMutations: () => this.mutationQueue,
       onSafetyFlush: () => this.performSafetyMaintenance(),
+      onCommitted: (filePath, value) => {
+        options.behaviorRecorder?.record(
+          "core.state_committed",
+          path.basename(filePath),
+          summarizeCommittedState(value),
+        );
+      },
     });
   }
 
@@ -1197,6 +1207,21 @@ export class BridgeStore {
       this.schedulePersist(this.sessionFile);
     }
   }
+}
+
+function summarizeCommittedState(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { valueType: typeof value };
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    topLevelKeys: Object.keys(record).sort(),
+    entryCounts: Object.fromEntries(
+      Object.entries(record)
+        .filter(([, item]) => item && typeof item === "object" && !Array.isArray(item))
+        .map(([key, item]) => [key, Object.keys(item as object).length]),
+    ),
+  };
 }
 
 function sessionGroupScopeKey(session: SessionRecord): string {

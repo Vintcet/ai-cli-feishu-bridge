@@ -3,6 +3,7 @@ import type { RuntimeCapability } from "../bridge-protocol/runtime-capabilities.
 import type { RuntimePromptMode } from "../bridge-protocol/runtime-command.js";
 import type { ManagedRuntimeName, SessionRecord } from "../domain.js";
 import type { ManagedTerminalRouter } from "../managed-terminal.js";
+import type { BehaviorRecorder } from "../migration/behavior-recorder.js";
 
 const capabilities: ReadonlySet<RuntimeCapability> = new Set([
   "prompt.send",
@@ -18,6 +19,7 @@ export class ManagedTerminalRuntimeAdapter implements RuntimeAdapter {
       ManagedTerminalRouter,
       "isReady" | "send"
     >,
+    private readonly behaviorRecorder?: BehaviorRecorder,
   ) {}
 
   isReady(session: SessionRecord): boolean {
@@ -29,6 +31,23 @@ export class ManagedTerminalRuntimeAdapter implements RuntimeAdapter {
     prompt: string,
     mode: RuntimePromptMode,
   ): Promise<void> {
-    await this.terminals.send(session, prompt, mode);
+    const operation = () => this.terminals.send(session, prompt, mode);
+    if (!this.behaviorRecorder) {
+      await operation();
+      return;
+    }
+    this.behaviorRecorder.record(
+      "core.decision",
+      "prompt.route",
+      { decision: mode },
+      { runtime: this.runtime, sessionId: session.sessionId },
+    );
+    await this.behaviorRecorder.capture(
+      "egress.runtime_command",
+      "prompt.send",
+      { prompt, mode },
+      operation,
+      { runtime: this.runtime, sessionId: session.sessionId },
+    );
   }
 }

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { buildErrorCards } from "./cards.js";
 import type { SessionRecord } from "./domain.js";
+import type { BehaviorRecorder } from "./migration/behavior-recorder.js";
 import { isRetryableRuntimeError, retryDelayMs } from "./runtime-errors.js";
 import { BridgeStore } from "./store.js";
 import type { TurnNotificationDelivery } from "./turn-notification-coordinator.js";
@@ -23,6 +24,7 @@ interface RuntimeRetryCoordinatorDependencies {
     card: Record<string, unknown>,
   ) => Promise<void>;
   releaseRetryLock: (sessionId: string) => void | Promise<void>;
+  behaviorRecorder?: BehaviorRecorder;
 }
 
 export interface RuntimeRetryStrategy {
@@ -131,6 +133,20 @@ export class RuntimeRetryCoordinator {
       isRetryableRuntimeError(errorMessage, errorCode) &&
       (strategy.isReady ?? this.dependencies.isRuntimeReady)(session);
     const retryAttempt = retryCount + 1;
+    this.dependencies.behaviorRecorder?.record(
+      "core.decision",
+      "retry.plan",
+      {
+        decision: canRetry ? "scheduled" : "skipped",
+        attempt: retryAttempt,
+        maxAttempts: retrySettings.retryMaxAttempts,
+        autoRetry: retrySettings.autoRetryErrors,
+      },
+      {
+        runtime: session.runtime ?? "codex",
+        sessionId: session.sessionId,
+      },
+    );
     const cycle = canRetry
       ? this.prepareCycle(
           existingCycle,

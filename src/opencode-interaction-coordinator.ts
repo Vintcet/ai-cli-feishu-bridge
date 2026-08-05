@@ -16,6 +16,7 @@ import type {
   OpenCodeQuestionRequest,
 } from "./opencode-client.js";
 import { OpenCodeManager } from "./opencode-manager.js";
+import type { BehaviorRecorder } from "./migration/behavior-recorder.js";
 import { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import { BridgeStore } from "./store.js";
 import { UserInputCoordinator } from "./user-input-coordinator.js";
@@ -28,6 +29,7 @@ interface OpenCodeInteractionCoordinatorDependencies {
   sessionGroups: SessionGroupCoordinator;
   approvalTimeoutMs: number;
   isClosing: () => boolean;
+  behaviorRecorder?: BehaviorRecorder;
 }
 
 export class OpenCodeInteractionCoordinator {
@@ -146,6 +148,16 @@ export class OpenCodeInteractionCoordinator {
         riskReason: risk.reason,
         opencodePermissionId: permission.id,
       };
+      this.dependencies.behaviorRecorder?.record(
+        "core.decision",
+        "approval.route",
+        {
+          decision: approval.requiresManualApproval ? "manual" : "automatic",
+          riskLevel: risk.level,
+          autoApprove: store.getSettings().autoApprove,
+        },
+        { runtime: "opencode", sessionId },
+      );
       await store.createApproval(approval);
       if (this.dependencies.isClosing()) {
         await approvals.complete(approval.requestId, "local", {
@@ -253,8 +265,31 @@ export class OpenCodeInteractionCoordinator {
       });
       const recipients = await sessionGroups.notificationRecipients(session);
       if (recipients.length === 0 || this.dependencies.isClosing()) {
+        this.dependencies.behaviorRecorder?.record(
+          "core.decision",
+          "input.route",
+          {
+            decision: this.dependencies.isClosing()
+              ? "shutdown_local"
+              : "no_recipient_local",
+            recipientCount: recipients.length,
+          },
+          { runtime: "opencode", sessionId: request.sessionID },
+        );
         return;
       }
+
+      this.dependencies.behaviorRecorder?.record(
+        "core.decision",
+        "input.route",
+        {
+          decision: "remote",
+          recipientCount: recipients.length,
+          questionCount: questions.length,
+          timeoutMs: this.dependencies.inputs.defaultTimeoutMs,
+        },
+        { runtime: "opencode", sessionId: request.sessionID },
+      );
 
       requestId = randomUUID();
       inputs.registerOpenCode(requestId, {

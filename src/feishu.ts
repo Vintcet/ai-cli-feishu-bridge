@@ -3,25 +3,33 @@ import { createReadStream } from "node:fs";
 import { open, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
+import type { BehaviorRecorder } from "./migration/behavior-recorder.js";
+
 type Card = Record<string, unknown>;
 
 export class FeishuGateway {
   readonly client: Lark.Client;
 
-  constructor(appId: string, appSecret: string) {
+  constructor(
+    appId: string,
+    appSecret: string,
+    private readonly behaviorRecorder?: BehaviorRecorder,
+  ) {
     this.client = new Lark.Client({ appId, appSecret });
   }
 
   async sendText(chatId: string, text: string): Promise<string> {
-    const response = await this.client.im.v1.message.create({
-      params: { receive_id_type: "chat_id" },
-      data: {
-        receive_id: chatId,
-        msg_type: "text",
-        content: JSON.stringify({ text }),
-      },
+    return await this.capture("send_text", { chatId, text }, async () => {
+      const response = await this.client.im.v1.message.create({
+        params: { receive_id_type: "chat_id" },
+        data: {
+          receive_id: chatId,
+          msg_type: "text",
+          content: JSON.stringify({ text }),
+        },
+      });
+      return this.messageIdFromResponse(response, "send text");
     });
-    return this.messageIdFromResponse(response, "send text");
   }
 
   async createSessionGroup(
@@ -29,70 +37,82 @@ export class FeishuGateway {
     name: string,
     description: string,
   ): Promise<{ chatId: string; name: string }> {
-    const response = await this.client.im.v1.chat.create({
-      params: { user_id_type: "open_id" },
-      data: {
-        name,
-        description,
-        owner_id: ownerOpenId,
-        user_id_list: [ownerOpenId],
-        group_message_type: "chat",
-        chat_mode: "group",
-        chat_type: "private",
-        join_message_visibility: "only_owner",
-        leave_message_visibility: "only_owner",
-        membership_approval: "approval_required",
-      },
-    }).catch((error: unknown) => {
-      throw new Error(`Feishu create group failed: ${feishuRequestError(error)}`);
+    return await this.capture("create_session_group", {
+      ownerOpenId,
+      name,
+      description,
+    }, async () => {
+      const response = await this.client.im.v1.chat.create({
+        params: { user_id_type: "open_id" },
+        data: {
+          name,
+          description,
+          owner_id: ownerOpenId,
+          user_id_list: [ownerOpenId],
+          group_message_type: "chat",
+          chat_mode: "group",
+          chat_type: "private",
+          join_message_visibility: "only_owner",
+          leave_message_visibility: "only_owner",
+          membership_approval: "approval_required",
+        },
+      }).catch((error: unknown) => {
+        throw new Error(`Feishu create group failed: ${feishuRequestError(error)}`);
+      });
+      if (response.code !== 0 || !response.data?.chat_id) {
+        throw new Error(
+          `Feishu create group failed: ${response.code ?? "unknown"} ${response.msg ?? "unknown error"}`,
+        );
+      }
+      return {
+        chatId: response.data.chat_id,
+        name: response.data.name?.trim() || name,
+      };
     });
-    if (response.code !== 0 || !response.data?.chat_id) {
-      throw new Error(
-        `Feishu create group failed: ${response.code ?? "unknown"} ${response.msg ?? "unknown error"}`,
-      );
-    }
-    return {
-      chatId: response.data.chat_id,
-      name: response.data.name?.trim() || name,
-    };
   }
 
   async updateSessionGroupName(chatId: string, name: string): Promise<void> {
-    const response = await this.client.im.v1.chat.update({
-      path: { chat_id: chatId },
-      data: { name },
-    }).catch((error: unknown) => {
-      throw new Error(`Feishu update group failed: ${feishuRequestError(error)}`);
+    await this.capture("update_session_group", { chatId, name }, async () => {
+      const response = await this.client.im.v1.chat.update({
+        path: { chat_id: chatId },
+        data: { name },
+      }).catch((error: unknown) => {
+        throw new Error(`Feishu update group failed: ${feishuRequestError(error)}`);
+      });
+      if (response.code !== 0) {
+        throw new Error(
+          `Feishu update group failed: ${response.code ?? "unknown"} ${response.msg ?? "unknown error"}`,
+        );
+      }
     });
-    if (response.code !== 0) {
-      throw new Error(
-        `Feishu update group failed: ${response.code ?? "unknown"} ${response.msg ?? "unknown error"}`,
-      );
-    }
   }
 
   async deleteSessionGroup(chatId: string): Promise<void> {
-    const response = await this.client.im.v1.chat.delete({
-      path: { chat_id: chatId },
-    }).catch((error: unknown) => {
-      throw new Error(`Feishu delete group failed: ${feishuRequestError(error)}`);
+    await this.capture("delete_session_group", { chatId }, async () => {
+      const response = await this.client.im.v1.chat.delete({
+        path: { chat_id: chatId },
+      }).catch((error: unknown) => {
+        throw new Error(`Feishu delete group failed: ${feishuRequestError(error)}`);
+      });
+      if (response.code !== 0) {
+        throw new Error(
+          `Feishu delete group failed: ${response.code ?? "unknown"} ${response.msg ?? "unknown error"}`,
+        );
+      }
     });
-    if (response.code !== 0) {
-      throw new Error(
-        `Feishu delete group failed: ${response.code ?? "unknown"} ${response.msg ?? "unknown error"}`,
-      );
-    }
   }
 
   async replyText(messageId: string, text: string): Promise<string> {
-    const response = await this.client.im.v1.message.reply({
-      path: { message_id: messageId },
-      data: {
-        msg_type: "text",
-        content: JSON.stringify({ text }),
-      },
+    return await this.capture("reply_text", { messageId, text }, async () => {
+      const response = await this.client.im.v1.message.reply({
+        path: { message_id: messageId },
+        data: {
+          msg_type: "text",
+          content: JSON.stringify({ text }),
+        },
+      });
+      return this.messageIdFromResponse(response, "reply text");
     });
-    return this.messageIdFromResponse(response, "reply text");
   }
 
   async sendCard(
@@ -100,26 +120,34 @@ export class FeishuGateway {
     card: Card,
     idempotencyKey?: string,
   ): Promise<string> {
-    const response = await this.client.im.v1.message.create({
-      params: { receive_id_type: "chat_id" },
-      data: {
-        receive_id: chatId,
-        msg_type: "interactive",
-        content: JSON.stringify(card),
-        ...(idempotencyKey ? { uuid: idempotencyKey } : {}),
+    return await this.capture(
+      "send_card",
+      { chatId, card, idempotencyKey },
+      async () => {
+        const response = await this.client.im.v1.message.create({
+          params: { receive_id_type: "chat_id" },
+          data: {
+            receive_id: chatId,
+            msg_type: "interactive",
+            content: JSON.stringify(card),
+            ...(idempotencyKey ? { uuid: idempotencyKey } : {}),
+          },
+        });
+        return this.messageIdFromResponse(response, "send card");
       },
-    });
-    return this.messageIdFromResponse(response, "send card");
+    );
   }
 
   async patchCard(messageId: string, card: Card): Promise<void> {
-    const response = await this.client.im.v1.message.patch({
-      path: { message_id: messageId },
-      data: { content: JSON.stringify(card) },
+    await this.capture("patch_card", { messageId, card }, async () => {
+      const response = await this.client.im.v1.message.patch({
+        path: { message_id: messageId },
+        data: { content: JSON.stringify(card) },
+      });
+      if (response.code !== 0) {
+        throw new Error(`Feishu patch card failed: ${response.code} ${response.msg}`);
+      }
     });
-    if (response.code !== 0) {
-      throw new Error(`Feishu patch card failed: ${response.code} ${response.msg}`);
-    }
   }
 
   async downloadMessageResource(
@@ -211,15 +239,36 @@ export class FeishuGateway {
     content: Record<string, string>,
     operation: string,
   ): Promise<string> {
-    const response = await this.client.im.v1.message.create({
-      params: { receive_id_type: "chat_id" },
-      data: {
-        receive_id: chatId,
-        msg_type: msgType,
-        content: JSON.stringify(content),
-      },
+    return await this.capture(operation.replaceAll(" ", "_"), {
+      chatId,
+      msgType,
+      content,
+    }, async () => {
+      const response = await this.client.im.v1.message.create({
+        params: { receive_id_type: "chat_id" },
+        data: {
+          receive_id: chatId,
+          msg_type: msgType,
+          content: JSON.stringify(content),
+        },
+      });
+      return this.messageIdFromResponse(response, operation);
     });
-    return this.messageIdFromResponse(response, operation);
+  }
+
+  private async capture<T>(
+    kind: string,
+    input: unknown,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.behaviorRecorder
+      ? await this.behaviorRecorder.capture(
+          "egress.feishu",
+          kind,
+          input,
+          operation,
+        )
+      : await operation();
   }
 
   private messageIdFromResponse(

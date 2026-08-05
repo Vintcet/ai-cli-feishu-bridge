@@ -77,6 +77,10 @@ export class UserInputCoordinator {
     return this.waiters.size;
   }
 
+  get defaultTimeoutMs(): number {
+    return this.dependencies.inputTimeoutMs;
+  }
+
   get(requestId: string): UserInputWaiter | undefined {
     return this.waiters.get(requestId);
   }

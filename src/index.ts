@@ -6,6 +6,7 @@ import { bridgeConfig } from "./config.js";
 import { FeishuGateway } from "./feishu.js";
 import { startHookHttpServer } from "./http-server.js";
 import { ManagedTerminalRouter } from "./managed-terminal.js";
+import { BehaviorRecorder } from "./migration/behavior-recorder.js";
 import { OpenCodeManager } from "./opencode-manager.js";
 import { BridgeStore } from "./store.js";
 import { bridgeVersion } from "./version.js";
@@ -19,13 +20,24 @@ if (!bridgeConfig.appId || !bridgeConfig.appSecret) {
   process.exit(1);
 }
 
+const behaviorRecorder = new BehaviorRecorder({
+  enabled: bridgeConfig.migrationRecordingEnabled,
+  filePath: bridgeConfig.migrationRecordingPath,
+  maxBytes: bridgeConfig.migrationRecordingMaxBytes,
+  maxBackups: bridgeConfig.migrationRecordingMaxBackups,
+});
 const store = new BridgeStore(bridgeConfig.dataDirectory, {
   defaultWorkspaceRoot: bridgeConfig.defaultWorkspaceRoot,
+  behaviorRecorder,
 });
 await store.init();
 const controlToken = await store.getOrCreateControlToken();
 
-const feishu = new FeishuGateway(bridgeConfig.appId, bridgeConfig.appSecret);
+const feishu = new FeishuGateway(
+  bridgeConfig.appId,
+  bridgeConfig.appSecret,
+  behaviorRecorder,
+);
 const codex = new CodexRunner(bridgeConfig.codexCommand);
 const managedTerminals = new ManagedTerminalRouter();
 const opencode = new OpenCodeManager(
@@ -40,6 +52,17 @@ const opencode = new OpenCodeManager(
       });
     },
     eventHandlers: {
+      onEvent: (event) => {
+        behaviorRecorder.record(
+          "ingress.opencode",
+          event.type,
+          event.properties,
+          {
+            runtime: "opencode",
+            sessionId: openCodeSessionId(event.properties),
+          },
+        );
+      },
       onSessionCreated: (session) => {
         void controller.handleOpenCodeSessionCreated(session).catch((error) => {
           console.error("[opencode] Could not register session:", error);
@@ -146,6 +169,7 @@ const controller = new BridgeController(store, feishu, codex, managedTerminals, 
   approvalLogPath: bridgeConfig.approvalLogPath,
   approvalLogMaxBytes: bridgeConfig.approvalLogMaxBytes,
   approvalLogMaxBackups: bridgeConfig.approvalLogMaxBackups,
+  behaviorRecorder,
 });
 
 opencode.startAutoDiscovery();
@@ -153,7 +177,12 @@ opencode.startAutoDiscovery();
 const eventDispatcher = new Lark.EventDispatcher({}).register({
   "im.message.receive_v1": async (data: FeishuEvent) => {
     try {
-      await controller.handleFeishuMessage(data);
+      await behaviorRecorder.capture(
+        "ingress.feishu",
+        "message.receive",
+        data,
+        () => controller.handleFeishuMessage(data),
+      );
     } catch (error) {
       console.error("Failed to handle a Feishu message:", error);
     }
@@ -167,7 +196,12 @@ const eventDispatcher = new Lark.EventDispatcher({}).register({
       `[card] received action=${typeof actionName === "string" ? actionName : "unknown"} tag=${typeof data.action?.tag === "string" ? data.action.tag : "unknown"}`,
     );
     try {
-      return await controller.handleCardAction(data);
+      return await behaviorRecorder.capture(
+        "ingress.feishu",
+        "card.action",
+        data,
+        () => controller.handleCardAction(data),
+      );
     } catch (error) {
       console.error("Failed to handle a Feishu card action:", error);
       return {
@@ -214,12 +248,54 @@ const hookServer = startHookHttpServer(
     runtimeLaunchComplete: (payload) => controller.handleRuntimeLaunchComplete(payload),
     localApproval: (payload) => controller.handleLocalApproval(payload),
     settingsUpdate: (payload) => controller.handleSettingsUpdate(payload),
-    sessionStart: (payload) => controller.handleSessionStartHook(payload),
-    sessionEnd: (payload) => controller.handleSessionEndHook(payload),
-    permission: (payload, signal) => controller.handlePermissionHook(payload, signal),
-    requestUserInput: (payload) => controller.handleRequestUserInputHook(payload),
-    activity: (payload) => controller.handleActivityHook(payload),
-    stop: (payload) => controller.handleStopHook(payload),
+    sessionStart: (payload) =>
+      behaviorRecorder.capture(
+        "ingress.hook",
+        "session_start",
+        payload,
+        () => controller.handleSessionStartHook(payload),
+        hookRecordContext(payload),
+      ),
+    sessionEnd: (payload) =>
+      behaviorRecorder.capture(
+        "ingress.hook",
+        "session_end",
+        payload,
+        () => controller.handleSessionEndHook(payload),
+        hookRecordContext(payload),
+      ),
+    permission: (payload, signal) =>
+      behaviorRecorder.capture(
+        "ingress.hook",
+        "permission",
+        payload,
+        () => controller.handlePermissionHook(payload, signal),
+        hookRecordContext(payload),
+      ),
+    requestUserInput: (payload) =>
+      behaviorRecorder.capture(
+        "ingress.hook",
+        "request_user_input",
+        payload,
+        () => controller.handleRequestUserInputHook(payload),
+        hookRecordContext(payload),
+      ),
+    activity: (payload) =>
+      behaviorRecorder.capture(
+        "ingress.hook",
+        "activity",
+        payload,
+        () => controller.handleActivityHook(payload),
+        hookRecordContext(payload),
+      ),
+    stop: (payload) =>
+      behaviorRecorder.capture(
+        "ingress.hook",
+        "stop",
+        payload,
+        () => controller.handleStopHook(payload),
+        hookRecordContext(payload),
+      ),
     opencodeLaunch: (payload) => controller.handleOpenCodeLaunch(payload),
     opencodeRegister: (payload) => controller.handleOpenCodeRegister(payload),
     opencodeUnregister: (payload) => controller.handleOpenCodeUnregister(payload),
@@ -235,6 +311,9 @@ console.log(`Starting Feishu long connection for app ${bridgeConfig.appId.slice(
 console.log(
   `Commands: “${bridgeConfig.bindCommand}”, “新建 codex 项目名”, “工作区”, “状态”, “会话”, “别名”, “排队”, “发文件”, “帮助”. Multiple assistant windows are routed by alias or session id.`,
 );
+if (behaviorRecorder.enabled) {
+  console.log(`[migration] Recording sanitized Node behavior to ${bridgeConfig.migrationRecordingPath}.`);
+}
 
 void controller.initialize()
   .then(() => controller.cleanupInactiveSessionGroups())
@@ -265,6 +344,7 @@ const shutdown = (): void => {
   void Promise.allSettled([controller.close(), codex.close()])
     .then(() => serverClosed)
     .then(() => store.close())
+    .then(() => behaviorRecorder.close())
     .then(() => {
       clearTimeout(forcedExitTimer);
       process.exit(0);
@@ -307,3 +387,31 @@ process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);
 
 void wsClient.start({ eventDispatcher });
+
+function hookRecordContext(payload: {
+  runtime?: "codex" | "opencode" | "claudecode";
+  session_id: string;
+}): { runtime: "codex" | "opencode" | "claudecode"; sessionId: string } {
+  return {
+    runtime: payload.runtime ?? "codex",
+    sessionId: payload.session_id,
+  };
+}
+
+function openCodeSessionId(properties: Record<string, unknown>): string | undefined {
+  for (const candidate of [
+    properties.sessionID,
+    properties.sessionId,
+    properties.session_id,
+  ]) {
+    if (typeof candidate === "string" && candidate.length > 0) return candidate;
+  }
+  for (const candidate of [properties.session, properties.info, properties.data]) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const nested = candidate as Record<string, unknown>;
+    for (const value of [nested.id, nested.sessionID, nested.sessionId, nested.session_id]) {
+      if (typeof value === "string" && value.length > 0) return value;
+    }
+  }
+  return undefined;
+}

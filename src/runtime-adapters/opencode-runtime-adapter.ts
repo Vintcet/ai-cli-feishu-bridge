@@ -3,6 +3,7 @@ import type { RuntimeCapability } from "../bridge-protocol/runtime-capabilities.
 import type { RuntimePromptMode } from "../bridge-protocol/runtime-command.js";
 import type { SessionRecord } from "../domain.js";
 import type { OpenCodeManager } from "../opencode-manager.js";
+import type { BehaviorRecorder } from "../migration/behavior-recorder.js";
 
 const capabilities: ReadonlySet<RuntimeCapability> = new Set([
   "prompt.send",
@@ -17,6 +18,7 @@ export class OpenCodeRuntimeAdapter implements RuntimeAdapter {
     private readonly opencode:
       | Pick<OpenCodeManager, "findActiveInstanceBySession" | "sendPrompt">
       | undefined,
+    private readonly behaviorRecorder?: BehaviorRecorder,
   ) {}
 
   isReady(session: SessionRecord): boolean {
@@ -36,6 +38,23 @@ export class OpenCodeRuntimeAdapter implements RuntimeAdapter {
     if (!this.opencode) {
       throw new Error("opencode 支持未启用。");
     }
-    await this.opencode.sendPrompt(session.sessionId, prompt);
+    const operation = () => this.opencode!.sendPrompt(session.sessionId, prompt);
+    if (!this.behaviorRecorder) {
+      await operation();
+      return;
+    }
+    this.behaviorRecorder.record(
+      "core.decision",
+      "prompt.route",
+      { decision: mode },
+      { runtime: "opencode", sessionId: session.sessionId },
+    );
+    await this.behaviorRecorder.capture(
+      "egress.runtime_command",
+      "prompt.send",
+      { prompt, mode },
+      operation,
+      { runtime: "opencode", sessionId: session.sessionId },
+    );
   }
 }

@@ -19,6 +19,7 @@ import {
   managedTerminalSessionId,
 } from "./managed-terminal.js";
 import { OpenCodeManager } from "./opencode-manager.js";
+import type { BehaviorRecorder } from "./migration/behavior-recorder.js";
 import { OpenCodeInteractionCoordinator } from "./opencode-interaction-coordinator.js";
 import { OpenCodeEventCoordinator } from "./opencode-event-coordinator.js";
 import type {
@@ -92,6 +93,7 @@ interface ControllerConfig {
   approvalLogPath?: string;
   approvalLogMaxBytes?: number;
   approvalLogMaxBackups?: number;
+  behaviorRecorder?: BehaviorRecorder;
   liveClientProcessIds?: (clients: ClientProcessMetadata[]) => ReadonlySet<number>;
 }
 
@@ -125,12 +127,22 @@ export class BridgeController {
   ) {
     const runtimeAdapters = new RuntimeAdapterRegistry();
     runtimeAdapters.register(
-      new ManagedTerminalRuntimeAdapter("codex", managedTerminals),
+      new ManagedTerminalRuntimeAdapter(
+        "codex",
+        managedTerminals,
+        config.behaviorRecorder,
+      ),
     );
     runtimeAdapters.register(
-      new ManagedTerminalRuntimeAdapter("claudecode", managedTerminals),
+      new ManagedTerminalRuntimeAdapter(
+        "claudecode",
+        managedTerminals,
+        config.behaviorRecorder,
+      ),
     );
-    runtimeAdapters.register(new OpenCodeRuntimeAdapter(opencode));
+    runtimeAdapters.register(
+      new OpenCodeRuntimeAdapter(opencode, config.behaviorRecorder),
+    );
     this.files = new FileTransferCoordinator({
       feishu,
       uploadsDirectory: config.uploadsDirectory,
@@ -230,6 +242,7 @@ export class BridgeController {
       sessionGroups: this.sessionGroups,
       approvalTimeoutMs: config.approvalTimeoutMs,
       isClosing: () => this.closing,
+      behaviorRecorder: config.behaviorRecorder,
     });
     this.runtimeRetries = new RuntimeRetryCoordinator({
       store,
@@ -252,6 +265,7 @@ export class BridgeController {
       patchCard: (messageId, card) => this.feishu.patchCard(messageId, card),
       releaseRetryLock: (sessionId) =>
         this.runtimePrompts.releaseRetryLock(sessionId),
+      behaviorRecorder: config.behaviorRecorder,
     });
     this.runtimePrompts = new RuntimePromptCoordinator({
       store,
@@ -363,6 +377,7 @@ export class BridgeController {
         this.runtimePrompts.consumeRemotePrompt(sessionId, prompt),
       addRoute: (messageId, sessionId, chatId, kind) =>
         this.addRoute(messageId, sessionId, chatId, kind),
+      behaviorRecorder: config.behaviorRecorder,
     });
   }
 
@@ -422,13 +437,41 @@ export class BridgeController {
   }
 
   handleRuntimeLaunchClaim(): Record<string, unknown> {
-    return this.runtimeLaunches.claim();
+    const result = this.runtimeLaunches.claim();
+    const request = plainRecord(result.request);
+    this.config.behaviorRecorder?.record(
+      "core.decision",
+      "launch.claim",
+      request
+        ? {
+            decision: "claimed",
+            kind: request.kind,
+            runtime: request.runtime,
+          }
+        : { decision: "empty" },
+    );
+    return result;
   }
 
   async handleRuntimeLaunchComplete(
     value: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    return await this.runtimeLaunches.complete(value);
+    const result = await this.runtimeLaunches.complete(value);
+    this.config.behaviorRecorder?.record(
+      "core.decision",
+      "launch.complete",
+      {
+        decision: result.ok === false
+          ? "invalid"
+          : result.alreadyResolved === true
+          ? "already_resolved"
+          : value.success === true
+          ? "completed"
+          : "failed",
+        success: value.success === true,
+      },
+    );
+    return result;
   }
 
   /**
@@ -986,4 +1029,10 @@ export class BridgeController {
       createdAt: new Date().toISOString(),
     });
   }
+}
+
+function plainRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }

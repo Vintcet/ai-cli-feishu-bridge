@@ -67,6 +67,22 @@ export const bridgeConfig = {
     process.env.APPROVAL_LOG_MAX_BACKUPS,
     5,
   ),
+  migrationRecordingEnabled:
+    process.env.AI_CLI_FEISHU_MIGRATION_RECORDING === "1",
+  migrationRecordingPath: path.join(
+    projectRoot,
+    "data",
+    "migration-recordings",
+    "node-behavior-v1.jsonl",
+  ),
+  migrationRecordingMaxBytes: positiveInteger(
+    process.env.AI_CLI_FEISHU_MIGRATION_RECORDING_MAX_BYTES,
+    10 * 1024 * 1024,
+  ),
+  migrationRecordingMaxBackups: positiveInteger(
+    process.env.AI_CLI_FEISHU_MIGRATION_RECORDING_MAX_BACKUPS,
+    3,
+  ),
   uploadsDirectory: path.join(projectRoot, "data", "uploads"),
   inboundFileMaxBytes: positiveInteger(
     process.env.FEISHU_INBOUND_FILE_MAX_BYTES,

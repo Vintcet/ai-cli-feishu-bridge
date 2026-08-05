@@ -25,6 +25,7 @@ import { FeishuGateway } from "./feishu.js";
 import { FileTransferCoordinator } from "./file-transfer-coordinator.js";
 import { extractBridgeFileDirectives } from "./file-transfer.js";
 import { ManagedTerminalRouter } from "./managed-terminal.js";
+import type { BehaviorRecorder } from "./migration/behavior-recorder.js";
 import { codexErrorFromMessage } from "./runtime-errors.js";
 import { RuntimeLaunchCoordinator } from "./runtime-launch-coordinator.js";
 import { RuntimeRetryCoordinator } from "./runtime-retry-coordinator.js";
@@ -65,6 +66,7 @@ interface HookEventCoordinatorDependencies {
     chatId: string,
     kind: MessageRouteKind,
   ) => Promise<void>;
+  behaviorRecorder?: BehaviorRecorder;
 }
 
 export class HookEventCoordinator {
@@ -232,6 +234,19 @@ export class HookEventCoordinator {
       riskLevel: risk.level,
       riskReason: risk.reason,
     };
+    this.dependencies.behaviorRecorder?.record(
+      "core.decision",
+      "approval.route",
+      {
+        decision: approval.requiresManualApproval ? "manual" : "automatic",
+        riskLevel: risk.level,
+        autoApprove: store.getSettings().autoApprove,
+      },
+      {
+        runtime: payload.runtime ?? "codex",
+        sessionId: payload.session_id,
+      },
+    );
     await this.dependencies.watchTranscript(session);
     if (this.dependencies.isClosing()) {
       await store.upsertSession({
@@ -352,6 +367,20 @@ export class HookEventCoordinator {
     const recipients = await this.dependencies.sessionGroups
       .notificationRecipients(session);
     if (recipients.length === 0 || this.dependencies.isClosing()) {
+      this.dependencies.behaviorRecorder?.record(
+        "core.decision",
+        "input.route",
+        {
+          decision: this.dependencies.isClosing()
+            ? "shutdown_local"
+            : "no_recipient_local",
+          recipientCount: recipients.length,
+        },
+        {
+          runtime: payload.runtime ?? "codex",
+          sessionId: payload.session_id,
+        },
+      );
       if (this.dependencies.isClosing()) {
         await store.upsertSession({
           sessionId: payload.session_id,
@@ -369,6 +398,20 @@ export class HookEventCoordinator {
       typeof autoResolutionMs === "number" && autoResolutionMs > 0
         ? Math.min(this.dependencies.inputTimeoutMs, autoResolutionMs)
         : this.dependencies.inputTimeoutMs;
+    this.dependencies.behaviorRecorder?.record(
+      "core.decision",
+      "input.route",
+      {
+        decision: "remote",
+        recipientCount: recipients.length,
+        questionCount: payload.tool_input.questions.length,
+        timeoutMs,
+      },
+      {
+        runtime: payload.runtime ?? "codex",
+        sessionId: payload.session_id,
+      },
+    );
     const resultPromise = inputs.createHookWaiter(requestId, {
       sessionId: payload.session_id,
       turnId: payload.turn_id,

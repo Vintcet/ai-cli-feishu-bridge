@@ -199,6 +199,22 @@ adapter.command_failed
 
 验收：C# 对同一输入生成与 Node 等价的标准事件和业务决定，且影子模式没有外部副作用。
 
+M1 的旁路录制默认关闭。需要采样时设置
+`AI_CLI_FEISHU_MIGRATION_RECORDING=1`，Node 会把脱敏后的 JSONL 写入
+`data/migration-recordings/node-behavior-v1.jsonl`。录制失败只记一次错误，
+不能阻断 Hook、CLI 或飞书链路；记录中正文、路径、标识符和秘密均不以原文出现。
+
+共享契约和五类黄金样例位于 `protocol/migration/v1/`。C# 回放器只读输入，
+不加载生产 Store、不连接 CLI、不调用飞书，也不写回录制文件：
+
+```powershell
+dotnet run --project .\bridge-dotnet\src\AiCliFeishu.Bridge.Replay\AiCliFeishu.Bridge.Replay.csproj -- .\data\migration-recordings\node-behavior-v1.jsonl
+```
+
+输出包括总记录数、匹配数、差异数、非法记录数，并按记录 ID 和 JSON 路径列出差异；
+存在差异、非法记录或空输入时返回非零退出码。M1 期间 Node 仍是唯一 Active Owner，
+C# 仅做影子归一化和对比。
+
 ### M2：存储与纯业务状态机
 
 - 在 C# 实现现有 JSON 存储的兼容读取和原子写入；

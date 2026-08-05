@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-cli-feishu.local/protocol/migration/v1/behavior-record.schema.json",
+  "title": "AI CLI Feishu Migration Behavior Record",
+  "type": "object",
+  "properties": {
+    "recordVersion": { "const": 1 },
+    "recordId": { "type": "string", "minLength": 1 },
+    "recordedAt": { "type": "string", "format": "date-time" },
+    "source": { "const": "node" },
+    "stage": { "$ref": "#/$defs/stage" },
+    "kind": { "type": "string", "minLength": 1 },
+    "traceId": { "type": "string", "minLength": 1 },
+    "runtime": { "$ref": "#/$defs/runtime" },
+    "sessionRef": { "type": "string", "minLength": 1 },
+    "outcome": { "$ref": "#/$defs/outcome" },
+    "observed": true,
+    "expectedProjection": { "$ref": "#/$defs/projection" }
+  },
+  "required": [
+    "recordVersion",
+    "recordId",
+    "recordedAt",
+    "source",
+    "stage",
+    "kind",
+    "traceId",
+    "outcome",
+    "observed",
+    "expectedProjection"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "runtime": {
+      "type": "string",
+      "enum": ["codex", "claudecode", "opencode"]
+    },
+    "stage": {
+      "type": "string",
+      "enum": [
+        "ingress.hook",
+        "ingress.opencode",
+        "ingress.feishu",
+        "core.state_committed",
+        "core.decision",
+        "egress.runtime_command",
+        "egress.feishu"
+      ]
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["observed", "succeeded", "failed"]
+    },
+    "projection": {
+      "type": "object",
+      "properties": {
+        "stage": { "$ref": "#/$defs/stage" },
+        "kind": { "type": "string", "minLength": 1 },
+        "runtime": { "$ref": "#/$defs/runtime" },
+        "outcome": { "$ref": "#/$defs/outcome" },
+        "observed": true
+      },
+      "required": ["stage", "kind", "outcome", "observed"],
+      "additionalProperties": false
+    }
+  }
+}
