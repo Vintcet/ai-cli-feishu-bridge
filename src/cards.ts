@@ -1,6 +1,7 @@
 import type {
   ApprovalRecord,
   ApprovalResolution,
+  RuntimeName,
   SessionRecord,
   UserInputQuestion,
 } from "./domain.js";
@@ -22,6 +23,188 @@ export interface ActivityCardEvent {
   at: string;
   label: string;
   detail?: string;
+}
+
+export interface RuntimeNewCardContext {
+  flowId: string;
+  sourceMessageId: string;
+  chatId: string;
+}
+
+export function buildRuntimeSelectionCard(
+  workspaceRoot: string | undefined,
+  context: RuntimeNewCardContext,
+): Card {
+  const runtimes: Array<{ runtime: RuntimeName; label: string }> = [
+    { runtime: "codex", label: "Codex" },
+    { runtime: "claudecode", label: "Claude Code" },
+    { runtime: "opencode", label: "OpenCode" },
+  ];
+  return {
+    config: { wide_screen_mode: true, update_multi: true },
+    header: {
+      template: "blue",
+      title: { tag: "plain_text", content: "新建 AI CLI 会话" },
+    },
+    elements: [
+      {
+        tag: "div",
+        text: {
+          tag: "lark_md",
+          content: workspaceRoot
+            ? `请选择运行环境。\n**默认工作区：** ${workspaceRoot}`
+            : "请选择运行环境。\n**默认工作区：** 尚未设置，请先在电脑端设置。",
+        },
+      },
+      {
+        tag: "action",
+        actions: runtimes.map(({ runtime, label }) => ({
+          tag: "button",
+          type: runtime === "codex" ? "primary" : "default",
+          text: { tag: "plain_text", content: label },
+          value: {
+            action: "runtime_new_select",
+            runtime,
+            ...context,
+          },
+        })),
+      },
+      {
+        tag: "note",
+        elements: [{
+          tag: "plain_text",
+          content: "三个运行环境都是 /new 的二级选项。",
+        }],
+      },
+    ],
+  };
+}
+
+export function buildRuntimeProjectFormCard(
+  runtime: RuntimeName,
+  workspaceRoot: string | undefined,
+  context: RuntimeNewCardContext,
+): Card {
+  const displayName = runtimeCardDisplayName(runtime);
+  const actionContext = { runtime, ...context };
+  return {
+    config: { wide_screen_mode: true, update_multi: true },
+    header: {
+      template: "blue",
+      title: { tag: "plain_text", content: `新建 ${displayName} 会话` },
+    },
+    elements: [
+      {
+        tag: "div",
+        text: {
+          tag: "lark_md",
+          content: workspaceRoot
+            ? `**运行环境：** ${displayName}\n**默认工作区：** ${workspaceRoot}`
+            : `**运行环境：** ${displayName}\n**默认工作区：** 尚未设置，请先在电脑端设置。`,
+        },
+      },
+      {
+        tag: "form",
+        name: "runtime_new_form",
+        elements: [
+          {
+            tag: "input",
+            name: "project_name",
+            required: true,
+            input_type: "text",
+            max_length: 80,
+            width: "fill",
+            label: { tag: "plain_text", content: "项目名" },
+            label_position: "top",
+            placeholder: {
+              tag: "plain_text",
+              content: "输入项目文件夹名称，例如：我的项目",
+            },
+          },
+          {
+            tag: "column_set",
+            flex_mode: "none",
+            horizontal_spacing: "default",
+            columns: [
+              {
+                tag: "column",
+                width: "auto",
+                elements: [{
+                  tag: "button",
+                  type: "primary",
+                  text: { tag: "plain_text", content: "确认新建" },
+                  complex_interaction: true,
+                  action_type: "form_submit",
+                  name: "runtime_new_submit",
+                  value: {
+                    action: "runtime_new_submit",
+                    ...actionContext,
+                  },
+                }],
+              },
+              {
+                tag: "column",
+                width: "auto",
+                elements: [{
+                  tag: "button",
+                  type: "default",
+                  text: { tag: "plain_text", content: "取消" },
+                  complex_interaction: true,
+                  name: "runtime_new_cancel",
+                  value: {
+                    action: "runtime_new_cancel",
+                    ...actionContext,
+                  },
+                }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+export function buildRuntimeLaunchSubmittedCard(
+  runtime: RuntimeName,
+  projectName: string,
+  workspaceRoot: string,
+): Card {
+  return buildRuntimeNewResultCard(
+    "green",
+    "已提交新建请求",
+    `**运行环境：** ${runtimeCardDisplayName(runtime)}\n**项目名：** ${projectName}\n**工作区：** ${workspaceRoot}\n\n桌面助手正在处理启动请求，后续结果会继续发送到当前私聊。`,
+  );
+}
+
+export function buildRuntimeLaunchCancelledCard(runtime: RuntimeName): Card {
+  return buildRuntimeNewResultCard(
+    "grey",
+    "已取消新建",
+    `未创建 ${runtimeCardDisplayName(runtime)} 会话。需要时可再次发送 /new。`,
+  );
+}
+
+function buildRuntimeNewResultCard(
+  template: "green" | "grey",
+  title: string,
+  content: string,
+): Card {
+  return {
+    config: { wide_screen_mode: true, update_multi: true },
+    header: {
+      template,
+      title: { tag: "plain_text", content: title },
+    },
+    elements: [{
+      tag: "div",
+      text: { tag: "lark_md", content },
+    }],
+  };
+}
+
+function runtimeCardDisplayName(runtime: RuntimeName): string {
+  return runtime === "opencode" ? "OpenCode" : runtimeDisplayName(runtime);
 }
 
 function approvalResultText(

@@ -286,6 +286,7 @@ export class BridgeController {
       this.approvals,
       this.inputs,
       this.runtimeRetries,
+      this.runtimeLaunches,
     );
     this.feishuMessages = new FeishuMessageHandler({
       store,
@@ -301,6 +302,8 @@ export class BridgeController {
       initializeSessionGroups: () => this.initializeSessionGroups(),
       respond: (sourceMessageId, chatId, text) =>
         this.respond(sourceMessageId, chatId, text),
+      respondCard: (sourceMessageId, chatId, card) =>
+        this.respondCard(sourceMessageId, chatId, card),
       resumeSession: (
         session,
         prompt,
@@ -939,6 +942,19 @@ export class BridgeController {
         console.error("[message] Could not send Feishu response:", fallbackError ?? error);
         return undefined;
       }
+    }
+  }
+
+  private async respondCard(
+    _sourceMessageId: string,
+    chatId: string,
+    card: Record<string, unknown>,
+  ): Promise<string | undefined> {
+    try {
+      return await this.feishu.sendCard(chatId, card);
+    } catch (error) {
+      console.error("[message] Could not send Feishu card response:", error);
+      return undefined;
     }
   }
 

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   appendAttachmentsToPrompt,
   parseFeishuContent,
@@ -7,6 +9,7 @@ import {
   approvalActionFromText,
   approvalText,
 } from "./approval-coordinator.js";
+import { buildRuntimeSelectionCard } from "./cards.js";
 import {
   runtimeDefinition,
   runtimeDisplayName,
@@ -55,6 +58,11 @@ interface FeishuMessageHandlerDependencies {
     sourceMessageId: string,
     chatId: string,
     text: string,
+  ) => Promise<string | undefined>;
+  respondCard: (
+    sourceMessageId: string,
+    chatId: string,
+    card: Record<string, unknown>,
   ) => Promise<string | undefined>;
   resumeSession: (
     session: SessionRecord,
@@ -214,6 +222,7 @@ export class FeishuMessageHandler {
     // administration in the bot's private chat so words such as “状态” or
     // “帮助” can still be sent to the corresponding assistant session.
     const isPrivateChat = chatType === "p2p";
+    const privateCommand = text.trim().toLocaleLowerCase("en-US");
 
     if (isPrivateChat) {
       const newRuntimeCommand = parseNewRuntimeCommand(text);
@@ -225,6 +234,28 @@ export class FeishuMessageHandler {
         );
         return;
       }
+      if (privateCommand === "/new" || text.trim() === "新建") {
+        const sent = await this.dependencies.respondCard(
+          messageId,
+          chatId,
+          buildRuntimeSelectionCard(
+            store.getSettings().workspaceRoot || undefined,
+            {
+              flowId: randomUUID(),
+              sourceMessageId: messageId,
+              chatId,
+            },
+          ),
+        );
+        if (!sent) {
+          await this.respond(
+            messageId,
+            chatId,
+            "运行环境选择卡片发送失败，请稍后重试 /new。",
+          );
+        }
+        return;
+      }
       if (/^新建(?:\s|$)/iu.test(text)) {
         await this.respond(messageId, chatId, newRuntimeCommandUsage());
         return;
@@ -233,7 +264,9 @@ export class FeishuMessageHandler {
 
     if (
       isPrivateChat &&
-      (text === "工作区" || text.toLowerCase() === "workspace")
+      (text === "工作区" ||
+        privateCommand === "workspace" ||
+        privateCommand === "/workspace")
     ) {
       const workspaceRoot = store.getSettings().workspaceRoot;
       await this.respond(
@@ -246,7 +279,7 @@ export class FeishuMessageHandler {
       return;
     }
 
-    if (isPrivateChat && text === "状态") {
+    if (isPrivateChat && (text === "状态" || privateCommand === "/status")) {
       const sessions = sessionDirectory.listActive();
       const pending = sessions.filter(
         (session) => session.status === "pending_approval",
@@ -261,13 +294,19 @@ export class FeishuMessageHandler {
 
     if (
       isPrivateChat &&
-      (text === "会话" || text.toLowerCase() === "sessions")
+      (text === "会话" ||
+        privateCommand === "sessions" ||
+        privateCommand === "/sessions")
     ) {
       await this.respond(messageId, chatId, sessionDirectory.formatSessionList());
       return;
     }
 
     if (isPrivateChat) {
+      if (privateCommand === "/aliases") {
+        await sessionDirectory.handleAliasCommand({}, messageId, chatId);
+        return;
+      }
       const aliasCommand = parseAliasCommand(text);
       if (aliasCommand) {
         await sessionDirectory.handleAliasCommand(
@@ -283,11 +322,14 @@ export class FeishuMessageHandler {
       }
     }
 
-    if (isPrivateChat && text === "帮助") {
+    if (
+      isPrivateChat &&
+      (text === "帮助" || privateCommand === "/help" || privateCommand === "/")
+    ) {
       await this.respond(
         messageId,
         chatId,
-        "用法：\n1. 发送“新建 codex 项目名”“新建 claude 项目名”或“新建 opencode 项目名”；\n2. 发送“工作区”查看默认项目根目录；\n3. 引用助手同步窗口的通知并回复；\n4. 发送 @别名 内容，运行中会直接插话；\n5. 发送“排队 @别名 内容”，排到下一轮；\n6. 发送“发文件 @别名 要求”，让助手完成后把文件发回；\n7. 可直接发送图片或文件，下一条再发送处理要求；\n8. 发送“会话”或“别名”查看路由；\n9. 外部会话仅支持通知、审批和补充信息；审批和补充信息卡片可在飞书处理。",
+        "一级命令：\n/new — 新建会话\n/sessions — 会话管理\n/status — 查看状态\n/workspace — 查看工作区\n/aliases — 会话别名\n/help — 全部功能\n\n发送 /new 后，从同一张卡片选择 Codex、Claude Code 或 OpenCode，再填写项目名。旧的“新建 codex 项目名”等文本命令仍可使用。\n\n会话消息：引用助手通知回复；或发送 @别名 内容。需要排队时发送“排队 @别名 内容”，需要返回文件时发送“发文件 @别名 要求”。也可以先发图片或文件，下一条再发处理要求。",
       );
       return;
     }

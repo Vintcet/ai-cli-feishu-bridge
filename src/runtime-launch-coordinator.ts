@@ -151,7 +151,7 @@ export class RuntimeLaunchCoordinator {
     command: NewRuntimeCommand,
     sourceMessageId: string,
     chatId: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const validationError = projectDirectoryNameValidationError(
       command.projectName,
     );
@@ -161,7 +161,7 @@ export class RuntimeLaunchCoordinator {
         chatId,
         `项目名不正确：${validationError}`,
       );
-      return;
+      return false;
     }
     const workspaceRoot = this.dependencies.store.getSettings().workspaceRoot;
     if (!workspaceRoot) {
@@ -170,7 +170,7 @@ export class RuntimeLaunchCoordinator {
         chatId,
         "尚未设置默认工作区。请先在电脑端“设置”中选择默认工作区。",
       );
-      return;
+      return false;
     }
     let prepared: { cwd: string; created: boolean };
     try {
@@ -184,7 +184,7 @@ export class RuntimeLaunchCoordinator {
         chatId,
         `项目目录准备失败：${error instanceof Error ? error.message : String(error)}`,
       );
-      return;
+      return false;
     }
     await this.queueNew(
       command.runtime,
@@ -194,6 +194,7 @@ export class RuntimeLaunchCoordinator {
       chatId,
       prepared.created,
     );
+    return true;
   }
 
   isAvailable(session: SessionRecord): boolean {

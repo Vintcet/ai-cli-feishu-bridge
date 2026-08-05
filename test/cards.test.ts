@@ -5,6 +5,8 @@ import {
   buildActivityCard,
   buildApprovalCard,
   buildErrorCards,
+  buildRuntimeProjectFormCard,
+  buildRuntimeSelectionCard,
   buildStopCard,
   buildStopCards,
   buildUserInputCards,
@@ -25,6 +27,75 @@ const session: SessionRecord = {
   openedAt: "2026-07-31T08:00:00.000Z",
   lastSeenAt: "2026-07-31T08:05:00.000Z",
 };
+
+test("/new uses one card with three runtime choices", () => {
+  const card = buildRuntimeSelectionCard("K:\\workspace", {
+    flowId: "runtime-flow",
+    sourceMessageId: "slash-new-message",
+    chatId: "chat-owner",
+  });
+  const actions = findCardRecords(
+    card,
+    (record) => record.action === "runtime_new_select",
+  );
+
+  assert.equal(actions.length, 3);
+  assert.deepEqual(
+    actions.map((action) => action.runtime),
+    ["codex", "claudecode", "opencode"],
+  );
+  assert.ok(actions.every((action) => action.flowId === "runtime-flow"));
+  assert.equal(
+    findCardRecords(card, (record) => record.tag === "button").length,
+    3,
+  );
+  const rendered = JSON.stringify(card);
+  assert.match(rendered, /三个运行环境都是 \/new 的二级选项/);
+  assert.doesNotMatch(rendered, /\/(?:codex|claude|opencode)/i);
+});
+
+test("runtime project cards submit a required project name form", () => {
+  const context = {
+    flowId: "runtime-flow",
+    sourceMessageId: "slash-new-message",
+    chatId: "chat-owner",
+  };
+
+  for (const runtime of ["codex", "claudecode", "opencode"] as const) {
+    const card = buildRuntimeProjectFormCard(runtime, "K:\\workspace", context);
+    const forms = findCardRecords(card, (record) => record.tag === "form");
+    const inputs = findCardRecords(
+      card,
+      (record) => record.tag === "input" && record.name === "project_name",
+    );
+    const submitActions = findCardRecords(
+      card,
+      (record) => record.action === "runtime_new_submit",
+    );
+    const cancelActions = findCardRecords(
+      card,
+      (record) => record.action === "runtime_new_cancel",
+    );
+
+    assert.equal(forms.length, 1);
+    assert.equal(inputs.length, 1);
+    assert.equal(inputs[0]?.required, true);
+    assert.equal(submitActions.length, 1);
+    assert.equal(submitActions[0]?.runtime, runtime);
+    assert.equal(cancelActions.length, 1);
+    assert.equal(cancelActions[0]?.runtime, runtime);
+
+    const submitButtons = findCardRecords(
+      card,
+      (record) =>
+        record.tag === "button" &&
+        record.action_type === "form_submit" &&
+        record.name === "runtime_new_submit",
+    );
+    assert.equal(submitButtons.length, 1);
+    assert.equal(submitButtons[0]?.complex_interaction, true);
+  }
+});
 
 test("approval cards keep PC approval behind an explicit transfer action", () => {
   const approval: ApprovalRecord = {
@@ -266,3 +337,22 @@ test("long PC prompts are split without losing content", () => {
   assert.equal(cards.length, chunks.length);
   assert.match(JSON.stringify(cards.at(-1)), /结尾/);
 });
+
+function findCardRecords(
+  value: unknown,
+  predicate: (record: Record<string, unknown>) => boolean,
+): Array<Record<string, unknown>> {
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => findCardRecords(item, predicate));
+  }
+  const record = value as Record<string, unknown>;
+  return [
+    ...(predicate(record) ? [record] : []),
+    ...Object.values(record).flatMap((child) =>
+      findCardRecords(child, predicate)
+    ),
+  ];
+}

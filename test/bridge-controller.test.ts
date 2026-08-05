@@ -985,6 +985,267 @@ test("history removal hides managed and externally tracked sessions", async () =
   }
 });
 
+test("/new card creates Codex, Claude Code, and OpenCode projects safely", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-new-card-"));
+  const dataDirectory = path.join(directory, "data");
+  const workspaceRoot = path.join(directory, "workspace");
+  try {
+    const store = new BridgeStore(dataDirectory, { defaultWorkspaceRoot: workspaceRoot });
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      { openId: "owner", chatId: "chat-owner", chatType: "p2p", boundAt: new Date().toISOString() },
+      code,
+    );
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(dataDirectory),
+    );
+    const cases = [
+      { runtime: "codex", projectName: "卡片-Codex" },
+      { runtime: "claudecode", projectName: "卡片-Claude" },
+      { runtime: "opencode", projectName: "卡片-OpenCode" },
+    ];
+
+    for (const [index, item] of cases.entries()) {
+      const sourceMessageId = `slash-new-${index}`;
+      await controller.handleFeishuMessage(
+        messageEvent(sourceMessageId, "owner", "/new"),
+      );
+      const selectionMessage = feishu.cards.at(-1);
+      assert.ok(selectionMessage);
+      assert.equal(selectionMessage.chatId, "chat-owner");
+      const selectionActions = findCardActions(
+        selectionMessage.card,
+        "runtime_new_select",
+      );
+      assert.equal(selectionActions.length, 3);
+      assert.deepEqual(
+        selectionActions.map((action) => action.runtime),
+        ["codex", "claudecode", "opencode"],
+      );
+      const selectionAction = selectionActions.find(
+        (action) => action.runtime === item.runtime,
+      );
+      assert.ok(selectionAction);
+
+      const selected = await controller.handleCardAction({
+        operator: { open_id: "owner" },
+        context: {
+          open_message_id: selectionMessage.messageId,
+          open_chat_id: "chat-owner",
+        },
+        action: { value: selectionAction },
+      });
+      assert.equal(selected.toast.type, "info");
+      assert.ok(selected.card);
+      const submitAction = findCardAction(
+        selected.card,
+        "runtime_new_submit",
+      );
+      assert.ok(submitAction);
+      assert.equal(submitAction.runtime, item.runtime);
+
+      const submitted = await controller.handleCardAction({
+        operator: { open_id: "owner" },
+        context: {
+          open_message_id: selectionMessage.messageId,
+          open_chat_id: "chat-owner",
+        },
+        action: {
+          value: submitAction,
+          form_value: { project_name: item.projectName },
+        },
+      });
+      assert.equal(submitted.toast.type, "success");
+      assert.match(JSON.stringify(submitted.card), /已提交新建请求/);
+
+      const expectedCwd = await realpath(path.join(workspaceRoot, item.projectName));
+      assert.equal((await stat(expectedCwd)).isDirectory(), true);
+      const claim = controller.handleRuntimeLaunchClaim() as {
+        request?: {
+          requestId: string;
+          kind: string;
+          runtime: string;
+          cwd: string;
+          projectName: string;
+        };
+      };
+      assert.equal(claim.request?.kind, "new");
+      assert.equal(claim.request?.runtime, item.runtime);
+      assert.equal(claim.request?.cwd, expectedCwd);
+      assert.equal(claim.request?.projectName, item.projectName);
+
+      const duplicate = await controller.handleCardAction({
+        operator: { open_id: "owner" },
+        context: {
+          open_message_id: selectionMessage.messageId,
+          open_chat_id: "chat-owner",
+        },
+        action: {
+          value: submitAction,
+          form_value: { project_name: item.projectName },
+        },
+      });
+      assert.equal(duplicate.toast.type, "warning");
+      assert.match(duplicate.toast.content, /请勿重复点击/);
+
+      await controller.handleRuntimeLaunchComplete({
+        requestId: claim.request!.requestId,
+        success: true,
+      });
+      assert.equal(
+        (controller.handleRuntimeLaunchClaim() as { request?: unknown }).request,
+        undefined,
+      );
+    }
+
+    const cardCount = feishu.cards.length;
+    await controller.handleFeishuMessage(
+      messageEvent("slash-new-other", "other", "/new"),
+    );
+    assert.equal(feishu.cards.length, cardCount);
+    assert.match(feishu.replies.at(-1)?.text ?? "", /只允许已设置的管理员账号操作/);
+
+    await controller.handleFeishuMessage(
+      messageEvent("slash-new-unauthorized-click", "owner", "/new"),
+    );
+    const protectedMessage = feishu.cards.at(-1);
+    assert.ok(protectedMessage);
+    const protectedAction = findCardAction(
+      protectedMessage.card,
+      "runtime_new_select",
+    );
+    assert.ok(protectedAction);
+    const unauthorized = await controller.handleCardAction({
+      operator: { open_id: "other" },
+      context: {
+        open_message_id: protectedMessage.messageId,
+        open_chat_id: "chat-owner",
+      },
+      action: { value: protectedAction },
+    });
+    assert.equal(unauthorized.toast.type, "warning");
+    assert.match(unauthorized.toast.content, /只有已绑定的管理员/);
+
+    await controller.handleFeishuMessage(
+      messageEvent("slash-new-invalid-card", "owner", "/new"),
+    );
+    const invalidMessage = feishu.cards.at(-1);
+    assert.ok(invalidMessage);
+    const invalidSelection = findCardAction(
+      invalidMessage.card,
+      "runtime_new_select",
+    );
+    assert.ok(invalidSelection);
+    const invalidForm = await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      context: {
+        open_message_id: invalidMessage.messageId,
+        open_chat_id: "chat-owner",
+      },
+      action: { value: invalidSelection },
+    });
+    const invalidSubmit = findCardAction(
+      invalidForm.card,
+      "runtime_new_submit",
+    );
+    assert.ok(invalidSubmit);
+    const invalid = await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      context: {
+        open_message_id: invalidMessage.messageId,
+        open_chat_id: "chat-owner",
+      },
+      action: {
+        value: invalidSubmit,
+        form_value: { project_name: "../越界项目" },
+      },
+    });
+    assert.equal(invalid.toast.type, "error");
+    assert.match(invalid.toast.content, /项目名不正确/);
+    assert.equal(
+      (controller.handleRuntimeLaunchClaim() as { request?: unknown }).request,
+      undefined,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("/new card reports a missing default workspace without queuing a launch", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-new-no-workspace-"));
+  try {
+    const store = new BridgeStore(directory);
+    await store.init();
+    const code = store.getPairingCode();
+    assert.ok(code);
+    await store.bindOwner(
+      { openId: "owner", chatId: "chat-owner", chatType: "p2p", boundAt: new Date().toISOString() },
+      code,
+    );
+    const feishu = new FakeFeishu();
+    const controller = new BridgeController(
+      store,
+      feishu as unknown as FeishuGateway,
+      new FakeCodex() as unknown as CodexRunner,
+      new ManagedTerminalRouter(),
+      undefined,
+      controllerConfig(directory),
+    );
+
+    await controller.handleFeishuMessage(
+      messageEvent("slash-new-no-workspace", "owner", "/new"),
+    );
+    const selectionMessage = feishu.cards.at(-1);
+    assert.ok(selectionMessage);
+    assert.match(JSON.stringify(selectionMessage.card), /尚未设置/);
+    const selectionAction = findCardAction(
+      selectionMessage.card,
+      "runtime_new_select",
+    );
+    assert.ok(selectionAction);
+    const selected = await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      context: {
+        open_message_id: selectionMessage.messageId,
+        open_chat_id: "chat-owner",
+      },
+      action: { value: selectionAction },
+    });
+    const submitAction = findCardAction(
+      selected.card,
+      "runtime_new_submit",
+    );
+    assert.ok(submitAction);
+    const submitted = await controller.handleCardAction({
+      operator: { open_id: "owner" },
+      context: {
+        open_message_id: selectionMessage.messageId,
+        open_chat_id: "chat-owner",
+      },
+      action: {
+        value: submitAction,
+        form_value: { project_name: "无工作区项目" },
+      },
+    });
+    assert.equal(submitted.toast.type, "error");
+    assert.match(submitted.toast.content, /尚未设置默认工作区/);
+    assert.equal(
+      (controller.handleRuntimeLaunchClaim() as { request?: unknown }).request,
+      undefined,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("history aliases keep the same session and Feishu group binding", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "ai-cli-feishu-history-alias-"));
   try {
@@ -4124,4 +4385,23 @@ function findCardAction(
     if (found) return found;
   }
   return undefined;
+}
+
+function findCardActions(
+  value: unknown,
+  action: string,
+): Array<Record<string, unknown>> {
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => findCardActions(item, action));
+  }
+  const record = value as Record<string, unknown>;
+  return [
+    ...(record.action === action ? [record] : []),
+    ...Object.values(record).flatMap((child) =>
+      findCardActions(child, action)
+    ),
+  ];
 }

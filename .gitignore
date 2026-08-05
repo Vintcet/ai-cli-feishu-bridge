@@ -18,5 +18,6 @@ desktop-control/**/publish*/
 desktop-control/ui-test*.png
 *.exe
 *.exe.bak-*
+权限审批清单.md
 .codex-app-schema-*/
 .codex-app-ts-*/

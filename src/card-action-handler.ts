@@ -3,7 +3,18 @@ import {
   ApprovalCoordinator,
   approvalText,
 } from "./approval-coordinator.js";
-import { runtimeDisplayName, truncate } from "./domain.js";
+import {
+  buildRuntimeLaunchCancelledCard,
+  buildRuntimeLaunchSubmittedCard,
+  buildRuntimeProjectFormCard,
+} from "./cards.js";
+import {
+  isRuntimeName,
+  runtimeDisplayName,
+  truncate,
+} from "./domain.js";
+import { projectDirectoryNameValidationError } from "./message-command-parser.js";
+import { RuntimeLaunchCoordinator } from "./runtime-launch-coordinator.js";
 import { RuntimeRetryCoordinator } from "./runtime-retry-coordinator.js";
 import { BridgeStore } from "./store.js";
 import { UserInputCoordinator } from "./user-input-coordinator.js";
@@ -19,11 +30,17 @@ export interface CardActionResult {
 }
 
 export class CardActionHandler {
+  private readonly runtimeNewFlows = new Map<
+    string,
+    "submitting" | "submitted" | "cancelled"
+  >();
+
   constructor(
     private readonly store: BridgeStore,
     private readonly approvals: ApprovalCoordinator,
     private readonly inputs: UserInputCoordinator,
     private readonly runtimeRetries: RuntimeRetryCoordinator,
+    private readonly runtimeLaunches: RuntimeLaunchCoordinator,
   ) {}
 
   async handle(data: FeishuEvent): Promise<CardActionResult> {
@@ -38,6 +55,14 @@ export class CardActionHandler {
     }
     const action = actionValue.action;
     const requestId = actionValue.requestId;
+
+    if (
+      action === "runtime_new_select" ||
+      action === "runtime_new_submit" ||
+      action === "runtime_new_cancel"
+    ) {
+      return await this.handleRuntimeNewAction(action, actionValue, data);
+    }
 
     if (action === "retry_stop") {
       const sessionId = actionValue?.sessionId;
@@ -133,6 +158,138 @@ export class CardActionHandler {
           : "这条审批已经处理或失效。",
       },
     };
+  }
+
+  private async handleRuntimeNewAction(
+    action: "runtime_new_select" | "runtime_new_submit" | "runtime_new_cancel",
+    actionValue: Record<string, unknown>,
+    data: FeishuEvent,
+  ): Promise<CardActionResult> {
+    const flowId = normalizeShortString(actionValue.flowId, 128);
+    const runtime = actionValue.runtime;
+    const context = normalizeRuntimeNewContext(data, actionValue);
+    if (!flowId || !isRuntimeName(runtime) || !context) {
+      return { toast: { type: "error", content: "新建会话卡片参数不完整。" } };
+    }
+
+    const ownerBinding = this.store.listBindings()[0];
+    if (!ownerBinding || ownerBinding.chatId !== context.chatId) {
+      return {
+        toast: {
+          type: "warning",
+          content: "新建会话只能在管理员与机器人的私聊中操作。",
+        },
+      };
+    }
+
+    const state = this.runtimeNewFlows.get(flowId);
+    if (action === "runtime_new_select") {
+      if (state) {
+        return { toast: { type: "warning", content: "这次新建操作已经处理或失效。" } };
+      }
+      return {
+        toast: {
+          type: "info",
+          content: `已选择 ${runtimeDisplayName(runtime)}，请填写项目名。`,
+        },
+        card: buildRuntimeProjectFormCard(
+          runtime,
+          this.store.getSettings().workspaceRoot || undefined,
+          { flowId, sourceMessageId: context.sourceMessageId, chatId: context.chatId },
+        ),
+      };
+    }
+
+    if (action === "runtime_new_cancel") {
+      if (state === "submitting" || state === "submitted") {
+        return { toast: { type: "warning", content: "启动请求已经提交，不能再取消。" } };
+      }
+      this.rememberRuntimeNewFlow(flowId, "cancelled");
+      return {
+        toast: {
+          type: state === "cancelled" ? "info" : "success",
+          content: "已取消新建会话。",
+        },
+        card: buildRuntimeLaunchCancelledCard(runtime),
+      };
+    }
+
+    if (state) {
+      return {
+        toast: {
+          type: "warning",
+          content: state === "cancelled"
+            ? "这次新建操作已经取消。"
+            : "启动请求已经提交，请勿重复点击。",
+        },
+      };
+    }
+
+    const projectName = normalizeProjectName(data.action?.form_value?.project_name)
+      ?? normalizeProjectName(data.action?.formValue?.project_name)
+      ?? normalizeProjectName(data.form_value?.project_name);
+    if (!projectName) {
+      return { toast: { type: "error", content: "请输入项目名。" } };
+    }
+    const validationError = projectDirectoryNameValidationError(projectName);
+    if (validationError) {
+      return {
+        toast: { type: "error", content: `项目名不正确：${validationError}` },
+      };
+    }
+    const workspaceRoot = this.store.getSettings().workspaceRoot;
+    if (!workspaceRoot) {
+      return {
+        toast: {
+          type: "error",
+          content: "尚未设置默认工作区，请先在电脑端“设置”中选择。",
+        },
+      };
+    }
+
+    this.rememberRuntimeNewFlow(flowId, "submitting");
+    let queued: boolean;
+    try {
+      queued = await this.runtimeLaunches.handleNewCommand(
+        { runtime, projectName },
+        context.sourceMessageId,
+        context.chatId,
+      );
+    } catch (error) {
+      this.runtimeNewFlows.delete(flowId);
+      throw error;
+    }
+    if (!queued) {
+      this.runtimeNewFlows.delete(flowId);
+      return {
+        toast: {
+          type: "error",
+          content: "新建请求未提交，请查看机器人回复后修改并重试。",
+        },
+      };
+    }
+
+    this.runtimeNewFlows.set(flowId, "submitted");
+    return {
+      toast: {
+        type: "success",
+        content: `已提交 ${runtimeDisplayName(runtime)} 启动请求。`,
+      },
+      card: buildRuntimeLaunchSubmittedCard(runtime, projectName, workspaceRoot),
+    };
+  }
+
+  private rememberRuntimeNewFlow(
+    flowId: string,
+    state: "submitting" | "submitted" | "cancelled",
+  ): void {
+    if (this.runtimeNewFlows.size >= 500) {
+      const oldest = this.runtimeNewFlows.keys().next().value;
+      if (typeof oldest === "string") {
+        this.runtimeNewFlows.delete(oldest);
+      }
+    }
+    this.runtimeNewFlows.set(flowId, state);
   }
 
   private async handleInputAction(
@@ -278,4 +435,41 @@ function normalizeActionValue(value: unknown): Record<string, unknown> | undefin
     }
   }
   return undefined;
+}
+
+function normalizeRuntimeNewContext(
+  data: FeishuEvent,
+  actionValue: Record<string, unknown>,
+): { sourceMessageId: string; chatId: string } | undefined {
+  const callbackChatId = normalizeShortString(
+    data.context?.open_chat_id ?? data.open_chat_id,
+    256,
+  );
+  const valueChatId = normalizeShortString(actionValue.chatId, 256);
+  if (callbackChatId && valueChatId && callbackChatId !== valueChatId) {
+    return undefined;
+  }
+  const chatId = callbackChatId ?? valueChatId;
+  const sourceMessageId = normalizeShortString(actionValue.sourceMessageId, 256)
+    ?? normalizeShortString(
+      data.context?.open_message_id ?? data.open_message_id,
+      256,
+    );
+  return sourceMessageId && chatId ? { sourceMessageId, chatId } : undefined;
+}
+
+function normalizeProjectName(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().normalize("NFC");
+  return normalized || undefined;
+}
+
+function normalizeShortString(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim();
+  return normalized && normalized.length <= maxLength ? normalized : undefined;
 }
