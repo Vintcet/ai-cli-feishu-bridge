@@ -2,11 +2,17 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
-Current version: `0.19.0`
+Current version: `0.19.1`
 
 AI CLI Feishu Assistant is an unofficial Windows-local bridge that connects Codex CLI, Claude Code, and OpenCode sessions to your own Feishu custom app. Each assistant session can have a private Feishu group, so you can receive completion and error notifications, handle approval or follow-up prompts, and continue the original CLI conversation while away from the computer.
 
 The bridge service, session index, credentials, and settings stay on your computer. This project does not provide a cloud relay and does not bundle Codex CLI, Claude Code, OpenCode, or a Feishu app. You install and sign in to the CLI tools yourself and create your own Feishu custom app.
+
+## What's new in 0.19.1
+
+- Feishu approval cards now stay in sync with local Codex and Claude Code decisions, and stale cards are marked as handled to prevent duplicate approvals.
+- Added a guided new-session card that lets you choose Codex, Claude Code, or OpenCode from a single Feishu card.
+- Native Feishu commands are handled before session routing, so `/new`, `/status`, and related bot commands still work when multiple sessions are active.
 
 ## What's new in 0.19.0
 
@@ -79,7 +85,7 @@ Main features:
 
 ### Use the Release ZIP
 
-Windows users can download `ai-cli-feishu-bridge-v0.19.0-windows-x64.zip` from [GitHub Releases](https://github.com/Vintcet/ai-cli-feishu-bridge/releases). The archive includes the compiled bridge, production dependencies, and both desktop executables. Extract the complete archive instead of copying only the main executable. Before the first run, copy `.env.example` to `.env`, add your Feishu app settings, then launch `AI CLI飞书助手.exe` from the archive root.
+Windows users can download `ai-cli-feishu-bridge-v0.19.1-windows-x64.zip` from [GitHub Releases](https://github.com/Vintcet/ai-cli-feishu-bridge/releases). The archive includes the compiled bridge, production dependencies, and both desktop executables. Extract the complete archive instead of copying only the main executable. Before the first run, copy `.env.example` to `.env`, add your Feishu app settings, then launch `AI CLI飞书助手.exe` from the archive root.
 
 ### Build from source
 

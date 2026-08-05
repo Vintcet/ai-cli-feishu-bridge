@@ -2,11 +2,17 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
-当前版本：`0.19.0`
+当前版本：`0.19.1`
 
 AI CLI 飞书助手是一个运行在 Windows 本机的非官方桥接器，把 Codex CLI、Claude Code 和 OpenCode 会话连接到你自己的飞书企业自建应用。每个助手会话可以绑定一个独立私有群，让你在电脑外接收完成或错误通知、处理权限审批和补充问题，并继续向原会话发送消息。
 
 桥接服务、会话索引和配置都保存在本机；项目不提供云端中转服务，也不捆绑 Codex CLI、Claude Code、OpenCode 或飞书应用。使用者需要自行安装并登录目标 CLI，并自行创建飞书应用。
+
+## 0.19.1 更新摘要
+
+- 飞书审批卡片现在会与 Codex、Claude Code 本机审批状态双向同步，过期卡片会及时变为已处理，避免重复审批；
+- 新增分级的新建会话卡片，可在一张飞书卡片中选择 Codex、Claude Code 或 OpenCode；
+- 飞书原生命令会优先于会话路由处理，多会话同时活跃时仍可正常使用 `/新建`、`/状态` 等机器人命令。
 
 ## 0.19.0 更新摘要
 
@@ -85,7 +91,7 @@ AI CLI 飞书助手是一个运行在 Windows 本机的非官方桥接器，把 
 
 ### 使用 Release ZIP
 
-Windows 用户可以从 [GitHub Releases](https://github.com/Vintcet/ai-cli-feishu-bridge/releases) 下载 `ai-cli-feishu-bridge-v0.19.0-windows-x64.zip`。压缩包已包含编译后的桥接服务、生产依赖和两个桌面 EXE；请完整解压后使用，不要只拿主程序一个文件。首次运行前，把 `.env.example` 复制为 `.env` 并填写飞书应用配置，然后双击根目录的 `AI CLI飞书助手.exe`。
+Windows 用户可以从 [GitHub Releases](https://github.com/Vintcet/ai-cli-feishu-bridge/releases) 下载 `ai-cli-feishu-bridge-v0.19.1-windows-x64.zip`。压缩包已包含编译后的桥接服务、生产依赖和两个桌面 EXE；请完整解压后使用，不要只拿主程序一个文件。首次运行前，把 `.env.example` 复制为 `.env` 并填写飞书应用配置，然后双击根目录的 `AI CLI飞书助手.exe`。
 
 ### 从源码构建
 
