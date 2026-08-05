@@ -18,6 +18,9 @@ public sealed record BridgeComponentHealth(
 
 public sealed record BridgeHealthSnapshot(
     bool Ok,
+    string HostKind,
+    int ManagementApiVersion,
+    string InstanceName,
     string Status,
     string Version,
     int ProcessId,
@@ -65,6 +68,9 @@ public sealed class BridgeHealthRegistry(
             var version = Assembly.GetEntryAssembly()?.GetName().Version?.ToString() ?? "0.0.0.0";
             return new(
                 ok,
+                BridgeHostManagementContract.HostKind,
+                BridgeHostManagementContract.ApiVersion,
+                options.InstanceName,
                 lifecycle.ToString().ToLowerInvariant(),
                 version,
                 Environment.ProcessId,

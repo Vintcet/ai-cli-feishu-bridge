@@ -73,6 +73,7 @@ internal sealed partial class MainForm : Form
             AppLog.Info(
                 $"面板启动 bridgeRoot={bridgeClient.BridgeRoot} " +
                 $"port={bridgeClient.Port} " +
+                $"host={bridgeClient.HostDisplayName} " +
                 $"controlToken存在={File.Exists(Path.Combine(bridgeClient.BridgeRoot, "data", "control-token.json"))}");
         }
         catch (Exception error)
@@ -989,12 +990,12 @@ internal sealed partial class MainForm : Form
         {
             await bridgeClient.StartAsync(lifetime.Token);
             BridgeStatus? status = null;
-            for (var attempt = 0; attempt < 20 && status is null; attempt++)
+            for (var attempt = 0; attempt < 20 && status?.Ok != true; attempt++)
             {
                 await Task.Delay(400, lifetime.Token);
                 status = await bridgeClient.GetStatusAsync(lifetime.Token);
             }
-            if (status is null)
+            if (status?.Ok != true)
             {
                 throw new InvalidOperationException("桥接服务没有在预期时间内启动。");
             }
@@ -1068,7 +1069,10 @@ internal sealed partial class MainForm : Form
             else
             {
                 ApplyStatus(status);
-                await ProcessPendingRuntimeLaunchAsync();
+                if (bridgeClient.IsProductionTarget)
+                {
+                    await ProcessPendingRuntimeLaunchAsync();
+                }
             }
             lastRefreshLabel.Text = $"最后刷新：{DateTime.Now:HH:mm:ss}";
         }
@@ -1204,7 +1208,11 @@ internal sealed partial class MainForm : Form
         bindingsValue.Text = status.Bindings.ToString();
         sessionsValue.Text = status.ActiveSessions.ToString();
 
-        if (feishuState == "connected")
+        if (!bridgeClient.IsProductionTarget)
+        {
+            SetHeaderStatus("C# Shadow 已连接", Warning);
+        }
+        else if (feishuState == "connected")
         {
             SetHeaderStatus("飞书已连接", Success);
         }
@@ -1217,7 +1225,13 @@ internal sealed partial class MainForm : Form
             SetHeaderStatus("飞书未连接", Danger);
         }
 
-        if (status.PendingDesktopApprovals > 0)
+        if (!bridgeClient.IsProductionTarget)
+        {
+            operationLabel.Text =
+                $"{bridgeClient.HostDisplayName} · {status.OwnershipMode} · " +
+                $"版本 {status.Version}";
+        }
+        else if (status.PendingDesktopApprovals > 0)
         {
             operationLabel.Text =
                 $"有 {status.PendingDesktopApprovals} 个操作已转回本机审批";
@@ -1252,13 +1266,13 @@ internal sealed partial class MainForm : Form
         connectionButton.ForeColor = Danger;
         connectionButton.FlatAppearance.BorderColor = Border;
         connectionButton.Enabled = !operating;
-        newCodexButton.Enabled = !operating;
-        newClaudeCodeButton.Enabled = !operating;
-        newOpenCodeButton.Enabled = !operating;
+        newCodexButton.Enabled = !operating && bridgeClient.IsProductionTarget;
+        newClaudeCodeButton.Enabled = !operating && bridgeClient.IsProductionTarget;
+        newOpenCodeButton.Enabled = !operating && bridgeClient.IsProductionTarget;
         approvalButton.Enabled =
-            !operating && status.PendingDesktopApprovals > 0;
+            !operating && bridgeClient.IsProductionTarget && status.PendingDesktopApprovals > 0;
         refreshButton.Enabled = !operating;
-        settingsButton.Enabled = !operating;
+        settingsButton.Enabled = !operating && bridgeClient.IsProductionTarget;
 
         sessionTabs.TabPages[0].Text = $"活跃会话 ({status.Sessions.Count})";
         sessionTabs.TabPages[1].Text = $"历史记录 ({status.HistorySessions.Count})";
@@ -1354,13 +1368,13 @@ internal sealed partial class MainForm : Form
         connectionButton.ForeColor = Color.White;
         connectionButton.FlatAppearance.BorderColor = Primary;
         connectionButton.Enabled = !operating;
-        newCodexButton.Enabled = !operating;
-        newClaudeCodeButton.Enabled = !operating;
-        newOpenCodeButton.Enabled = !operating;
+        newCodexButton.Enabled = !operating && bridgeClient.IsProductionTarget;
+        newClaudeCodeButton.Enabled = !operating && bridgeClient.IsProductionTarget;
+        newOpenCodeButton.Enabled = !operating && bridgeClient.IsProductionTarget;
         approvalButton.Text = "本机审批";
         approvalButton.Enabled = false;
         refreshButton.Enabled = !operating;
-        settingsButton.Enabled = !operating;
+        settingsButton.Enabled = !operating && bridgeClient.IsProductionTarget;
         sessionTabs.TabPages[0].Text = "活跃会话";
         sessionTabs.TabPages[1].Text = "历史记录";
         sessionGrid.Rows.Clear();
@@ -1390,11 +1404,11 @@ internal sealed partial class MainForm : Form
     {
         operating = value;
         connectionButton.Enabled = !value;
-        newCodexButton.Enabled = !value;
-        newClaudeCodeButton.Enabled = !value;
-        newOpenCodeButton.Enabled = !value;
+        newCodexButton.Enabled = !value && bridgeClient.IsProductionTarget;
+        newClaudeCodeButton.Enabled = !value && bridgeClient.IsProductionTarget;
+        newOpenCodeButton.Enabled = !value && bridgeClient.IsProductionTarget;
         approvalButton.Enabled =
-            !value &&
+            !value && bridgeClient.IsProductionTarget &&
             (lastStatus?.Approvals.Count(
                 item =>
                     item.Status == "pending" &&
@@ -1402,7 +1416,7 @@ internal sealed partial class MainForm : Form
                     item.DesktopApprovalRequested) ?? 0) > 0;
         UpdateSessionActionState();
         refreshButton.Enabled = !value;
-        settingsButton.Enabled = !value;
+        settingsButton.Enabled = !value && bridgeClient.IsProductionTarget;
         folderButton.Enabled = !value;
         if (!string.IsNullOrWhiteSpace(message))
         {
@@ -1419,18 +1433,18 @@ internal sealed partial class MainForm : Form
         resumeSessionButton.Visible = historySelected;
         deleteHistoryButton.Visible = historySelected;
         aliasButton.Enabled =
-            !operating &&
+            !operating && bridgeClient.IsProductionTarget &&
             (historySelected
                 ? historyGrid.CurrentRow?.Tag is AssistantSession
                 : sessionGrid.CurrentRow?.Tag is AssistantSession);
         retryGroupButton.Enabled =
-            !operating &&
+            !operating && bridgeClient.IsProductionTarget &&
             !historySelected &&
             sessionGrid.CurrentRow?.Tag is AssistantSession session &&
             session.ManagedByAssistant &&
             session.FeishuChatStatus != "connected";
         resumeSessionButton.Enabled =
-            !operating &&
+            !operating && bridgeClient.IsProductionTarget &&
             historySelected &&
             historyGrid.CurrentRow?.Tag is AssistantSession;
         deleteHistoryButton.Enabled = resumeSessionButton.Enabled;
@@ -1463,7 +1477,13 @@ internal sealed partial class MainForm : Form
         approvalButton.Text = pending.Count > 0
             ? $"本机审批 ({pending.Count})"
             : "本机审批";
-        approvalButton.Enabled = !operating && pending.Count > 0;
+        approvalButton.Enabled =
+            !operating && bridgeClient.IsProductionTarget && pending.Count > 0;
+
+        if (!bridgeClient.IsProductionTarget)
+        {
+            return;
+        }
 
         dismissedApprovalIds.RemoveWhere(
             requestId => pending.All(item => item.RequestId != requestId));

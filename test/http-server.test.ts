@@ -75,6 +75,9 @@ test("shutdown endpoint requires the control token and responds before stopping"
       headers: {
         "content-type": "application/json",
         "x-ai-cli-feishu-control-token": token,
+        "x-ai-cli-feishu-expected-host-kind": "node",
+        "x-ai-cli-feishu-management-api-version": "1",
+        "x-ai-cli-feishu-expected-process-id": String(process.pid),
       },
       body: "{}",
     });
@@ -82,6 +85,44 @@ test("shutdown endpoint requires the control token and responds before stopping"
     assert.deepEqual(await authorized.json(), { ok: true });
     await shutdownCalled;
     assert.equal(shutdownCalls, 1);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  }
+});
+
+test("shutdown endpoint rejects a stale or mismatched host identity", async () => {
+  const token = "e".repeat(64);
+  let shutdownCalls = 0;
+  const custom = handlers();
+  custom.shutdown = () => {
+    shutdownCalls += 1;
+  };
+  const server = startHookHttpServer("127.0.0.1", 0, custom, token);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("listening", resolve);
+      server.once("error", reject);
+    });
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/control/shutdown`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-ai-cli-feishu-control-token": token,
+          "x-ai-cli-feishu-expected-host-kind": "dotnet",
+          "x-ai-cli-feishu-management-api-version": "1",
+          "x-ai-cli-feishu-expected-process-id": String(process.pid),
+        },
+        body: "{}",
+      },
+    );
+    assert.equal(response.status, 409);
+    assert.equal(shutdownCalls, 0);
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
@@ -355,9 +396,21 @@ test("health returns only liveness data to unauthenticated callers", async () =>
     const authorized = await fetch(`${base}/health?refresh=1`, {
       headers: { "x-ai-cli-feishu-control-token": token },
     });
-    const authorizedBody = await authorized.json() as { pairingCode?: string };
+    const authorizedBody = await authorized.json() as {
+      pairingCode?: string;
+      hostKind?: string;
+      managementApiVersion?: number;
+      ownershipMode?: string;
+      activeOwner?: boolean;
+      processId?: number;
+    };
     assert.equal(authorizedBody.pairingCode, "SECRET1234");
-    assert.deepEqual(refreshCalls, [false, true]);
+    assert.equal(authorizedBody.hostKind, "node");
+    assert.equal(authorizedBody.managementApiVersion, 1);
+    assert.equal(authorizedBody.ownershipMode, "active");
+    assert.equal(authorizedBody.activeOwner, true);
+    assert.equal(authorizedBody.processId, process.pid);
+    assert.deepEqual(refreshCalls, [true]);
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());

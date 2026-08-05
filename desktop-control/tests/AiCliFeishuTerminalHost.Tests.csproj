@@ -22,5 +22,6 @@
     <Compile Include="..\TerminalInputParser.cs" Link="TerminalInputParser.cs" />
     <Compile Include="..\ManagedTerminalHost.cs" Link="ManagedTerminalHost.cs" />
     <Compile Include="..\Models.cs" Link="Models.cs" />
+    <Compile Include="..\BridgeHostTarget.cs" Link="BridgeHostTarget.cs" />
   </ItemGroup>
 </Project>

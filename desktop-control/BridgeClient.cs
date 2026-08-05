@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using System.ComponentModel;
-using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -9,12 +8,18 @@ namespace AiCliFeishuControl;
 
 internal sealed class BridgeClient : IDisposable
 {
+    private const string ControlTokenHeader = "X-AI-CLI-Feishu-Control-Token";
+    private const string ExpectedHostKindHeader = "X-AI-CLI-Feishu-Expected-Host-Kind";
+    private const string ManagementApiVersionHeader = "X-AI-CLI-Feishu-Management-Api-Version";
+    private const string ExpectedProcessIdHeader = "X-AI-CLI-Feishu-Expected-Process-Id";
     private readonly HttpClient httpClient;
+    private readonly BridgeHostTarget target;
 
     public BridgeClient()
     {
         BridgeRoot = FindBridgeRoot();
-        Port = ReadBridgePort(BridgeRoot);
+        target = SelectHostTarget(BridgeRoot);
+        Port = target.Port;
         httpClient = new HttpClient
         {
             BaseAddress = new Uri($"http://127.0.0.1:{Port}/"),
@@ -25,6 +30,10 @@ internal sealed class BridgeClient : IDisposable
     public string BridgeRoot { get; }
 
     public int Port { get; }
+
+    public bool IsProductionTarget => target.IsProduction;
+
+    public string HostDisplayName => target.IsProduction ? "Node 生产 Host" : "C# Shadow Host";
 
     public async Task<BridgeStatus?> GetStatusAsync(
         CancellationToken cancellationToken = default,
@@ -40,9 +49,7 @@ internal sealed class BridgeClient : IDisposable
             using var request = new HttpRequestMessage(
                 HttpMethod.Get,
                 forceRefresh ? "health?refresh=1" : "health");
-            request.Headers.Add(
-                "X-AI-CLI-Feishu-Control-Token",
-                controlToken);
+            request.Headers.Add(ControlTokenHeader, controlToken);
             using var response = await httpClient.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
@@ -53,10 +60,18 @@ internal sealed class BridgeClient : IDisposable
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            return await JsonSerializer.DeserializeAsync<BridgeStatus>(
+            var status = await JsonSerializer.DeserializeAsync<BridgeStatus>(
                 stream,
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
                 cancellationToken);
+            if (status is not null && !target.Matches(status))
+            {
+                throw new InvalidOperationException(
+                    $"端口 {Port} 返回了身份不匹配的 Bridge Host：" +
+                    $"expected={target.HostKind}/{target.OwnershipMode}，" +
+                    $"actual={status.HostKind}/{status.OwnershipMode}。");
+            }
+            return status;
         }
         catch (Exception error) when (
             error is HttpRequestException or TaskCanceledException or JsonException)
@@ -70,16 +85,27 @@ internal sealed class BridgeClient : IDisposable
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
-        AppLog.Info($"启动桥接（root={BridgeRoot}，port={Port}）...");
-        await RunPowerShellScriptAsync("install-hooks.ps1", TimeSpan.FromSeconds(10));
-        await RunPowerShellScriptAsync("install-claude-code-hooks.ps1", TimeSpan.FromSeconds(10));
+        AppLog.Info(
+            $"启动桥接（host={target.HostKind}，ownership={target.OwnershipMode}，" +
+            $"root={BridgeRoot}，port={Port}）...");
+        if (target.IsProduction)
+        {
+            await RunPowerShellScriptAsync("install-hooks.ps1", TimeSpan.FromSeconds(10));
+            await RunPowerShellScriptAsync("install-claude-code-hooks.ps1", TimeSpan.FromSeconds(10));
+        }
 
         var running = await GetStatusAsync(cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        if (running?.Ok == true)
+        if (running is not null)
         {
-            AppLog.Info($"桥接已经在线（pid={running.ProcessId}，version={running.Version}）。");
-            return;
+            if (running.Ok)
+            {
+                AppLog.Info($"桥接已经在线（pid={running.ProcessId}，version={running.Version}）。");
+                return;
+            }
+            throw new InvalidOperationException(
+                $"{target.HostKind} Bridge Host 已在端口 {Port} 运行，" +
+                $"但状态为 {running.Status}，已拒绝重复启动。");
         }
 
         var publicProbe = await ProbeBridgeAsync(cancellationToken);
@@ -91,7 +117,7 @@ internal sealed class BridgeClient : IDisposable
         }
 
         StartBridgeProcess();
-        AppLog.Info("桥接进程已直接启动。");
+        AppLog.Info($"{target.HostKind} 桥接进程已直接启动。");
     }
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
@@ -116,15 +142,16 @@ internal sealed class BridgeClient : IDisposable
         {
             Content = JsonContent.Create(new { }),
         };
+        request.Headers.Add(ControlTokenHeader, ReadControlToken(BridgeRoot));
+        request.Headers.Add(ExpectedHostKindHeader, target.HostKind);
         request.Headers.Add(
-            "X-AI-CLI-Feishu-Control-Token",
-            ReadControlToken(BridgeRoot));
+            ManagementApiVersionHeader,
+            target.ManagementApiVersion.ToString(
+                System.Globalization.CultureInfo.InvariantCulture));
+        request.Headers.Add(
+            ExpectedProcessIdHeader,
+            status.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
         using var response = await httpClient.SendAsync(request, cancellationToken);
-        if (response.StatusCode == HttpStatusCode.NotFound)
-        {
-            StopVerifiedLegacyBridge(status);
-            return;
-        }
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
@@ -136,10 +163,16 @@ internal sealed class BridgeClient : IDisposable
     public int RunBridgeService()
     {
         var running = GetStatusAsync().GetAwaiter().GetResult();
-        if (running?.Ok == true)
+        if (running is not null)
         {
-            AppLog.Info($"桥接已经在线（pid={running.ProcessId}），后台宿主无需重复启动。");
-            return 0;
+            if (running.Ok)
+            {
+                AppLog.Info($"桥接已经在线（pid={running.ProcessId}），后台宿主无需重复启动。");
+                return 0;
+            }
+            throw new InvalidOperationException(
+                $"{target.HostKind} Bridge Host 已在端口 {Port} 运行，" +
+                $"但状态为 {running.Status}，后台宿主不会重复启动。");
         }
         var publicProbe = ProbeBridgeAsync().GetAwaiter().GetResult();
         if (publicProbe?.Ok == true)
@@ -877,64 +910,24 @@ internal sealed class BridgeClient : IDisposable
     private void StartBridgeProcess()
     {
         using var process = StartBridgeProcessCore();
-        AppLog.Info($"已启动 Node.js 桥接进程 pid={process.Id}。");
+        AppLog.Info($"已启动 {target.HostKind} 桥接进程 pid={process.Id}。");
     }
 
     private Process StartBridgeProcessCore()
     {
-        var entryFile = Path.Combine(BridgeRoot, "dist", "index.js");
-        if (!File.Exists(entryFile))
-        {
-            throw new FileNotFoundException(
-                "找不到已构建的桥接入口，请先运行 npm run build。",
-                entryFile);
-        }
-
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "node.exe",
-            WorkingDirectory = BridgeRoot,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            WindowStyle = ProcessWindowStyle.Hidden,
-        };
-        startInfo.ArgumentList.Add(entryFile);
-        startInfo.Environment["BRIDGE_HTTP_PORT"] =
-            Port.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var startInfo = target.CreateStartInfo(BridgeRoot, AppContext.BaseDirectory);
         try
         {
             return Process.Start(startInfo)
-                ?? throw new InvalidOperationException("Node.js 桥接进程未能启动。");
+                ?? throw new InvalidOperationException($"{target.HostKind} 桥接进程未能启动。");
         }
         catch (Win32Exception error)
         {
+            var requirement = target.IsProduction
+                ? "请确认 Node.js 20 或更高版本已安装并加入 PATH。"
+                : "请确认 C# Shadow Host 已构建，并安装对应的 .NET Runtime。";
             throw new InvalidOperationException(
-                "无法启动 node.exe，请确认 Node.js 20 或更高版本已安装并加入 PATH。",
-                error);
-        }
-    }
-
-    private static void StopVerifiedLegacyBridge(BridgeStatus status)
-    {
-        if (status.ProcessId <= 0 || status.ProcessId == Environment.ProcessId)
-        {
-            throw new InvalidOperationException(
-                "旧版桥接未返回有效进程号，已拒绝强制停止。");
-        }
-        try
-        {
-            using var process = Process.GetProcessById(status.ProcessId);
-            process.Kill(entireProcessTree: true);
-            AppLog.Info($"已停止不支持平滑关闭的旧版桥接 pid={status.ProcessId}。");
-        }
-        catch (ArgumentException)
-        {
-            AppLog.Info("旧版桥接已经停止。");
-        }
-        catch (Win32Exception error)
-        {
-            throw new InvalidOperationException(
-                $"无法停止旧版桥接进程 {status.ProcessId}。",
+                $"无法启动 {target.HostKind} 桥接。{requirement}",
                 error);
         }
     }
@@ -1065,6 +1058,11 @@ internal sealed class BridgeClient : IDisposable
         }
         return 8765;
     }
+
+    private static BridgeHostTarget SelectHostTarget(string bridgeRoot)
+        => BridgeHostTarget.FromConfiguration(
+            Environment.GetEnvironmentVariable("AI_CLI_FEISHU_BRIDGE_HOST"),
+            ReadBridgePort(bridgeRoot));
 
     private static bool TryReadControlToken(string bridgeRoot, out string token)
     {

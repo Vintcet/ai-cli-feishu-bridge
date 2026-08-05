@@ -62,7 +62,7 @@ internal static class Program
                 for (var attempt = 0; attempt < 25; attempt += 1)
                 {
                     Thread.Sleep(400);
-                    if (bridgeClient.GetStatusAsync().GetAwaiter().GetResult() is not null)
+                    if (bridgeClient.GetStatusAsync().GetAwaiter().GetResult()?.Ok == true)
                     {
                         return 0;
                     }

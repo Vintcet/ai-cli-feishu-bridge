@@ -42,6 +42,9 @@ public sealed class FileBridgeControlTokenProvider(BridgeHostOptions options)
 public static class BridgeControlApi
 {
     public const string ControlTokenHeader = "X-AI-CLI-Feishu-Control-Token";
+    public const string ExpectedHostKindHeader = "X-AI-CLI-Feishu-Expected-Host-Kind";
+    public const string ManagementApiVersionHeader = "X-AI-CLI-Feishu-Management-Api-Version";
+    public const string ExpectedProcessIdHeader = "X-AI-CLI-Feishu-Expected-Process-Id";
 
     public static void MapBridgeControlApi(this WebApplication app)
     {
@@ -81,6 +84,12 @@ public static class BridgeControlApi
                     new ControlError(false, "本机控制令牌无效。"),
                     statusCode: StatusCodes.Status401Unauthorized);
             }
+            if (!HasExpectedManagementIdentity(context.Request))
+            {
+                return Results.Json(
+                    new ControlError(false, "目标 Bridge Host 身份不匹配，已拒绝停止。"),
+                    statusCode: StatusCodes.Status409Conflict);
+            }
 
             context.Response.OnCompleted(() =>
             {
@@ -96,6 +105,13 @@ public static class BridgeControlApi
         var value = request.Headers["Sec-Fetch-Site"].ToString();
         return value.Length > 0 && value is not "same-origin" and not "none";
     }
+
+    private static bool HasExpectedManagementIdentity(HttpRequest request) =>
+        request.Headers[ExpectedHostKindHeader].ToString() == BridgeHostManagementContract.HostKind &&
+        int.TryParse(request.Headers[ManagementApiVersionHeader], out var apiVersion) &&
+        apiVersion == BridgeHostManagementContract.ApiVersion &&
+        int.TryParse(request.Headers[ExpectedProcessIdHeader], out var processId) &&
+        processId == Environment.ProcessId;
 
     private static async ValueTask<bool> IsAuthenticatedAsync(
         HttpRequest request,
@@ -119,4 +135,10 @@ public static class BridgeControlApi
     private sealed record ControlAccepted(bool Ok);
 
     private sealed record ControlError(bool Ok, string Error);
+}
+
+public static class BridgeHostManagementContract
+{
+    public const string HostKind = "dotnet";
+    public const int ApiVersion = 1;
 }

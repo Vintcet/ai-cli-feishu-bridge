@@ -233,6 +233,100 @@ public sealed class RuntimeAndTerminalTests
         Assert.AreEqual(1785510446683.327, status.Feishu.NextConnectTime);
     }
 
+    [TestMethod]
+    public void BridgeTargetsKeepProductionAndShadowOwnershipSeparated()
+    {
+        var production = BridgeHostTarget.FromConfiguration(null, 8765);
+        var explicitProduction = BridgeHostTarget.FromConfiguration("node", 9123);
+        var shadow = BridgeHostTarget.FromConfiguration("dotnet-shadow", 9123);
+
+        Assert.IsTrue(production.IsProduction);
+        Assert.AreEqual(8765, production.Port);
+        Assert.AreEqual("node", production.HostKind);
+        Assert.IsTrue(production.ActiveOwner);
+        Assert.IsFalse(shadow.IsProduction);
+        Assert.AreEqual(8876, shadow.Port);
+        Assert.AreEqual("dotnet", shadow.HostKind);
+        Assert.AreEqual("passive", shadow.OwnershipMode);
+        Assert.IsFalse(shadow.ActiveOwner);
+        Assert.AreNotEqual(production.Port, shadow.Port);
+        Assert.AreEqual(9123, explicitProduction.Port);
+        Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostTarget.FromConfiguration("dotnet", 8765));
+    }
+
+    [TestMethod]
+    public void BridgeTargetRequiresExactAuthenticatedIdentity()
+    {
+        var production = BridgeHostTarget.NodeProduction(8765);
+        var node = new BridgeStatus
+        {
+            ProcessId = 100,
+            HostKind = "node",
+            ManagementApiVersion = 1,
+            OwnershipMode = "active",
+            ActiveOwner = true,
+        };
+        Assert.IsTrue(production.Matches(node));
+
+        node.HostKind = "dotnet";
+        Assert.IsFalse(production.Matches(node));
+        node.HostKind = "node";
+        node.ActiveOwner = false;
+        Assert.IsFalse(production.Matches(node));
+
+        var shadow = BridgeHostTarget.DotNetShadow();
+        var dotnet = new BridgeStatus
+        {
+            ProcessId = 200,
+            HostKind = "dotnet",
+            ManagementApiVersion = 1,
+            InstanceName = BridgeHostTarget.DotNetShadowInstanceName,
+            OwnershipMode = "passive",
+            ActiveOwner = false,
+        };
+        Assert.IsTrue(shadow.Matches(dotnet));
+        dotnet.InstanceName = "another-shadow";
+        Assert.IsFalse(shadow.Matches(dotnet));
+        dotnet.InstanceName = BridgeHostTarget.DotNetShadowInstanceName;
+        dotnet.ProcessId = 0;
+        Assert.IsFalse(shadow.Matches(dotnet));
+    }
+
+    [TestMethod]
+    public void BridgeTargetsBuildIsolatedNodeAndShadowProcesses()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"ai-cli-feishu-target-{Guid.NewGuid():N}");
+        var application = Path.Combine(root, "app");
+        Directory.CreateDirectory(Path.Combine(root, "dist"));
+        Directory.CreateDirectory(application);
+        File.WriteAllText(Path.Combine(root, "dist", "index.js"), "");
+        File.WriteAllText(Path.Combine(application, "AiCliFeishuBridgeHost.exe"), "");
+        try
+        {
+            var production = BridgeHostTarget.NodeProduction(9123)
+                .CreateStartInfo(root, application);
+            Assert.AreEqual("node.exe", production.FileName);
+            Assert.AreEqual("9123", production.Environment["BRIDGE_HTTP_PORT"]);
+
+            var shadow = BridgeHostTarget.DotNetShadow().CreateStartInfo(root, application);
+            Assert.AreEqual(
+                Path.Combine(application, "AiCliFeishuBridgeHost.exe"),
+                shadow.FileName);
+            CollectionAssert.Contains(shadow.ArgumentList.ToArray(), "8876");
+            CollectionAssert.Contains(shadow.ArgumentList.ToArray(), "passive");
+            CollectionAssert.Contains(
+                shadow.ArgumentList.ToArray(),
+                BridgeHostTarget.DotNetShadowInstanceName);
+            Assert.AreEqual("Major", shadow.Environment["DOTNET_ROLL_FORWARD"]);
+            Assert.IsFalse(shadow.Environment.ContainsKey("BRIDGE_HTTP_PORT"));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static void AssertSequence(
         IReadOnlyList<string> expected,
         IReadOnlyList<string> actual)

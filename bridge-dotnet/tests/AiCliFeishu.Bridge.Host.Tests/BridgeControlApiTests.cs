@@ -67,6 +67,9 @@ public sealed class BridgeControlApiTests
         using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 
         Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
+        Assert.AreEqual("dotnet", body.RootElement.GetProperty("hostKind").GetString());
+        Assert.AreEqual(1, body.RootElement.GetProperty("managementApiVersion").GetInt32());
+        Assert.AreEqual("api-test", body.RootElement.GetProperty("instanceName").GetString());
         Assert.AreEqual("passive", body.RootElement.GetProperty("ownershipMode").GetString());
         Assert.IsFalse(body.RootElement.GetProperty("activeOwner").GetBoolean());
         Assert.IsTrue(body.RootElement.GetProperty("processId").GetInt32() > 0);
@@ -86,6 +89,42 @@ public sealed class BridgeControlApiTests
         request.Headers.Add("Sec-Fetch-Site", "cross-site");
         using var crossSite = await client!.SendAsync(request);
         Assert.AreEqual(HttpStatusCode.Forbidden, crossSite.StatusCode);
+    }
+
+    [TestMethod]
+    public async Task ShutdownRequiresMatchingHostApiAndProcessIdentity()
+    {
+        using var wrongHost = ShutdownRequest("node", Environment.ProcessId);
+        using var wrongHostResponse = await client!.SendAsync(wrongHost);
+        Assert.AreEqual(HttpStatusCode.Conflict, wrongHostResponse.StatusCode);
+
+        using var wrongProcess = ShutdownRequest("dotnet", Environment.ProcessId + 1);
+        using var wrongProcessResponse = await client.SendAsync(wrongProcess);
+        Assert.AreEqual(HttpStatusCode.Conflict, wrongProcessResponse.StatusCode);
+    }
+
+    [TestMethod]
+    public async Task ShutdownAcceptsOnlyTheCurrentAuthenticatedHostIdentity()
+    {
+        using var request = ShutdownRequest("dotnet", Environment.ProcessId);
+        using var response = await client!.SendAsync(request);
+
+        Assert.AreEqual(HttpStatusCode.Accepted, response.StatusCode);
+    }
+
+    private static HttpRequestMessage ShutdownRequest(string hostKind, int processId)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/control/shutdown")
+        {
+            Content = JsonContent.Create(new { }),
+        };
+        request.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        request.Headers.Add(BridgeControlApi.ExpectedHostKindHeader, hostKind);
+        request.Headers.Add(
+            BridgeControlApi.ManagementApiVersionHeader,
+            BridgeHostManagementContract.ApiVersion.ToString());
+        request.Headers.Add(BridgeControlApi.ExpectedProcessIdHeader, processId.ToString());
+        return request;
     }
 
     private sealed class FixedTokenProvider(string token) : IBridgeControlTokenProvider

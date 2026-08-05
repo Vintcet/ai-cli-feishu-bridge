@@ -1,6 +1,12 @@
 import { timingSafeEqual } from "node:crypto";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 
+export const NODE_BRIDGE_HOST_KIND = "node";
+export const BRIDGE_MANAGEMENT_API_VERSION = 1;
+export const EXPECTED_HOST_KIND_HEADER = "x-ai-cli-feishu-expected-host-kind";
+export const MANAGEMENT_API_VERSION_HEADER = "x-ai-cli-feishu-management-api-version";
+export const EXPECTED_PROCESS_ID_HEADER = "x-ai-cli-feishu-expected-process-id";
+
 import {
   isActivityHookPayload,
   isPermissionHookPayload,
@@ -97,11 +103,22 @@ async function routeRequest(
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
 
   if (method === "GET" && url.pathname === "/health") {
-    // Unauthenticated callers get the same view minus the pairing code, which
-    // would otherwise let any local process claim the Feishu owner binding.
+    // Unauthenticated callers get liveness only. Local sessions, host identity,
+    // and the pairing code remain behind the persistent control token.
     const authenticated = hasValidControlToken(request, controlToken);
-    const forceRefresh = authenticated && url.searchParams.get("refresh") === "1";
-    sendJson(response, 200, await handlers.health(authenticated, forceRefresh));
+    if (!authenticated) {
+      sendJson(response, 200, { ok: true });
+      return;
+    }
+    const forceRefresh = url.searchParams.get("refresh") === "1";
+    sendJson(response, 200, {
+      ...await handlers.health(true, forceRefresh),
+      hostKind: NODE_BRIDGE_HOST_KIND,
+      managementApiVersion: BRIDGE_MANAGEMENT_API_VERSION,
+      processId: process.pid,
+      ownershipMode: "active",
+      activeOwner: true,
+    });
     return;
   }
 
@@ -128,6 +145,13 @@ async function routeRequest(
   }
 
   if (url.pathname === "/control/shutdown") {
+    if (!hasExpectedManagementIdentity(request)) {
+      sendJson(response, 409, {
+        ok: false,
+        error: "目标 Bridge Host 身份不匹配，已拒绝停止。",
+      });
+      return;
+    }
     response.once("finish", () => setImmediate(handlers.shutdown));
     sendJson(response, 202, { ok: true });
     return;
@@ -385,6 +409,15 @@ async function routeRequest(
   }
 
   sendJson(response, 404, { error: "not_found" });
+}
+
+function hasExpectedManagementIdentity(request: IncomingMessage): boolean {
+  const hostKind = request.headers[EXPECTED_HOST_KIND_HEADER];
+  const apiVersion = request.headers[MANAGEMENT_API_VERSION_HEADER];
+  const processId = request.headers[EXPECTED_PROCESS_ID_HEADER];
+  return hostKind === NODE_BRIDGE_HOST_KIND &&
+    apiVersion === String(BRIDGE_MANAGEMENT_API_VERSION) &&
+    processId === String(process.pid);
 }
 
 function hasJsonContentType(request: IncomingMessage): boolean {

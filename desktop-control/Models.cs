@@ -47,6 +47,24 @@ internal sealed class BridgeStatus
     [JsonPropertyName("ok")]
     public bool Ok { get; set; }
 
+    [JsonPropertyName("hostKind")]
+    public string HostKind { get; set; } = "";
+
+    [JsonPropertyName("managementApiVersion")]
+    public int ManagementApiVersion { get; set; }
+
+    [JsonPropertyName("instanceName")]
+    public string InstanceName { get; set; } = "";
+
+    [JsonPropertyName("ownershipMode")]
+    public string OwnershipMode { get; set; } = "";
+
+    [JsonPropertyName("activeOwner")]
+    public bool ActiveOwner { get; set; }
+
+    [JsonPropertyName("status")]
+    public string Status { get; set; } = "";
+
     [JsonPropertyName("bindings")]
     public int Bindings { get; set; }
 
