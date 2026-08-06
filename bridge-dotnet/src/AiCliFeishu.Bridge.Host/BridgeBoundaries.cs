@@ -279,9 +279,14 @@ public sealed class BridgeFeishuIntentIngress(
 
 public sealed record BridgeBoundarySnapshot(
     IReadOnlyList<string> RegisteredRuntimes,
+    IReadOnlyList<BridgeRuntimeAdapterSnapshot> RuntimeAdapters,
     int RuntimeEventHandlers,
     int FeishuIntentHandlers,
     bool Passive);
+
+public sealed record BridgeRuntimeAdapterSnapshot(
+    string Runtime,
+    IReadOnlyList<RuntimeCapability> Capabilities);
 
 public sealed class BridgeBoundaryCatalog(
     IEnumerable<IRuntimeAdapter> adapters,
@@ -306,11 +311,20 @@ public sealed class BridgeBoundaryCatalog(
         runtimeIngress.ValidateConfiguration();
         feishuIngress.ValidateConfiguration();
         _ = BuildRuntimeRegistry();
+        return Snapshot();
+    }
+
+    public BridgeBoundarySnapshot Snapshot()
+    {
+        var runtimeAdapters = registeredAdapters
+            .OrderBy(adapter => adapter.Runtime, StringComparer.Ordinal)
+            .Select(adapter => new BridgeRuntimeAdapterSnapshot(
+                adapter.Runtime,
+                adapter.Capabilities.OrderBy(capability => capability).ToArray()))
+            .ToArray();
         return new(
-            registeredAdapters
-                .Select(adapter => adapter.Runtime)
-                .OrderBy(runtime => runtime, StringComparer.Ordinal)
-                .ToArray(),
+            runtimeAdapters.Select(adapter => adapter.Runtime).ToArray(),
+            runtimeAdapters,
             runtimeIngress.HandlerCount,
             feishuIngress.HandlerCount,
             options.OwnershipMode is BridgeOwnershipMode.Passive);

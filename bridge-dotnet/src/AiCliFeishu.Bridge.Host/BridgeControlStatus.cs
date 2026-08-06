@@ -27,6 +27,17 @@ public sealed record BridgeControlBusinessStatus(
     int Inputs,
     int PendingInputs);
 
+public sealed record BridgeControlRuntimeAdapterStatus(
+    string Runtime,
+    IReadOnlyList<string> Capabilities);
+
+public sealed record BridgeControlBoundaryStatus(
+    int RuntimeEventHandlers,
+    int FeishuIntentHandlers,
+    bool RuntimeCommandsEnabled,
+    string RuntimeCommandStatus,
+    IReadOnlyList<BridgeControlRuntimeAdapterStatus> RuntimeAdapters);
+
 public sealed record BridgeControlStatusSnapshot(
     bool Ok,
     string HostKind,
@@ -38,12 +49,14 @@ public sealed record BridgeControlStatusSnapshot(
     string OwnershipMode,
     bool ActiveOwner,
     BridgeControlStoreStatus Store,
-    BridgeControlBusinessStatus BusinessState);
+    BridgeControlBusinessStatus BusinessState,
+    BridgeControlBoundaryStatus Boundaries);
 
 public sealed class BridgeControlStatusReader(
     BridgeHealthRegistry health,
     IBridgeStoreShadow storeShadow,
-    BridgeBusinessStateOwner businessStateOwner)
+    BridgeBusinessStateOwner businessStateOwner,
+    BridgeBoundaryCatalog boundaryCatalog)
 {
     public BridgeControlStatusSnapshot Snapshot()
     {
@@ -56,6 +69,16 @@ public sealed class BridgeControlStatusReader(
         var businessSessions = business.Sessions.Sessions.Values;
         var businessApprovals = business.Approvals.Requests.Values;
         var businessInputs = business.Inputs.Requests.Values;
+        var boundaries = boundaryCatalog.Snapshot();
+        var runtimeAdapters = boundaries.RuntimeAdapters
+            .Select(adapter => new BridgeControlRuntimeAdapterStatus(
+                adapter.Runtime,
+                adapter.Capabilities.Select(CapabilityName).ToArray()))
+            .ToArray();
+        var runtimeCommandsEnabled = host.ActiveOwner && runtimeAdapters.Length > 0;
+        var runtimeCommandStatus = host.ActiveOwner
+            ? runtimeAdapters.Length > 0 ? "enabled" : "unavailable_no_adapters"
+            : "blocked_passive_owner";
 
         return new(
             host.Ok,
@@ -89,6 +112,25 @@ public sealed class BridgeControlStatusReader(
                 businessApprovals.Count(),
                 businessApprovals.Count(approval => approval.Status == ApprovalStatuses.Pending),
                 businessInputs.Count(),
-                businessInputs.Count(input => input.Status == InputRequestStatuses.Pending)));
+                businessInputs.Count(input => input.Status == InputRequestStatuses.Pending)),
+            new BridgeControlBoundaryStatus(
+                boundaries.RuntimeEventHandlers,
+                boundaries.FeishuIntentHandlers,
+                runtimeCommandsEnabled,
+                runtimeCommandStatus,
+                runtimeAdapters));
     }
+
+    private static string CapabilityName(RuntimeCapability capability) => capability switch
+    {
+        RuntimeCapability.PromptSend => "prompt.send",
+        RuntimeCapability.PromptQueue => "prompt.queue",
+        RuntimeCapability.ApprovalResolve => "approval.resolve",
+        RuntimeCapability.InputResolve => "input.resolve",
+        RuntimeCapability.SessionLaunch => "session.launch",
+        RuntimeCapability.SessionResume => "session.resume",
+        RuntimeCapability.SessionStop => "session.stop",
+        RuntimeCapability.ActivityStream => "activity.stream",
+        _ => throw new ArgumentOutOfRangeException(nameof(capability), capability, null),
+    };
 }

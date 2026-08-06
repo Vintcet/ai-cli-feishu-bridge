@@ -171,6 +171,8 @@ public sealed class BridgeBoundaryTests
             passive).Validate();
 
         Assert.IsTrue(configured.Passive);
+        Assert.AreEqual(0, configured.RegisteredRuntimes.Count);
+        Assert.AreEqual(0, configured.RuntimeAdapters.Count);
         Assert.AreEqual(1, configured.RuntimeEventHandlers);
         Assert.AreEqual(1, configured.FeishuIntentHandlers);
 

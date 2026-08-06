@@ -134,6 +134,15 @@ public sealed class BridgeControlApiTests
         Assert.AreEqual(0, business.GetProperty("inputs").GetInt32());
         Assert.AreEqual(0, business.GetProperty("pendingInputs").GetInt32());
         Assert.AreEqual(11, business.EnumerateObject().Count());
+        var boundaries = root.GetProperty("boundaries");
+        Assert.AreEqual(1, boundaries.GetProperty("runtimeEventHandlers").GetInt32());
+        Assert.AreEqual(1, boundaries.GetProperty("feishuIntentHandlers").GetInt32());
+        Assert.IsFalse(boundaries.GetProperty("runtimeCommandsEnabled").GetBoolean());
+        Assert.AreEqual(
+            "blocked_passive_owner",
+            boundaries.GetProperty("runtimeCommandStatus").GetString());
+        Assert.AreEqual(0, boundaries.GetProperty("runtimeAdapters").GetArrayLength());
+        Assert.AreEqual(12, root.EnumerateObject().Count());
         Assert.IsFalse(json.Contains("secret", StringComparison.OrdinalIgnoreCase));
         Assert.IsFalse(json.Contains(directory!, StringComparison.OrdinalIgnoreCase));
 
