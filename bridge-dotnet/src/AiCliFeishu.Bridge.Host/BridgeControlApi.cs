@@ -101,6 +101,7 @@ public static class BridgeControlApi
         app.MapPost("/control/runtime-events", async (
             HttpRequest request,
             IRuntimeEventSink runtimeEvents,
+            BridgeBusinessStateOwner businessStateOwner,
             IBridgeControlTokenProvider tokenProvider,
             CancellationToken cancellationToken) =>
         {
@@ -137,6 +138,12 @@ public static class BridgeControlApi
                     new ControlError(false, "Runtime 事件 JSON 无效。"),
                     statusCode: StatusCodes.Status400BadRequest);
             }
+            if (!businessStateOwner.Snapshot.Initialized)
+            {
+                return Results.Json(
+                    new ControlError(false, "业务状态尚未从 Store 初始化。"),
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
 
             try
             {
@@ -158,6 +165,7 @@ public static class BridgeControlApi
         app.MapPost("/control/feishu-intents", async (
             HttpRequest request,
             IFeishuIntentSink intents,
+            BridgeBusinessStateOwner businessStateOwner,
             IBridgeControlTokenProvider tokenProvider,
             CancellationToken cancellationToken) =>
         {
@@ -193,6 +201,12 @@ public static class BridgeControlApi
                 return Results.Json(
                     new ControlError(false, "飞书标准意图 JSON 无效。"),
                     statusCode: StatusCodes.Status400BadRequest);
+            }
+            if (!businessStateOwner.Snapshot.Initialized)
+            {
+                return Results.Json(
+                    new ControlError(false, "业务状态尚未从 Store 初始化。"),
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
             try

@@ -256,6 +256,35 @@ public sealed class BridgeControlApiTests
     }
 
     [TestMethod]
+    public async Task StandardIngressReturnsUnavailableWhenStoreProjectionIsIncompatible()
+    {
+        await File.WriteAllTextAsync(Path.Combine(directory!, "sessions.json"), "{invalid");
+        using var refresh = StatusRequest(refresh: true);
+        using var refreshResponse = await client!.SendAsync(refresh);
+        Assert.AreEqual(HttpStatusCode.OK, refreshResponse.StatusCode);
+
+        using var runtimeRequest = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/control/runtime-events")
+        {
+            Content = EventContent("event-unavailable", "turn.started", "session-1"),
+        };
+        runtimeRequest.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var runtimeResponse = await client.SendAsync(runtimeRequest);
+        Assert.AreEqual(HttpStatusCode.ServiceUnavailable, runtimeResponse.StatusCode);
+
+        using var intentRequest = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/control/feishu-intents")
+        {
+            Content = IntentContent("intent-unavailable", "message.prompt"),
+        };
+        intentRequest.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var intentResponse = await client.SendAsync(intentRequest);
+        Assert.AreEqual(HttpStatusCode.ServiceUnavailable, intentResponse.StatusCode);
+    }
+
+    [TestMethod]
     public async Task ShutdownRejectsMissingTokenAndCrossSiteRequests()
     {
         using var missingToken = await client!.PostAsJsonAsync("/control/shutdown", new { });
