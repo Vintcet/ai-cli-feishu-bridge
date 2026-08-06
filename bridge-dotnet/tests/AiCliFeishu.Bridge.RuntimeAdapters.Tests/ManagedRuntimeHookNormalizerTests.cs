@@ -40,6 +40,9 @@ public sealed class ManagedRuntimeHookNormalizerTests
         Assert.AreEqual("tool-1", runtimeEvent.CorrelationId);
         Assert.AreEqual("tool-1", runtimeEvent.Payload.GetProperty("requestId").GetString());
         Assert.AreEqual("shell_command", runtimeEvent.Payload.GetProperty("title").GetString());
+        Assert.AreEqual(
+            FixedTime.AddMinutes(20),
+            runtimeEvent.Payload.GetProperty("expiresAt").GetDateTimeOffset());
         Assert.IsTrue(BridgeProtocolValidator.Validate(runtimeEvent).IsValid);
     }
 
@@ -81,7 +84,49 @@ public sealed class ManagedRuntimeHookNormalizerTests
             .GetProperty("questions")[0]
             .GetProperty("prompt")
             .GetString());
+        Assert.IsTrue(runtimeEvent.Payload
+            .GetProperty("questions")[0]
+            .GetProperty("allowsCustom")
+            .GetBoolean());
+        Assert.AreEqual(
+            FixedTime.AddMinutes(20),
+            runtimeEvent.Payload.GetProperty("expiresAt").GetDateTimeOffset());
         Assert.IsTrue(BridgeProtocolValidator.Validate(runtimeEvent).IsValid);
+    }
+
+    [TestMethod]
+    public void InputAutoResolutionCapsTheStandardExpiry()
+    {
+        var normalizer = Normalizer();
+        using var hook = JsonDocument.Parse("""
+            {
+              "hook_event_name": "PreToolUse",
+              "runtime": "codex",
+              "session_id": "session-1",
+              "tool_use_id": "question-1",
+              "tool_name": "request_user_input",
+              "tool_input": {
+                "autoResolutionMs": 60000,
+                "questions": [{
+                  "id": "q1",
+                  "question": "继续吗？",
+                  "options": [{ "label": "继续" }, { "label": "停止" }],
+                  "custom": false
+                }]
+              }
+            }
+            """);
+
+        var runtimeEvent = normalizer.Normalize(hook.RootElement, "trace-input-expiry");
+
+        Assert.IsNotNull(runtimeEvent);
+        Assert.AreEqual(
+            FixedTime.AddMinutes(1),
+            runtimeEvent.Payload.GetProperty("expiresAt").GetDateTimeOffset());
+        Assert.IsFalse(runtimeEvent.Payload
+            .GetProperty("questions")[0]
+            .GetProperty("allowsCustom")
+            .GetBoolean());
     }
 
     [TestMethod]

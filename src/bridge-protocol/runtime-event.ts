@@ -18,6 +18,7 @@ export interface RuntimeEventPayloadMap {
     requestId: string;
     title: string;
     description?: string;
+    expiresAt: string;
   };
   "approval.resolved_externally": {
     requestId: string;
@@ -30,7 +31,9 @@ export interface RuntimeEventPayloadMap {
       prompt: string;
       options?: string[];
       multiple?: boolean;
+      allowsCustom?: boolean;
     }>;
+    expiresAt: string;
   };
   "input.resolved_externally": { requestId: string };
   "runtime.connected": { endpoint?: string };
@@ -114,7 +117,8 @@ export function isRuntimeEvent(value: unknown): value is RuntimeEvent {
       return (
         isNonEmptyString(payload.requestId) &&
         isNonEmptyString(payload.title) &&
-        isOptionalString(payload.description)
+        isOptionalString(payload.description) &&
+        isTimestamp(payload.expiresAt)
       );
     case "approval.resolved_externally":
       return (
@@ -127,7 +131,8 @@ export function isRuntimeEvent(value: unknown): value is RuntimeEvent {
       return (
         isNonEmptyString(payload.requestId) &&
         Array.isArray(payload.questions) &&
-        payload.questions.every(isRuntimeQuestion)
+        payload.questions.every(isRuntimeQuestion) &&
+        isTimestamp(payload.expiresAt)
       );
     case "input.resolved_externally":
       return isNonEmptyString(payload.requestId);
@@ -150,6 +155,11 @@ function isRuntimeQuestion(value: unknown): boolean {
     (value.options === undefined ||
       (Array.isArray(value.options) &&
         value.options.every((option) => typeof option === "string"))) &&
-    (value.multiple === undefined || typeof value.multiple === "boolean")
+    (value.multiple === undefined || typeof value.multiple === "boolean") &&
+    (value.allowsCustom === undefined || typeof value.allowsCustom === "boolean")
   );
+}
+
+function isTimestamp(value: unknown): boolean {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
 }

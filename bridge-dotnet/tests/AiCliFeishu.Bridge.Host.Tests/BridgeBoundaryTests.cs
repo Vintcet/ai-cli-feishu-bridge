@@ -129,7 +129,7 @@ public sealed class BridgeBoundaryTests
     }
 
     [TestMethod]
-    public void PassiveBoundaryCatalogAcceptsMissingHandlersButRejectsDuplicateRuntimeAdapters()
+    public void BoundaryCatalogRequiresOneOwnerAndRejectsDuplicateRuntimeAdapters()
     {
         using var runtimeIngress = new BridgeRuntimeEventIngress([]);
         var feishuIngress = new BridgeFeishuIntentIngress([]);
@@ -140,19 +140,29 @@ public sealed class BridgeBoundaryTests
             feishuIngress,
             passive);
 
-        var snapshot = catalog.Validate();
+        Assert.ThrowsException<InvalidOperationException>(catalog.Validate);
 
-        Assert.IsTrue(snapshot.Passive);
-        Assert.AreEqual(0, snapshot.RuntimeEventHandlers);
-        Assert.AreEqual(0, snapshot.FeishuIntentHandlers);
+        using var configuredRuntimeIngress = new BridgeRuntimeEventIngress(
+            [new RecordingRuntimeEventHandler()]);
+        var configuredFeishuIngress = new BridgeFeishuIntentIngress(
+            [new RecordingFeishuIntentHandler()]);
+        var configured = new BridgeBoundaryCatalog(
+            [],
+            configuredRuntimeIngress,
+            configuredFeishuIngress,
+            passive).Validate();
+
+        Assert.IsTrue(configured.Passive);
+        Assert.AreEqual(1, configured.RuntimeEventHandlers);
+        Assert.AreEqual(1, configured.FeishuIntentHandlers);
 
         var duplicates = new BridgeBoundaryCatalog(
             [
                 new RecordingRuntimeAdapter(RuntimeNames.Codex),
                 new RecordingRuntimeAdapter(RuntimeNames.Codex),
             ],
-            runtimeIngress,
-            feishuIngress,
+            configuredRuntimeIngress,
+            configuredFeishuIngress,
             passive);
         Assert.ThrowsException<InvalidOperationException>(duplicates.Validate);
     }

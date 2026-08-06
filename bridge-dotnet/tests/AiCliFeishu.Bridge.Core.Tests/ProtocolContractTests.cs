@@ -34,6 +34,9 @@ public sealed class ProtocolContractTests
         Assert.AreEqual(
             "approval-1",
             runtimeEvent.Payload.GetProperty("requestId").GetString());
+        Assert.AreEqual(
+            DateTimeOffset.Parse("2026-08-05T10:20:00Z"),
+            runtimeEvent.Payload.GetProperty("expiresAt").GetDateTimeOffset());
     }
 
     [TestMethod]

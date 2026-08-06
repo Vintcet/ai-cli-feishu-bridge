@@ -68,10 +68,20 @@ public sealed class OpenCodeSseAndNormalizerTests
         Assert.IsNotNull(approval);
         Assert.AreEqual(RuntimeEventTypes.ApprovalRequested, approval.EventType);
         Assert.AreEqual("permission-1", approval.CorrelationId);
+        Assert.AreEqual(
+            FixedTime.AddMinutes(20),
+            approval.Payload.GetProperty("expiresAt").GetDateTimeOffset());
         Assert.IsFalse(approval.Payload.GetRawText().Contains("private", StringComparison.Ordinal));
         Assert.IsNotNull(input);
         Assert.AreEqual(RuntimeEventTypes.InputRequested, input.EventType);
         Assert.AreEqual("question-1", input.CorrelationId);
+        Assert.AreEqual(
+            FixedTime.AddMinutes(20),
+            input.Payload.GetProperty("expiresAt").GetDateTimeOffset());
+        Assert.IsTrue(input.Payload
+            .GetProperty("questions")[0]
+            .GetProperty("allowsCustom")
+            .GetBoolean());
         Assert.IsFalse(input.Payload.GetRawText().Contains("private", StringComparison.Ordinal));
         Assert.IsTrue(BridgeProtocolValidator.Validate(approval).IsValid);
         Assert.IsTrue(BridgeProtocolValidator.Validate(input).IsValid);

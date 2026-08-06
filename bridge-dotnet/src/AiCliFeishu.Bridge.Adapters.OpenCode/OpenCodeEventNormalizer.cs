@@ -6,7 +6,9 @@ namespace AiCliFeishu.Bridge.Adapters.OpenCode;
 public sealed class OpenCodeEventNormalizer(
     Func<string>? eventIdFactory = null,
     Func<DateTimeOffset>? clock = null,
-    int deduplicationCapacity = 1_024)
+    int deduplicationCapacity = 1_024,
+    TimeSpan? approvalLifetime = null,
+    TimeSpan? inputLifetime = null)
 {
     private readonly Func<string> nextEventId = eventIdFactory ?? (() => Guid.NewGuid().ToString("N"));
     private readonly Func<DateTimeOffset> utcNow = clock ?? (() => DateTimeOffset.UtcNow);
@@ -14,6 +16,12 @@ public sealed class OpenCodeEventNormalizer(
     private readonly HashSet<string> fingerprintSet = new(StringComparer.Ordinal);
     private readonly object fingerprintLock = new();
     private readonly int capacity = Math.Max(1, deduplicationCapacity);
+    private readonly TimeSpan approvalWindow = PositiveLifetime(
+        approvalLifetime,
+        nameof(approvalLifetime));
+    private readonly TimeSpan inputWindow = PositiveLifetime(
+        inputLifetime,
+        nameof(inputLifetime));
 
     public RuntimeEventEnvelope? Normalize(OpenCodeRawEvent rawEvent, string traceId)
     {
@@ -22,7 +30,8 @@ public sealed class OpenCodeEventNormalizer(
         {
             return null;
         }
-        var normalized = NormalizePayload(rawEvent);
+        var occurredAt = utcNow().ToUniversalTime();
+        var normalized = NormalizePayload(rawEvent, occurredAt, approvalWindow, inputWindow);
         if (normalized is null || string.IsNullOrWhiteSpace(normalized.Value.SessionId))
         {
             return null;
@@ -32,7 +41,7 @@ public sealed class OpenCodeEventNormalizer(
             ProtocolVersion = BridgeProtocolVersion.Current,
             EventId = nextEventId(),
             EventType = normalized.Value.EventType,
-            OccurredAt = utcNow().ToUniversalTime().ToString("O"),
+            OccurredAt = occurredAt.ToString("O"),
             Runtime = RuntimeNames.OpenCode,
             Session = new RuntimeSessionReference
             {
@@ -51,7 +60,11 @@ public sealed class OpenCodeEventNormalizer(
         return fingerprint is null || TryRemember(fingerprint) ? runtimeEvent : null;
     }
 
-    private static NormalizedEvent? NormalizePayload(OpenCodeRawEvent rawEvent)
+    private static NormalizedEvent? NormalizePayload(
+        OpenCodeRawEvent rawEvent,
+        DateTimeOffset occurredAt,
+        TimeSpan approvalLifetime,
+        TimeSpan inputLifetime)
     {
         var properties = UnwrapData(rawEvent.Properties);
         var sessionId = SessionId(properties);
@@ -76,10 +89,10 @@ public sealed class OpenCodeEventNormalizer(
                 OptionalObject(("summary", "会话上下文已压缩"))),
             "session.status" => NormalizeStatus(properties),
             "permission.asked" or "permission.v2.asked" or "permission.updated" =>
-                NormalizePermissionRequested(properties),
+                NormalizePermissionRequested(properties, occurredAt, approvalLifetime),
             "permission.replied" or "permission.v2.replied" =>
                 NormalizePermissionResolved(properties),
-            "question.asked" => NormalizeQuestionAsked(properties),
+            "question.asked" => NormalizeQuestionAsked(properties, occurredAt, inputLifetime),
             "question.replied" or "question.rejected" => NormalizeQuestionResolved(properties),
             "message.part.updated" => NormalizeMessagePart(properties),
             _ => null,
@@ -120,7 +133,10 @@ public sealed class OpenCodeEventNormalizer(
         };
     }
 
-    private static NormalizedEvent? NormalizePermissionRequested(JsonElement properties)
+    private static NormalizedEvent? NormalizePermissionRequested(
+        JsonElement properties,
+        DateTimeOffset occurredAt,
+        TimeSpan approvalLifetime)
     {
         var requestId = OptionalString(properties, "id");
         var sessionId = SessionId(properties);
@@ -137,7 +153,8 @@ public sealed class OpenCodeEventNormalizer(
             OptionalObject(
                 ("requestId", requestId),
                 ("title", title),
-                ("description", OptionalString(properties, "description"))),
+                ("description", OptionalString(properties, "description")),
+                ("expiresAt", (occurredAt + approvalLifetime).ToString("O"))),
             requestId);
     }
 
@@ -159,7 +176,10 @@ public sealed class OpenCodeEventNormalizer(
             requestId);
     }
 
-    private static NormalizedEvent? NormalizeQuestionAsked(JsonElement properties)
+    private static NormalizedEvent? NormalizeQuestionAsked(
+        JsonElement properties,
+        DateTimeOffset occurredAt,
+        TimeSpan inputLifetime)
     {
         var requestId = OptionalString(properties, "id");
         if (requestId is null ||
@@ -192,6 +212,7 @@ public sealed class OpenCodeEventNormalizer(
                 prompt,
                 options,
                 multiple = OptionalBoolean(question, "multiple"),
+                allowsCustom = OptionalBooleanValue(question, "custom") ?? true,
             });
         }
         if (normalizedQuestions.Count == 0)
@@ -201,7 +222,12 @@ public sealed class OpenCodeEventNormalizer(
         return Event(
             RuntimeEventTypes.InputRequested,
             SessionId(properties),
-            JsonSerializer.SerializeToElement(new { requestId, questions = normalizedQuestions }),
+            JsonSerializer.SerializeToElement(new
+            {
+                requestId,
+                questions = normalizedQuestions,
+                expiresAt = (occurredAt + inputLifetime).ToString("O"),
+            }),
             requestId);
     }
 
@@ -343,6 +369,21 @@ public sealed class OpenCodeEventNormalizer(
             value.TryGetProperty(name, out var property) &&
             property.ValueKind is JsonValueKind.True or JsonValueKind.False &&
             property.GetBoolean();
+    }
+
+    private static bool? OptionalBooleanValue(JsonElement value, string name) =>
+        value.ValueKind == JsonValueKind.Object &&
+        value.TryGetProperty(name, out var property) &&
+        property.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? property.GetBoolean()
+            : null;
+
+    private static TimeSpan PositiveLifetime(TimeSpan? value, string parameterName)
+    {
+        var actual = value ?? TimeSpan.FromMinutes(20);
+        return actual > TimeSpan.Zero
+            ? actual
+            : throw new ArgumentOutOfRangeException(parameterName);
     }
 
     private bool TryRemember(string fingerprint)

@@ -112,9 +112,10 @@
               "properties": {
                 "requestId": { "type": "string", "minLength": 1 },
                 "title": { "type": "string", "minLength": 1 },
-                "description": { "type": "string" }
+                "description": { "type": "string" },
+                "expiresAt": { "type": "string", "format": "date-time" }
               },
-              "required": ["requestId", "title"],
+              "required": ["requestId", "title", "expiresAt"],
               "additionalProperties": false
             }
           }
@@ -151,14 +152,16 @@
                         "type": "array",
                         "items": { "type": "string" }
                       },
-                      "multiple": { "type": "boolean" }
+                      "multiple": { "type": "boolean" },
+                      "allowsCustom": { "type": "boolean" }
                     },
                     "required": ["id", "prompt"],
                     "additionalProperties": false
                   }
-                }
+                },
+                "expiresAt": { "type": "string", "format": "date-time" }
               },
-              "required": ["requestId", "questions"],
+              "required": ["requestId", "questions", "expiresAt"],
               "additionalProperties": false
             }
           }

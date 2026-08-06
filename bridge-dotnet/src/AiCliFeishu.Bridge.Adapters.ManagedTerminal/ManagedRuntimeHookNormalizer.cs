@@ -6,7 +6,9 @@ namespace AiCliFeishu.Bridge.Adapters.ManagedTerminal;
 public sealed class ManagedRuntimeHookNormalizer(
     Func<string>? eventIdFactory = null,
     Func<DateTimeOffset>? clock = null,
-    int deduplicationCapacity = 1_024)
+    int deduplicationCapacity = 1_024,
+    TimeSpan? approvalLifetime = null,
+    TimeSpan? inputLifetime = null)
 {
     private readonly Func<string> nextEventId = eventIdFactory ?? (() => Guid.NewGuid().ToString("N"));
     private readonly Func<DateTimeOffset> utcNow = clock ?? (() => DateTimeOffset.UtcNow);
@@ -14,6 +16,12 @@ public sealed class ManagedRuntimeHookNormalizer(
     private readonly HashSet<string> fingerprintSet = new(StringComparer.Ordinal);
     private readonly object fingerprintLock = new();
     private readonly int capacity = Math.Max(1, deduplicationCapacity);
+    private readonly TimeSpan approvalWindow = PositiveLifetime(
+        approvalLifetime,
+        nameof(approvalLifetime));
+    private readonly TimeSpan inputWindow = PositiveLifetime(
+        inputLifetime,
+        nameof(inputLifetime));
 
     public RuntimeEventEnvelope? Normalize(
         JsonElement hook,
@@ -36,7 +44,13 @@ public sealed class ManagedRuntimeHookNormalizer(
             return null;
         }
 
-        var normalized = NormalizePayload(eventName, hook);
+        var occurredAt = utcNow().ToUniversalTime();
+        var normalized = NormalizePayload(
+            eventName,
+            hook,
+            occurredAt,
+            approvalWindow,
+            inputWindow);
         if (normalized is null)
         {
             return null;
@@ -46,7 +60,7 @@ public sealed class ManagedRuntimeHookNormalizer(
             ProtocolVersion = BridgeProtocolVersion.Current,
             EventId = nextEventId(),
             EventType = normalized.Value.EventType,
-            OccurredAt = utcNow().ToUniversalTime().ToString("O"),
+            OccurredAt = occurredAt.ToString("O"),
             Runtime = runtime,
             Session = new RuntimeSessionReference
             {
@@ -69,7 +83,12 @@ public sealed class ManagedRuntimeHookNormalizer(
         return TryRemember(fingerprint) ? runtimeEvent : null;
     }
 
-    private static NormalizedHook? NormalizePayload(string eventName, JsonElement hook)
+    private static NormalizedHook? NormalizePayload(
+        string eventName,
+        JsonElement hook,
+        DateTimeOffset occurredAt,
+        TimeSpan approvalLifetime,
+        TimeSpan inputLifetime)
     {
         var turnId = OptionalString(hook, "turn_id");
         return eventName switch
@@ -80,9 +99,9 @@ public sealed class ManagedRuntimeHookNormalizer(
             "SessionEnd" => Event(
                 RuntimeEventTypes.SessionEnded,
                 OptionalObject(("reason", OptionalString(hook, "reason")))),
-            "PermissionRequest" => NormalizeApproval(hook),
+            "PermissionRequest" => NormalizeApproval(hook, occurredAt, approvalLifetime),
             "PreToolUse" when OptionalString(hook, "tool_name") == "request_user_input" =>
-                NormalizeInput(hook),
+                NormalizeInput(hook, occurredAt, inputLifetime),
             "UserPromptSubmit" => Event(
                 RuntimeEventTypes.TurnStarted,
                 OptionalObject(("turnId", turnId))),
@@ -105,7 +124,10 @@ public sealed class ManagedRuntimeHookNormalizer(
         };
     }
 
-    private static NormalizedHook? NormalizeApproval(JsonElement hook)
+    private static NormalizedHook? NormalizeApproval(
+        JsonElement hook,
+        DateTimeOffset occurredAt,
+        TimeSpan approvalLifetime)
     {
         var requestId = OptionalString(hook, "tool_use_id") ?? OptionalString(hook, "turn_id");
         var toolName = OptionalString(hook, "tool_name");
@@ -129,11 +151,15 @@ public sealed class ManagedRuntimeHookNormalizer(
                 requestId,
                 title = toolName,
                 description,
+                expiresAt = (occurredAt + approvalLifetime).ToString("O"),
             }),
             requestId);
     }
 
-    private static NormalizedHook? NormalizeInput(JsonElement hook)
+    private static NormalizedHook? NormalizeInput(
+        JsonElement hook,
+        DateTimeOffset occurredAt,
+        TimeSpan inputLifetime)
     {
         var requestId = OptionalString(hook, "tool_use_id") ?? OptionalString(hook, "turn_id");
         if (string.IsNullOrWhiteSpace(requestId) ||
@@ -169,15 +195,25 @@ public sealed class ManagedRuntimeHookNormalizer(
                 prompt,
                 options,
                 multiple = OptionalBoolean(question, "multiple"),
+                allowsCustom = OptionalBooleanValue(question, "custom") ?? true,
             });
         }
         if (normalizedQuestions.Count == 0)
         {
             return null;
         }
+        var autoResolution = OptionalPositiveMilliseconds(input, "autoResolutionMs");
+        var actualLifetime = autoResolution is { } requested && requested < inputLifetime
+            ? requested
+            : inputLifetime;
         return new(
             RuntimeEventTypes.InputRequested,
-            JsonSerializer.SerializeToElement(new { requestId, questions = normalizedQuestions }),
+            JsonSerializer.SerializeToElement(new
+            {
+                requestId,
+                questions = normalizedQuestions,
+                expiresAt = (occurredAt + actualLifetime).ToString("O"),
+            }),
             requestId);
     }
 
@@ -213,6 +249,35 @@ public sealed class ManagedRuntimeHookNormalizer(
             value.TryGetProperty(name, out var property) &&
             property.ValueKind is JsonValueKind.True or JsonValueKind.False &&
             property.GetBoolean();
+    }
+
+    private static bool? OptionalBooleanValue(JsonElement value, string name) =>
+        value.ValueKind == JsonValueKind.Object &&
+        value.TryGetProperty(name, out var property) &&
+        property.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? property.GetBoolean()
+            : null;
+
+    private static TimeSpan? OptionalPositiveMilliseconds(JsonElement value, string name)
+    {
+        if (value.ValueKind != JsonValueKind.Object ||
+            !value.TryGetProperty(name, out var property) ||
+            property.ValueKind != JsonValueKind.Number ||
+            !property.TryGetDouble(out var milliseconds) ||
+            !double.IsFinite(milliseconds) ||
+            milliseconds <= 0)
+        {
+            return null;
+        }
+        return TimeSpan.FromMilliseconds(milliseconds);
+    }
+
+    private static TimeSpan PositiveLifetime(TimeSpan? value, string parameterName)
+    {
+        var actual = value ?? TimeSpan.FromMinutes(20);
+        return actual > TimeSpan.Zero
+            ? actual
+            : throw new ArgumentOutOfRangeException(parameterName);
     }
 
     private bool TryRemember(string fingerprint)

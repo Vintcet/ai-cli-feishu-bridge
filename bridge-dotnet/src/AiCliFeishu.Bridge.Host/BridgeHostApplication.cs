@@ -25,6 +25,11 @@ public static class BridgeHostApplication
         builder.Services.AddSingleton<BridgeHealthRegistry>();
         builder.Services.AddSingleton<IBridgeInstanceLease, FileBridgeInstanceLease>();
         builder.Services.AddSingleton<IBridgeControlTokenProvider, FileBridgeControlTokenProvider>();
+        builder.Services.AddSingleton<BridgeBusinessStateOwner>();
+        builder.Services.AddSingleton<IBridgeRuntimeEventHandler>(services =>
+            services.GetRequiredService<BridgeBusinessStateOwner>());
+        builder.Services.AddSingleton<IBridgeFeishuIntentHandler>(services =>
+            services.GetRequiredService<BridgeBusinessStateOwner>());
         builder.Services.AddSingleton<BridgeRuntimeEventIngress>();
         builder.Services.AddSingleton<IRuntimeEventSink>(services =>
             services.GetRequiredService<BridgeRuntimeEventIngress>());
@@ -44,6 +49,8 @@ public static class BridgeHostApplication
         builder.Services.AddSingleton<IBridgeHostSubsystem, BridgeBoundarySubsystem>();
         builder.Services.AddSingleton<IBridgeHostSubsystem>(services =>
             services.GetRequiredService<ReadOnlyNodeStoreShadow>());
+        builder.Services.AddSingleton<IBridgeHostSubsystem>(services =>
+            services.GetRequiredService<BridgeBusinessStateOwner>());
         builder.Services.AddHostedService<BridgeInstanceLeaseService>();
         builder.Services.AddHostedService<BridgeRuntimeWorker>();
         configureServices?.Invoke(builder.Services);

@@ -88,7 +88,7 @@ public sealed class BridgeRuntimeEventIngress(
         }
     }
 
-    public void ValidateConfiguration() => _ = OptionalSingleHandler();
+    public void ValidateConfiguration() => _ = RequireSingleHandler();
 
     public void Dispose() => writeGate.Dispose();
 
@@ -122,7 +122,7 @@ public sealed class BridgeFeishuIntentIngress(
         return handler.HandleAsync(intent, cancellationToken);
     }
 
-    public void ValidateConfiguration() => _ = OptionalSingleHandler();
+    public void ValidateConfiguration() => _ = RequireSingleHandler();
 
     private IBridgeFeishuIntentHandler RequireSingleHandler() =>
         OptionalSingleHandler() ?? throw new InvalidOperationException(

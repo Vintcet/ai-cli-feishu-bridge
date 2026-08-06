@@ -13,6 +13,7 @@
   "payload": {
     "requestId": "approval-1",
     "title": "执行本机命令",
-    "description": "等待用户决定"
+    "description": "等待用户决定",
+    "expiresAt": "2026-08-05T10:20:00.000Z"
   }
 }

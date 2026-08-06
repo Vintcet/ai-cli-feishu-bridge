@@ -173,6 +173,7 @@ public static class BridgeProtocolValidator
                 RequiredString(payload, "requestId", errors);
                 RequiredString(payload, "title", errors);
                 OptionalKind(payload, "description", JsonValueKind.String, errors);
+                RequiredTimestamp(payload, "expiresAt", errors);
                 break;
             case RuntimeEventTypes.ApprovalResolvedExternally:
                 RequiredString(payload, "requestId", errors);
@@ -181,6 +182,7 @@ public static class BridgeProtocolValidator
             case RuntimeEventTypes.InputRequested:
                 RequiredString(payload, "requestId", errors);
                 ValidateQuestions(payload, errors);
+                RequiredTimestamp(payload, "expiresAt", errors);
                 break;
             case RuntimeEventTypes.InputResolvedExternally:
                 RequiredString(payload, "requestId", errors);
@@ -217,7 +219,27 @@ public static class BridgeProtocolValidator
                 errors,
                 JsonValueKind.False,
                 $"{prefix}.multiple");
+            OptionalKind(
+                question,
+                "allowsCustom",
+                JsonValueKind.True,
+                errors,
+                JsonValueKind.False,
+                $"{prefix}.allowsCustom");
             index++;
+        }
+    }
+
+    private static void RequiredTimestamp(
+        JsonElement owner,
+        string name,
+        List<string> errors)
+    {
+        if (!owner.TryGetProperty(name, out var value) ||
+            value.ValueKind != JsonValueKind.String ||
+            !DateTimeOffset.TryParse(value.GetString(), out _))
+        {
+            errors.Add($"payload.{name} 必须是有效时间戳。");
         }
     }
 
