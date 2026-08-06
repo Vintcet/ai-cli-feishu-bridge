@@ -218,6 +218,44 @@ public sealed class BridgeControlApiTests
     }
 
     [TestMethod]
+    public async Task FeishuIntentEndpointAuthenticatesValidatesAndReturnsShadowDecision()
+    {
+        using var missingToken = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/control/feishu-intents")
+        {
+            Content = IntentContent("intent-1", "message.prompt"),
+        };
+        using var missingResponse = await client!.SendAsync(missingToken);
+        Assert.AreEqual(HttpStatusCode.Unauthorized, missingResponse.StatusCode);
+
+        using var invalid = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/control/feishu-intents")
+        {
+            Content = JsonContent.Create(new { intentType = "message.prompt" }),
+        };
+        invalid.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var invalidResponse = await client.SendAsync(invalid);
+        Assert.AreEqual(HttpStatusCode.UnprocessableEntity, invalidResponse.StatusCode);
+
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/control/feishu-intents")
+        {
+            Content = IntentContent("intent-1", "message.prompt"),
+        };
+        request.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var response = await client.SendAsync(request);
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
+        Assert.AreEqual("warning", body.RootElement.GetProperty("toastType").GetString());
+        StringAssert.Contains(
+            body.RootElement.GetProperty("toastContent").GetString()!,
+            "只读观测");
+    }
+
+    [TestMethod]
     public async Task ShutdownRejectsMissingTokenAndCrossSiteRequests()
     {
         using var missingToken = await client!.PostAsJsonAsync("/control/shutdown", new { });
@@ -291,6 +329,20 @@ public sealed class BridgeControlApiTests
             eventType,
             occurredAt = "2026-08-06T00:02:00Z",
             payload = new { turnId = "turn-1" },
+        });
+
+    private static JsonContent IntentContent(
+        string eventId,
+        string intentType) => JsonContent.Create(new
+        {
+            eventId,
+            intentType,
+            operatorOpenId = "operator-1",
+            chatId = "chat-1",
+            messageId = "message-1",
+            chatType = "group",
+            traceId = $"trace-{eventId}",
+            text = "继续",
         });
 
     private async Task WriteStoreAsync()

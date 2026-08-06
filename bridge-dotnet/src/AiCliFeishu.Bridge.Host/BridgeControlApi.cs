@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using AiCliFeishu.Bridge.Adapters.Feishu;
 using AiCliFeishu.Bridge.Core;
 using AiCliFeishu.Bridge.Protocol;
 
@@ -152,6 +153,59 @@ public static class BridgeControlApi
                     statusCode: StatusCodes.Status422UnprocessableEntity);
             }
             return Results.Accepted(value: new ControlAccepted(true));
+        });
+
+        app.MapPost("/control/feishu-intents", async (
+            HttpRequest request,
+            IFeishuIntentSink intents,
+            IBridgeControlTokenProvider tokenProvider,
+            CancellationToken cancellationToken) =>
+        {
+            if (!request.HasJsonContentType())
+            {
+                return Results.Json(
+                    new ControlError(false, "请求必须使用 application/json。"),
+                    statusCode: StatusCodes.Status415UnsupportedMediaType);
+            }
+            if (IsCrossSite(request))
+            {
+                return Results.Json(
+                    new ControlError(false, "拒绝跨站请求。"),
+                    statusCode: StatusCodes.Status403Forbidden);
+            }
+            if (!await IsAuthenticatedAsync(request, tokenProvider, cancellationToken))
+            {
+                return Results.Json(
+                    new ControlError(false, "本机控制令牌无效。"),
+                    statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            FeishuIntent intent;
+            try
+            {
+                intent = await JsonSerializer.DeserializeAsync<FeishuIntent>(
+                    request.Body,
+                    BridgeProtocolJson.SerializerOptions,
+                    cancellationToken) ?? throw new JsonException("意图不能为空。");
+            }
+            catch (JsonException)
+            {
+                return Results.Json(
+                    new ControlError(false, "飞书标准意图 JSON 无效。"),
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            try
+            {
+                var result = await intents.PublishAsync(intent, cancellationToken);
+                return Results.Ok(result);
+            }
+            catch (Exception error) when (error is InvalidDataException or ArgumentException)
+            {
+                return Results.Json(
+                    new ControlError(false, "飞书标准意图未通过边界校验。"),
+                    statusCode: StatusCodes.Status422UnprocessableEntity);
+            }
         });
 
         app.MapPost("/control/shutdown", async (
