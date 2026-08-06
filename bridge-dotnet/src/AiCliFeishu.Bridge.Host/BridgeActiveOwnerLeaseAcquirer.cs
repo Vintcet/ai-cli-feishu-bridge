@@ -1,6 +1,5 @@
-using System.ComponentModel;
-using System.Diagnostics;
 using System.Text.Json;
+using AiCliFeishu.Bridge.Adapters.Storage;
 
 namespace AiCliFeishu.Bridge.Host;
 
@@ -46,10 +45,9 @@ internal sealed class ActiveOwnerLeaseAcquirer : IAsyncDisposable
         }
 
         this.dataDirectory = Path.GetFullPath(dataDirectory);
-        var options = BridgeHostOptions.Passive(this.dataDirectory, port: 0);
         observer = processAlive is null
-            ? new ActiveOwnerLeaseObserver(options)
-            : new ActiveOwnerLeaseObserver(options, processAlive);
+            ? new ActiveOwnerLeaseObserver(this.dataDirectory)
+            : new ActiveOwnerLeaseObserver(this.dataDirectory, processAlive);
         record = new ActiveOwnerLeaseRecord(
             ActiveOwnerLeaseObserver.SchemaVersion,
             "dotnet",

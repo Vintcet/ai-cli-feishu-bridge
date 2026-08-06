@@ -79,13 +79,7 @@ internal sealed record BridgeCutoverHostIdentity(
 internal sealed record BridgeStoreHandoffEvidence(
     bool StoreFlushed,
     bool StoreCompatible,
-    BridgeCutoverLeaseState LeaseState)
-{
-    public bool CanHandoff =>
-        StoreFlushed &&
-        StoreCompatible &&
-        LeaseState is BridgeCutoverLeaseState.Missing or BridgeCutoverLeaseState.Stale;
-}
+    BridgeCutoverLeaseState LeaseState);
 
 internal abstract record BridgeHostCutoverEvent;
 
@@ -247,7 +241,9 @@ internal sealed class BridgeHostCutoverTransaction
         StoreHandoffVerifiedEvent value)
     {
         if (snapshot.Stage is BridgeHostCutoverStage.StoreHandoffVerified &&
-            value.Evidence.CanHandoff)
+            value.Evidence.StoreFlushed &&
+            value.Evidence.StoreCompatible &&
+            value.Evidence.LeaseState is BridgeCutoverLeaseState.Missing)
         {
             return NoChange();
         }
@@ -263,7 +259,8 @@ internal sealed class BridgeHostCutoverTransaction
         {
             return FailSafe(BridgeCutoverFailureReason.ActiveOwnerInvalid, false);
         }
-        if (!value.Evidence.StoreFlushed)
+        if (!value.Evidence.StoreFlushed ||
+            value.Evidence.LeaseState is BridgeCutoverLeaseState.Stale)
         {
             return RequireRollback(BridgeCutoverFailureReason.StoreNotFlushed);
         }

@@ -176,25 +176,31 @@ public sealed class BridgeHostCutoverTransactionTests
     }
 
     [TestMethod]
-    public void MissingAndStaleLeasesBothPermitTheModeledHandoff()
+    public void OnlyAMissingLeasePermitsTheModeledHandoff()
     {
-        foreach (var leaseState in new[]
-                 {
-                     BridgeCutoverLeaseState.Missing,
-                     BridgeCutoverLeaseState.Stale,
-                 })
-        {
-            var transaction = AdvanceToNodeOffline();
+        var missing = AdvanceToNodeOffline();
 
-            var result = transaction.Apply(
-                new StoreHandoffVerifiedEvent(Handoff(leaseState)));
+        var accepted = missing.Apply(
+            new StoreHandoffVerifiedEvent(
+                Handoff(BridgeCutoverLeaseState.Missing)));
 
-            Assert.IsTrue(result.Accepted, leaseState.ToString());
-            Assert.AreEqual(
-                BridgeHostCutoverStage.StoreHandoffVerified,
-                transaction.Snapshot.Stage,
-                leaseState.ToString());
-        }
+        Assert.IsTrue(accepted.Accepted);
+        Assert.AreEqual(
+            BridgeHostCutoverStage.StoreHandoffVerified,
+            missing.Snapshot.Stage);
+
+        var stale = AdvanceToNodeOffline();
+        var rejected = stale.Apply(
+            new StoreHandoffVerifiedEvent(
+                Handoff(BridgeCutoverLeaseState.Stale)));
+
+        Assert.IsTrue(rejected.Accepted);
+        Assert.AreEqual(
+            BridgeHostCutoverStage.RollbackRequired,
+            stale.Snapshot.Stage);
+        Assert.AreEqual(
+            BridgeCutoverFailureReason.StoreNotFlushed,
+            stale.Snapshot.FailureReason);
     }
 
     [TestMethod]

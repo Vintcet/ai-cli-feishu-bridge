@@ -18,6 +18,7 @@
   <ItemGroup>
     <ProjectReference Include="cutover-host-fixture\CutoverHostFixture.csproj"
                       ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\bridge-dotnet\src\AiCliFeishu.Bridge.Adapters.Storage\AiCliFeishu.Bridge.Adapters.Storage.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -32,10 +33,12 @@
     <Compile Include="..\BridgeHostCutoverTransaction.cs" Link="BridgeHostCutoverTransaction.cs" />
     <Compile Include="..\BridgeHostCutoverCoordinator.cs" Link="BridgeHostCutoverCoordinator.cs" />
     <Compile Include="..\BridgeHostCutoverProcessOperations.cs" Link="BridgeHostCutoverProcessOperations.cs" />
+    <Compile Include="..\ProductionBridgeStoreHandoffInspector.cs" Link="ProductionBridgeStoreHandoffInspector.cs" />
     <Compile Include="BridgeHostCutoverTransactionTests.cs" />
     <Compile Include="BridgeHostCutoverCoordinatorTests.cs" />
     <Compile Include="BridgeHostCutoverProcessOperationsTests.cs" />
     <Compile Include="BridgeHostCutoverProcessIntegrationTests.cs" />
+    <Compile Include="ProductionBridgeStoreHandoffInspectorTests.cs" />
   </ItemGroup>
 
   <Target Name="CopyCutoverHostFixture" AfterTargets="Build">

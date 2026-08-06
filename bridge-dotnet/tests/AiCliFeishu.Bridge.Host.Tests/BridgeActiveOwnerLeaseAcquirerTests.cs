@@ -230,7 +230,7 @@ public sealed class BridgeActiveOwnerLeaseAcquirerTests
             () => leaseId);
 
     private ActiveOwnerLeaseObserver Observer(Func<int, bool> processAlive) =>
-        new(BridgeHostOptions.Passive(directory!, port: 0), processAlive);
+        new(directory!, processAlive);
 
     private static ActiveOwnerLeaseRecord Record(
         string hostKind,

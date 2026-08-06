@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using AiCliFeishu.Bridge.Adapters.Feishu;
 using AiCliFeishu.Bridge.Adapters.ManagedTerminal;
 using AiCliFeishu.Bridge.Adapters.OpenCode;
+using AiCliFeishu.Bridge.Adapters.Storage;
 using AiCliFeishu.Bridge.Core;
 
 namespace AiCliFeishu.Bridge.Host;
@@ -26,7 +27,9 @@ public static class BridgeHostApplication
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton<BridgeHealthRegistry>();
         builder.Services.AddSingleton<IBridgeInstanceLease, FileBridgeInstanceLease>();
-        builder.Services.AddSingleton<ActiveOwnerLeaseObserver>();
+        builder.Services.AddSingleton(services =>
+            new ActiveOwnerLeaseObserver(
+                services.GetRequiredService<BridgeHostOptions>().DataDirectory));
         builder.Services.AddSingleton<IBridgeControlTokenProvider, FileBridgeControlTokenProvider>();
         builder.Services.AddSingleton<BridgeBusinessStateOwner>();
         builder.Services.AddSingleton<IBridgeRuntimeEventHandler>(services =>

@@ -35,7 +35,7 @@ public sealed class BridgeHostCutoverProcessIntegrationTests
     public async Task WrongDotNetIdentityIsStoppedBeforeARealNodeRollbackStarts()
     {
         await using var environment = await IsolatedCutoverEnvironment.StartAsync(
-            BridgeCutoverLeaseState.Stale,
+            BridgeCutoverLeaseState.Missing,
             dotNetInstanceName: "wrong-dotnet-instance");
 
         var result = await environment.Coordinator.RunAsync(

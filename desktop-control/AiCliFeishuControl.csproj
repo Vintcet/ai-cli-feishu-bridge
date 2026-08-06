@@ -30,6 +30,7 @@
                       ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\bridge-dotnet\src\AiCliFeishu.Bridge.Host\AiCliFeishu.Bridge.Host.csproj"
                       ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\bridge-dotnet\src\AiCliFeishu.Bridge.Adapters.Storage\AiCliFeishu.Bridge.Adapters.Storage.csproj" />
   </ItemGroup>
 
   <Target Name="CopyTerminalHostToOutput" AfterTargets="Build">
