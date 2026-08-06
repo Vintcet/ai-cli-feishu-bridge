@@ -334,6 +334,7 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 - Feishu Event Pump 已进入 Host 子系统生命周期，并排在业务状态初始化之后启动、在业务状态停止之前退出。Passive 模式会实际运行一次立即结束的空事件源来验证托管链路，并以 `feishu-event-pump: passive` 报告健康状态；它仍不建立 WebSocket、不处理真实事件；
 - OpenCode Endpoint Directory 现在同时支持按会话查找与枚举就绪实例，OpenCode Event Pump 也进入 Host 子系统生命周期。Passive 目录固定返回空集合，Worker 在看到任何就绪端点时会在订阅前拒绝启动，并以 `opencode-event-pump: passive` 报告健康状态，因此 Shadow 运行不会构造假端点或请求 SSE；
 - Node 与 C# Host 的认证健康响应统一声明 `hostKind`、`managementApiVersion`、`ownershipMode`、`activeOwner` 和进程号；公开 `/health` 仍只返回 `{ ok: true }`。停止请求必须回传预期 Host 类型、管理 API 版本和刚探测到的进程号，Host 会和自身身份再次比对，防止控制面板因端口复用或进程重启停错目标；
+- 控制面板不再把 `/control/shutdown` 的 `202 Accepted` 当作停止完成：它会继续等待已认证的目标 PID 真正退出并确认端口离线；原 PID 仍在时继续等待，同身份新 PID、无法认证的占用者或超时都会明确中止，给后续 Store 锁交接和 Active Owner 切换提供无竞态的停止边界；
 - 控制面板新增显式 `AI_CLI_FEISHU_BRIDGE_HOST=dotnet-shadow` 灰度入口：仅在设置该值时才启动 `AiCliFeishuBridgeHost.exe --ownership passive --instance desktop-shadow`，固定使用隔离端口 `8876`，不安装生产 Hook，也不开放 CLI 启动、审批或设置写操作；未设置或设置为 `node` 时仍严格使用现有 Node 生产 Host 和 `.env` 中的端口，不会静默回退到 C#；
 - 桌面发布和 Windows ZIP 现在携带版本一致的单文件 `AiCliFeishuBridgeHost.exe` sidecar，并校验该文件存在、版本正确且没有 loose DLL、runtimeconfig、deps 或 PDB 残留；这只让显式 `dotnet-shadow` 灰度入口在安装产物中可用，不改变 Node 的默认生产所有权；
 - CI 会运行全部 C# 测试，并从干净临时目录发布桌面产物、校验三个 EXE 的版本和单文件边界，再按控制面板使用的 `DOTNET_ROLL_FORWARD=Major` 环境真实启动 Passive Host 并探测回环 `/health`；验证数据和进程只存在于隔离临时目录，不接触生产 Store、CLI 或飞书；

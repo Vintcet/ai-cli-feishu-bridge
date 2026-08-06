@@ -165,6 +165,11 @@ internal sealed class BridgeClient : IDisposable
                 $"桥接拒绝停止：HTTP {(int)response.StatusCode} {response.ReasonPhrase}");
         }
         AppLog.Info($"桥接已接受平滑停止请求（pid={status.ProcessId}）。");
+        await BridgeHostExitWaiter.WaitAsync(
+            status.ProcessId,
+            cancellationToken => ObserveBridgeExitAsync(status.ProcessId, cancellationToken),
+            cancellationToken);
+        AppLog.Info($"桥接已完成平滑停止（pid={status.ProcessId}）。");
     }
 
     public int RunBridgeService()
@@ -911,6 +916,42 @@ internal sealed class BridgeClient : IDisposable
             error is HttpRequestException or TaskCanceledException or JsonException)
         {
             return null;
+        }
+    }
+
+    private async Task<BridgeHostExitObservation> ObserveBridgeExitAsync(
+        int expectedProcessId,
+        CancellationToken cancellationToken)
+    {
+        var status = await GetStatusAsync(cancellationToken);
+        if (status is not null)
+        {
+            return BridgeHostExitObservation.Authenticated(status.ProcessId);
+        }
+        var publicProbe = await ProbeBridgeAsync(cancellationToken);
+        if (publicProbe?.Ok == true)
+        {
+            return BridgeHostExitObservation.Unauthenticated;
+        }
+        return IsProcessAlive(expectedProcessId)
+            ? BridgeHostExitObservation.ExpectedProcessAlive
+            : BridgeHostExitObservation.Offline;
+    }
+
+    private static bool IsProcessAlive(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
         }
     }
 

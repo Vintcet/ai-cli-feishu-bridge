@@ -369,6 +369,75 @@ public sealed class RuntimeAndTerminalTests
         }
     }
 
+    [TestMethod]
+    public async Task BridgeStopWaitsUntilTheExpectedProcessIsOffline()
+    {
+        var observations = new Queue<BridgeHostExitObservation>([
+            BridgeHostExitObservation.Authenticated(400),
+            BridgeHostExitObservation.ExpectedProcessAlive,
+            BridgeHostExitObservation.Offline,
+        ]);
+        var calls = 0;
+
+        await BridgeHostExitWaiter.WaitAsync(
+            400,
+            _ =>
+            {
+                calls++;
+                return Task.FromResult(observations.Dequeue());
+            },
+            maxAttempts: 3,
+            pollInterval: TimeSpan.Zero);
+
+        Assert.AreEqual(3, calls);
+    }
+
+    [TestMethod]
+    public async Task BridgeStopRejectsAReplacementProcess()
+    {
+        var error = await Assert.ThrowsExceptionAsync<InvalidOperationException>(() =>
+            BridgeHostExitWaiter.WaitAsync(
+                400,
+                _ => Task.FromResult(BridgeHostExitObservation.Authenticated(401)),
+                maxAttempts: 1,
+                pollInterval: TimeSpan.Zero));
+
+        StringAssert.Contains(error.Message, "pid=400");
+        StringAssert.Contains(error.Message, "pid=401");
+    }
+
+    [TestMethod]
+    public async Task BridgeStopRejectsAnUnauthenticatedEndpoint()
+    {
+        var error = await Assert.ThrowsExceptionAsync<InvalidOperationException>(() =>
+            BridgeHostExitWaiter.WaitAsync(
+                400,
+                _ => Task.FromResult(BridgeHostExitObservation.Unauthenticated),
+                maxAttempts: 1,
+                pollInterval: TimeSpan.Zero));
+
+        StringAssert.Contains(error.Message, "无法认证");
+    }
+
+    [TestMethod]
+    public async Task BridgeStopTimesOutWhileTheExpectedProcessRemainsOnline()
+    {
+        var calls = 0;
+        var error = await Assert.ThrowsExceptionAsync<TimeoutException>(() =>
+            BridgeHostExitWaiter.WaitAsync(
+                400,
+                _ =>
+                {
+                    calls++;
+                    return Task.FromResult(BridgeHostExitObservation.Authenticated(400));
+                },
+                maxAttempts: 3,
+                pollInterval: TimeSpan.Zero));
+
+        Assert.AreEqual(3, calls);
+        StringAssert.Contains(error.Message, "刷新 Store");
+    }
+
     private static void AssertSequence(
         IReadOnlyList<string> expected,
         IReadOnlyList<string> actual)

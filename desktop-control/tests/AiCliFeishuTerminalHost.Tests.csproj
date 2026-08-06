@@ -23,5 +23,6 @@
     <Compile Include="..\ManagedTerminalHost.cs" Link="ManagedTerminalHost.cs" />
     <Compile Include="..\Models.cs" Link="Models.cs" />
     <Compile Include="..\BridgeHostTarget.cs" Link="BridgeHostTarget.cs" />
+    <Compile Include="..\BridgeHostExitWaiter.cs" Link="BridgeHostExitWaiter.cs" />
   </ItemGroup>
 </Project>
