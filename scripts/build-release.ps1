@@ -94,6 +94,9 @@ Copy-Item `
 Copy-Item `
     -LiteralPath (Join-Path $publishDirectory "AiCliFeishuTerminalHost.exe") `
     -Destination (Join-Path $stagingDirectory "AiCliFeishuTerminalHost.exe")
+Copy-Item `
+    -LiteralPath (Join-Path $publishDirectory "AiCliFeishuBridgeHost.exe") `
+    -Destination (Join-Path $stagingDirectory "AiCliFeishuBridgeHost.exe")
 
 Invoke-Checked "npm.cmd" @(
     "ci",
@@ -107,6 +110,7 @@ Invoke-Checked "npm.cmd" @(
 $requiredPaths = @(
     "AI CLI飞书助手.exe",
     "AiCliFeishuTerminalHost.exe",
+    "AiCliFeishuBridgeHost.exe",
     "dist\index.js",
     "node_modules\@larksuiteoapi\node-sdk\package.json",
     "node_modules\dotenv\package.json",
@@ -121,7 +125,8 @@ foreach ($relativePath in $requiredPaths) {
 $expectedFileVersion = "$version.0"
 foreach ($executableName in @(
     "AI CLI飞书助手.exe",
-    "AiCliFeishuTerminalHost.exe"
+    "AiCliFeishuTerminalHost.exe",
+    "AiCliFeishuBridgeHost.exe"
 )) {
     $executable = Get-Item -LiteralPath (Join-Path $stagingDirectory $executableName)
     if ($executable.VersionInfo.FileVersion -ne $expectedFileVersion) {
@@ -132,6 +137,14 @@ foreach ($forbiddenPath in @(
     ".env",
     "data",
     "CODE-REVIEW-2026-08-04.md",
+    "AiCliFeishuTerminalHost.dll",
+    "AiCliFeishuTerminalHost.deps.json",
+    "AiCliFeishuTerminalHost.runtimeconfig.json",
+    "AiCliFeishuTerminalHost.pdb",
+    "AiCliFeishuBridgeHost.dll",
+    "AiCliFeishuBridgeHost.deps.json",
+    "AiCliFeishuBridgeHost.runtimeconfig.json",
+    "AiCliFeishuBridgeHost.pdb",
     "node_modules\tsx",
     "node_modules\typescript"
 )) {

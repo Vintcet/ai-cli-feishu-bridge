@@ -28,6 +28,8 @@
     <Compile Remove="tests\**\*.cs" />
     <ProjectReference Include="terminal-host\AiCliFeishuTerminalHost.csproj"
                       ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\bridge-dotnet\src\AiCliFeishu.Bridge.Host\AiCliFeishu.Bridge.Host.csproj"
+                      ReferenceOutputAssembly="false" />
   </ItemGroup>
 
   <Target Name="CopyTerminalHostToOutput" AfterTargets="Build">
@@ -53,5 +55,21 @@
     <Copy SourceFiles="$(TerminalHostPublishDirectory)AiCliFeishuTerminalHost.exe"
           DestinationFolder="$(PublishDir)" />
     <Delete Files="$(PublishDir)AiCliFeishuTerminalHost.dll;$(PublishDir)AiCliFeishuTerminalHost.deps.json;$(PublishDir)AiCliFeishuTerminalHost.runtimeconfig.json" />
+  </Target>
+
+  <Target Name="PublishBridgeHost" AfterTargets="Publish">
+    <PropertyGroup>
+      <BridgeHostProject>$(MSBuildThisFileDirectory)..\bridge-dotnet\src\AiCliFeishu.Bridge.Host\AiCliFeishu.Bridge.Host.csproj</BridgeHostProject>
+      <BridgeHostPublishDirectory>$(MSBuildThisFileDirectory)..\bridge-dotnet\src\AiCliFeishu.Bridge.Host\bin\$(Configuration)\net8.0\$(RuntimeIdentifier)\publish-sidecar\</BridgeHostPublishDirectory>
+      <BridgeHostExecutable>$(BridgeHostPublishDirectory)AiCliFeishuBridgeHost.exe</BridgeHostExecutable>
+    </PropertyGroup>
+    <MSBuild Projects="$(BridgeHostProject)"
+             Targets="Publish"
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);PublishDir=$(BridgeHostPublishDirectory);PublishSingleFile=true;SelfContained=false;Version=$(Version);AssemblyVersion=$(AssemblyVersion);FileVersion=$(FileVersion);DebugType=none;DebugSymbols=false" />
+    <Error Condition="!Exists('$(BridgeHostExecutable)')"
+           Text="Bridge Host sidecar publish did not produce $(BridgeHostExecutable)." />
+    <Copy SourceFiles="$(BridgeHostExecutable)"
+          DestinationFolder="$(PublishDir)" />
+    <Delete Files="$(PublishDir)AiCliFeishuBridgeHost.dll;$(PublishDir)AiCliFeishuBridgeHost.deps.json;$(PublishDir)AiCliFeishuBridgeHost.runtimeconfig.json;$(PublishDir)AiCliFeishuBridgeHost.pdb" />
   </Target>
 </Project>
