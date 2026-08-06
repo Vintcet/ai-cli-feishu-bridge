@@ -30,12 +30,14 @@ internal enum BridgeCutoverFailureReason
     None,
     InvalidEventOrder,
     UnexpectedFailure,
+    Cancelled,
     NodeIdentityMismatch,
     NodeStillOnline,
     StoreNotFlushed,
     StoreIncompatible,
     ActiveOwnerLive,
     ActiveOwnerInvalid,
+    OwnershipUncertain,
     DotNetStartInvalidProcess,
     DotNetIdentityMismatch,
     DotNetStillOnline,
@@ -253,14 +255,6 @@ internal sealed class BridgeHostCutoverTransaction
         {
             return Reject(BridgeCutoverFailureReason.InvalidEventOrder);
         }
-        if (!value.Evidence.StoreFlushed)
-        {
-            return FailSafe(BridgeCutoverFailureReason.StoreNotFlushed, false);
-        }
-        if (!value.Evidence.StoreCompatible)
-        {
-            return FailSafe(BridgeCutoverFailureReason.StoreIncompatible, false);
-        }
         if (value.Evidence.LeaseState is BridgeCutoverLeaseState.Live)
         {
             return FailSafe(BridgeCutoverFailureReason.ActiveOwnerLive, false);
@@ -268,6 +262,14 @@ internal sealed class BridgeHostCutoverTransaction
         if (value.Evidence.LeaseState is BridgeCutoverLeaseState.Invalid)
         {
             return FailSafe(BridgeCutoverFailureReason.ActiveOwnerInvalid, false);
+        }
+        if (!value.Evidence.StoreFlushed)
+        {
+            return RequireRollback(BridgeCutoverFailureReason.StoreNotFlushed);
+        }
+        if (!value.Evidence.StoreCompatible)
+        {
+            return RequireRollback(BridgeCutoverFailureReason.StoreIncompatible);
         }
         return Advance(BridgeHostCutoverStage.StoreHandoffVerified);
     }
@@ -289,7 +291,9 @@ internal sealed class BridgeHostCutoverTransaction
         }
         if (value.ProcessId <= 0)
         {
-            return FailSafe(BridgeCutoverFailureReason.DotNetStartInvalidProcess, false);
+            return FailSafe(
+                BridgeCutoverFailureReason.DotNetStartInvalidProcess,
+                requiresRollback: true);
         }
         dotNetProcessId = value.ProcessId;
         return Advance(BridgeHostCutoverStage.DotNetStartRequested);
@@ -391,7 +395,13 @@ internal sealed class BridgeHostCutoverTransaction
             }
             return FailSafe(BridgeCutoverFailureReason.NodeRollbackIdentityMismatch, true);
         }
-        if (snapshot.Stage is not BridgeHostCutoverStage.DotNetOfflineVerified)
+        var canRestartWithoutDotNet =
+            snapshot.Stage is BridgeHostCutoverStage.RollbackRequired &&
+            dotNetProcessId == 0 &&
+            snapshot.FailureReason is BridgeCutoverFailureReason.StoreNotFlushed or
+                BridgeCutoverFailureReason.StoreIncompatible;
+        if (!canRestartWithoutDotNet &&
+            snapshot.Stage is not BridgeHostCutoverStage.DotNetOfflineVerified)
         {
             return Reject(BridgeCutoverFailureReason.InvalidEventOrder);
         }
@@ -431,10 +441,9 @@ internal sealed class BridgeHostCutoverTransaction
     private BridgeHostCutoverApplyResult ApplyCutoverFailed(CutoverFailedEvent value)
     {
         var reason = NormalizeFailure(value.Reason);
-        if (snapshot.Stage is BridgeHostCutoverStage.RollbackRequired &&
-            snapshot.FailureReason == reason)
+        if (snapshot.Stage is BridgeHostCutoverStage.RollbackRequired)
         {
-            return NoChange();
+            return FailSafe(reason, requiresRollback: true);
         }
         if (snapshot.Stage is BridgeHostCutoverStage.FailedSafe &&
             snapshot.FailureReason == reason)
@@ -444,6 +453,26 @@ internal sealed class BridgeHostCutoverTransaction
         if (snapshot.IsTerminal)
         {
             return Reject(BridgeCutoverFailureReason.InvalidEventOrder);
+        }
+        if (snapshot.Stage is BridgeHostCutoverStage.NodeStopRequested)
+        {
+            return FailSafe(
+                reason,
+                requiresRollback: reason is BridgeCutoverFailureReason.OwnershipUncertain);
+        }
+        if (snapshot.Stage is BridgeHostCutoverStage.NodeOfflineVerified or
+            BridgeHostCutoverStage.StoreHandoffVerified)
+        {
+            if (reason is BridgeCutoverFailureReason.ActiveOwnerLive or
+                BridgeCutoverFailureReason.ActiveOwnerInvalid)
+            {
+                return FailSafe(reason, requiresRollback: false);
+            }
+            if (reason is BridgeCutoverFailureReason.OwnershipUncertain)
+            {
+                return FailSafe(reason, requiresRollback: true);
+            }
+            return RequireRollback(reason);
         }
         if (snapshot.Stage is BridgeHostCutoverStage.DotNetStartRequested or
             BridgeHostCutoverStage.DotNetActiveVerified)

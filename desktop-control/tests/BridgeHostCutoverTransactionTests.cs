@@ -155,15 +155,23 @@ public sealed class BridgeHostCutoverTransactionTests
             var result = transaction.Apply(new StoreHandoffVerifiedEvent(evidence));
 
             Assert.IsTrue(result.Accepted, expectedReason.ToString());
+            var expectedStage = expectedReason is
+                BridgeCutoverFailureReason.ActiveOwnerLive or
+                BridgeCutoverFailureReason.ActiveOwnerInvalid
+                ? BridgeHostCutoverStage.FailedSafe
+                : BridgeHostCutoverStage.RollbackRequired;
             Assert.AreEqual(
-                BridgeHostCutoverStage.FailedSafe,
+                expectedStage,
                 transaction.Snapshot.Stage,
                 expectedReason.ToString());
             Assert.AreEqual(
                 expectedReason,
                 transaction.Snapshot.FailureReason,
                 expectedReason.ToString());
-            Assert.IsFalse(transaction.Snapshot.RequiresRollback, expectedReason.ToString());
+            Assert.AreEqual(
+                expectedStage is BridgeHostCutoverStage.RollbackRequired,
+                transaction.Snapshot.RequiresRollback,
+                expectedReason.ToString());
         }
     }
 
@@ -185,6 +193,34 @@ public sealed class BridgeHostCutoverTransactionTests
             Assert.AreEqual(
                 BridgeHostCutoverStage.StoreHandoffVerified,
                 transaction.Snapshot.Stage,
+                leaseState.ToString());
+        }
+    }
+
+    [TestMethod]
+    public void LiveOrInvalidLeaseTakesPrecedenceOverStoreRecovery()
+    {
+        foreach (var leaseState in new[]
+                 {
+                     BridgeCutoverLeaseState.Live,
+                     BridgeCutoverLeaseState.Invalid,
+                 })
+        {
+            var transaction = AdvanceToNodeOffline();
+
+            transaction.Apply(
+                new StoreHandoffVerifiedEvent(
+                    new BridgeStoreHandoffEvidence(
+                        StoreFlushed: false,
+                        StoreCompatible: false,
+                        leaseState)));
+
+            Assert.AreEqual(
+                BridgeHostCutoverStage.FailedSafe,
+                transaction.Snapshot.Stage,
+                leaseState.ToString());
+            Assert.IsFalse(
+                transaction.Snapshot.RequiresRollback,
                 leaseState.ToString());
         }
     }
@@ -219,6 +255,22 @@ public sealed class BridgeHostCutoverTransactionTests
         Assert.AreEqual(
             BridgeHostCutoverStage.RollbackRequired,
             transaction.Snapshot.Stage);
+        Assert.IsTrue(transaction.Snapshot.RequiresRollback);
+    }
+
+    [TestMethod]
+    public void FailureDuringRollbackBecomesTerminalFailedSafe()
+    {
+        var transaction = AdvanceToRollbackRequired();
+
+        var result = transaction.Apply(
+            new CutoverFailedEvent(transaction.Snapshot.FailureReason));
+
+        Assert.IsTrue(result.Accepted);
+        Assert.AreEqual(
+            BridgeHostCutoverStage.FailedSafe,
+            transaction.Snapshot.Stage);
+        Assert.IsTrue(transaction.Snapshot.IsTerminal);
         Assert.IsTrue(transaction.Snapshot.RequiresRollback);
     }
 
