@@ -81,6 +81,7 @@ public sealed class BridgeControlApiTests
                 component => component.GetProperty("status").GetString()!,
                 StringComparer.Ordinal);
         Assert.AreEqual("passive", components["feishu-event-pump"]);
+        Assert.AreEqual("passive", components["opencode-event-pump"]);
     }
 
     [TestMethod]

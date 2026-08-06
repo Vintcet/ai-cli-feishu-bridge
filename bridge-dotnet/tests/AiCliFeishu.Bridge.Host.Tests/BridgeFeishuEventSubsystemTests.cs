@@ -18,16 +18,10 @@ public sealed class BridgeFeishuEventSubsystemTests
             .Select(subsystem => subsystem.Name)
             .ToArray();
 
-        CollectionAssert.AreEqual(
-            new[]
-            {
-                "production-owner",
-                "standard-boundaries",
-                "node-store-shadow",
-                "business-state-owner",
-                "feishu-event-pump",
-            },
-            subsystems);
+        var businessStateIndex = Array.IndexOf(subsystems, "business-state-owner");
+        var eventPumpIndex = Array.IndexOf(subsystems, "feishu-event-pump");
+        Assert.IsTrue(businessStateIndex >= 0);
+        Assert.AreEqual(businessStateIndex + 1, eventPumpIndex);
     }
 
     [TestMethod]

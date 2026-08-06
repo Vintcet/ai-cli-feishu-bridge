@@ -88,6 +88,8 @@ public sealed class PassiveManagedHookResponseSink : IManagedHookResponseSink
 public sealed class PassiveOpenCodeEndpointDirectory : IOpenCodeEndpointDirectory
 {
     public OpenCodeEndpoint? FindBySession(string sessionExternalId) => null;
+
+    public IReadOnlyList<OpenCodeEndpoint> ListReady() => [];
 }
 
 public sealed class PassiveOpenCodeEventSource : IOpenCodeEventSource

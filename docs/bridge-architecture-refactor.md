@@ -332,6 +332,7 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 - Runtime 入站侧也已把 Managed Terminal 的 Hook Normalizer / Bridge 与 OpenCode 的事件 Normalizer / Pump 接入唯一 `IRuntimeEventSink`，认证状态只报告固定组件清单。Passive 模式不开放 Hook HTTP 路由，并使用立即结束的 OpenCode 事件源，不订阅 SSE、不连接 CLI；装配校验只解析对象图，不处理真实 Runtime 事件；
 - Host 也将 Feishu Adapter 的事件源、事件规范化器、标准意图 Sink、卡片渲染器、交互协调器、事件泵和 Gateway 纳入唯一装配边界，并在认证状态中报告不含凭据的组件清单。Passive 模式只装配空事件源和显式拒绝外发的 Gateway，不创建真实 WebSocket、不请求飞书 API、不发送或更新消息；边界校验只解析对象图，不运行事件泵；
 - Feishu Event Pump 已进入 Host 子系统生命周期，并排在业务状态初始化之后启动、在业务状态停止之前退出。Passive 模式会实际运行一次立即结束的空事件源来验证托管链路，并以 `feishu-event-pump: passive` 报告健康状态；它仍不建立 WebSocket、不处理真实事件；
+- OpenCode Endpoint Directory 现在同时支持按会话查找与枚举就绪实例，OpenCode Event Pump 也进入 Host 子系统生命周期。Passive 目录固定返回空集合，Worker 在看到任何就绪端点时会在订阅前拒绝启动，并以 `opencode-event-pump: passive` 报告健康状态，因此 Shadow 运行不会构造假端点或请求 SSE；
 - Node 与 C# Host 的认证健康响应统一声明 `hostKind`、`managementApiVersion`、`ownershipMode`、`activeOwner` 和进程号；公开 `/health` 仍只返回 `{ ok: true }`。停止请求必须回传预期 Host 类型、管理 API 版本和刚探测到的进程号，Host 会和自身身份再次比对，防止控制面板因端口复用或进程重启停错目标；
 - 控制面板新增显式 `AI_CLI_FEISHU_BRIDGE_HOST=dotnet-shadow` 灰度入口：仅在设置该值时才启动 `AiCliFeishuBridgeHost.exe --ownership passive --instance desktop-shadow`，固定使用隔离端口 `8876`，不安装生产 Hook，也不开放 CLI 启动、审批或设置写操作；未设置或设置为 `node` 时仍严格使用现有 Node 生产 Host 和 `.env` 中的端口，不会静默回退到 C#；
 - 当前 `active` 所有权被硬性拒绝，Host 不连接真实飞书、不启动 CLI、不写生产 Store，Node 仍是唯一 Active Owner。
@@ -342,7 +343,7 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 dotnet test .\bridge-dotnet\tests\AiCliFeishu.Bridge.Host.Tests\AiCliFeishu.Bridge.Host.Tests.csproj -c Release
 ```
 
-Host 子系统的初始化顺序固定为 `PassiveOwnerGuard → Boundary validation → ReadOnlyNodeStoreShadow → BridgeBusinessStateOwner → Feishu Event Pump`，停止时按相反顺序执行。后续 M5 纵切片需要继续补齐 Host 内部的 Core / Adapter 运行时装配和完整本机 API，再由控制面板通过显式灰度开关管理 C# Host。只有停止 Node、完成 Store 刷盘并验证锁交接后，才能解除 `active` 闸门；任何时刻仍只允许一个生产写入者。
+Host 子系统的初始化顺序固定为 `PassiveOwnerGuard → Boundary validation → ReadOnlyNodeStoreShadow → BridgeBusinessStateOwner → Feishu Event Pump → OpenCode Event Pump`，停止时按相反顺序执行。后续 M5 纵切片需要继续补齐 Host 内部的 Core / Adapter 运行时装配和完整本机 API，再由控制面板通过显式灰度开关管理 C# Host。只有停止 Node、完成 Store 刷盘并验证锁交接后，才能解除 `active` 闸门；任何时刻仍只允许一个生产写入者。
 
 ### M6：删除旧实现
 

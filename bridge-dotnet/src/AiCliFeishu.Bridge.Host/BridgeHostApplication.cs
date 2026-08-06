@@ -85,6 +85,7 @@ public static class BridgeHostApplication
         builder.Services.AddSingleton<IBridgeHostSubsystem>(services =>
             services.GetRequiredService<BridgeBusinessStateOwner>());
         builder.Services.AddSingleton<IBridgeHostSubsystem, BridgeFeishuEventSubsystem>();
+        builder.Services.AddSingleton<IBridgeHostSubsystem, BridgeOpenCodeEventSubsystem>();
         builder.Services.AddHostedService<BridgeInstanceLeaseService>();
         builder.Services.AddHostedService<BridgeRuntimeWorker>();
         configureServices?.Invoke(builder.Services);

@@ -55,6 +55,11 @@ internal sealed class FakeOpenCodeEndpointDirectory : IOpenCodeEndpointDirectory
 
     public OpenCodeEndpoint? FindBySession(string sessionExternalId) =>
         Sessions.GetValueOrDefault(sessionExternalId);
+
+    public IReadOnlyList<OpenCodeEndpoint> ListReady() => Sessions.Values
+        .Where(endpoint => endpoint.Ready)
+        .Distinct()
+        .ToArray();
 }
 
 internal sealed class FakeOpenCodeLifecycle(

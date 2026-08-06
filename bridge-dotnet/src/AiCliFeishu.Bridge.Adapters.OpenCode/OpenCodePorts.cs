@@ -7,6 +7,8 @@ public sealed record OpenCodeEndpoint(Uri BaseUri, string? Directory, bool Ready
 public interface IOpenCodeEndpointDirectory
 {
     OpenCodeEndpoint? FindBySession(string sessionExternalId);
+
+    IReadOnlyList<OpenCodeEndpoint> ListReady();
 }
 
 public interface IOpenCodeEventSource
