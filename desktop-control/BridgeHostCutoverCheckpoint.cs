@@ -31,6 +31,9 @@ internal static class BridgeHostCutoverCheckpointValidator
 {
     private const int MaximumOperationIdLength = 128;
 
+    internal static bool IsValidOperationId(string? operationId) =>
+        IsAsciiToken(operationId) && operationId!.Length <= MaximumOperationIdLength;
+
     public static void Validate(BridgeHostCutoverCheckpoint checkpoint)
     {
         ArgumentNullException.ThrowIfNull(checkpoint);
@@ -38,8 +41,7 @@ internal static class BridgeHostCutoverCheckpointValidator
         {
             throw Invalid("检查点版本不受支持。");
         }
-        if (!IsAsciiToken(checkpoint.OperationId) ||
-            checkpoint.OperationId.Length > MaximumOperationIdLength)
+        if (!IsValidOperationId(checkpoint.OperationId))
         {
             throw Invalid("检查点 operationId 无效。");
         }
