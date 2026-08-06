@@ -35,6 +35,7 @@
     <Compile Include="..\BridgeHostCutoverProcessOperations.cs" Link="BridgeHostCutoverProcessOperations.cs" />
     <Compile Include="..\BridgeHostCutoverCheckpoint.cs" Link="BridgeHostCutoverCheckpoint.cs" />
     <Compile Include="..\BridgeHostCutoverCheckpointStore.cs" Link="BridgeHostCutoverCheckpointStore.cs" />
+    <Compile Include="..\BridgeHostCutoverCheckpointRecovery.cs" Link="BridgeHostCutoverCheckpointRecovery.cs" />
     <Compile Include="..\BridgeHostCutoverCheckpointWriter.cs" Link="BridgeHostCutoverCheckpointWriter.cs" />
     <Compile Include="..\BridgeHostRecoveryPlan.cs" Link="BridgeHostRecoveryPlan.cs" />
     <Compile Include="..\BridgeHostRecoveryObserver.cs" Link="BridgeHostRecoveryObserver.cs" />

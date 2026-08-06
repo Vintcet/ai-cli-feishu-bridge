@@ -55,6 +55,134 @@ public sealed class BridgeHostCutoverCheckpointWriterTests
     }
 
     [TestMethod]
+    public async Task WriterRefusesOrphanedTemporaryFileUntilExplicitQuarantine()
+    {
+        var store = Store();
+        var checkpoint = Checkpoint(
+            BridgeHostCutoverStage.Planned,
+            "operation-a",
+            seconds: 1);
+        await store.WriteAsync(checkpoint);
+        var orphanPath =
+            $"{store.CheckpointPath}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+        await File.WriteAllTextAsync(orphanPath, "partial-checkpoint");
+
+        var refused = await Acquire("operation-a");
+        Assert.AreEqual(
+            BridgeHostCutoverCheckpointWriterAcquireState.RecoveryRequired,
+            refused.State);
+        Assert.IsNull(refused.Writer);
+
+        var recovery = await BridgeHostCutoverCheckpointWriter
+            .TryRecoverOrphanedFilesAsync(directory!);
+        Assert.AreEqual(
+            BridgeHostCutoverCheckpointRecoveryState.Recovered,
+            recovery.State);
+
+        var quarantinePath = Path.Combine(
+            directory!,
+            BridgeHostCutoverCheckpointRecovery.OrphanedDirectoryName,
+            Path.GetFileName(orphanPath));
+        Assert.IsFalse(File.Exists(orphanPath));
+        Assert.IsTrue(File.Exists(quarantinePath));
+        Assert.AreEqual(checkpoint, (await store.ReadAsync()).Checkpoint);
+
+        var resumed = await Acquire("operation-a");
+        Assert.AreEqual(
+            BridgeHostCutoverCheckpointWriterAcquireState.Acquired,
+            resumed.State);
+        using var acquired = resumed.Writer!;
+    }
+
+    [TestMethod]
+    public async Task RecoveryCannotRunWhileAnotherWriterHoldsTheLock()
+    {
+        using var writer = (await Acquire("operation-a")).Writer!;
+
+        var recovery = await BridgeHostCutoverCheckpointWriter
+            .TryRecoverOrphanedFilesAsync(directory!);
+
+        Assert.AreEqual(
+            BridgeHostCutoverCheckpointRecoveryState.Busy,
+            recovery.State);
+    }
+
+    [TestMethod]
+    public async Task MalformedTemporaryNameRequiresManualRecoveryAndIsUntouched()
+    {
+        var store = Store();
+        Directory.CreateDirectory(directory!);
+        var malformedPath = $"{store.CheckpointPath}.not-a-writer.tmp";
+        await File.WriteAllTextAsync(malformedPath, "unknown");
+
+        var refused = await Acquire("operation-a");
+        Assert.AreEqual(
+            BridgeHostCutoverCheckpointWriterAcquireState.RecoveryRequired,
+            refused.State);
+
+        var recovery = await BridgeHostCutoverCheckpointWriter
+            .TryRecoverOrphanedFilesAsync(directory!);
+        Assert.AreEqual(
+            BridgeHostCutoverCheckpointRecoveryState.RecoveryRequired,
+            recovery.State);
+        Assert.IsTrue(File.Exists(malformedPath));
+    }
+
+    [TestMethod]
+    public async Task TemporaryDirectoryMasqueradingAsAWriterArtifactIsNeverMoved()
+    {
+        var store = Store();
+        var disguisedPath =
+            $"{store.CheckpointPath}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+        Directory.CreateDirectory(disguisedPath);
+
+        var refused = await Acquire("operation-a");
+        Assert.AreEqual(
+            BridgeHostCutoverCheckpointWriterAcquireState.RecoveryRequired,
+            refused.State);
+
+        var recovery = await BridgeHostCutoverCheckpointWriter
+            .TryRecoverOrphanedFilesAsync(directory!);
+        Assert.AreEqual(
+            BridgeHostCutoverCheckpointRecoveryState.RecoveryRequired,
+            recovery.State);
+        Assert.IsTrue(Directory.Exists(disguisedPath));
+    }
+
+    [TestMethod]
+    public async Task RecoveryLeavesUnrelatedTemporaryFilesAndPublishedCheckpointUntouched()
+    {
+        var store = Store();
+        var checkpoint = Checkpoint(
+            BridgeHostCutoverStage.Planned,
+            "operation-a",
+            seconds: 1);
+        await store.WriteAsync(checkpoint);
+        var unrelatedPath = Path.Combine(directory!, "other-operation.tmp");
+        await File.WriteAllTextAsync(unrelatedPath, "keep");
+
+        var recovery = await BridgeHostCutoverCheckpointWriter
+            .TryRecoverOrphanedFilesAsync(directory!);
+
+        Assert.AreEqual(
+            BridgeHostCutoverCheckpointRecoveryState.Clean,
+            recovery.State);
+        Assert.IsTrue(File.Exists(unrelatedPath));
+        Assert.AreEqual(checkpoint, (await store.ReadAsync()).Checkpoint);
+    }
+
+    [TestMethod]
+    public void RecoveryResultDoesNotExposeFilesystemOrProcessDetails()
+    {
+        CollectionAssert.AreEquivalent(
+            new[] { "State" },
+            typeof(BridgeHostCutoverCheckpointRecoveryResult)
+                .GetProperties()
+                .Select(property => property.Name)
+                .ToArray());
+    }
+
+    [TestMethod]
     public async Task InvalidOperationIdDoesNotCreateTheDataDirectory()
     {
         await Assert.ThrowsExceptionAsync<InvalidDataException>(async () =>

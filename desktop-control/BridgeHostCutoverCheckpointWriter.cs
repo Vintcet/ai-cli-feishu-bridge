@@ -4,6 +4,7 @@ internal enum BridgeHostCutoverCheckpointWriterAcquireState
 {
     Acquired,
     Busy,
+    RecoveryRequired,
     Unavailable,
 }
 
@@ -79,21 +80,40 @@ internal sealed class BridgeHostCutoverCheckpointWriter : IDisposable
                     BridgeHostCutoverCheckpointWriterAcquireState.Unavailable));
         }
 
+        var preliminaryRecoveryState =
+            BridgeHostCutoverCheckpointRecovery.InspectDirectory(fullDataDirectory);
+        if (preliminaryRecoveryState is not BridgeHostCutoverCheckpointRecoveryState.Clean)
+        {
+            return ValueTask.FromResult(RecoveryBlocked(preliminaryRecoveryState));
+        }
+
         var lockPath = Path.Combine(fullDataDirectory, WriterLockFileName);
+        FileStream? lockStream = null;
         try
         {
-            var lockStream = new FileStream(
+            lockStream = new FileStream(
                 lockPath,
                 FileMode.OpenOrCreate,
                 FileAccess.ReadWrite,
                 FileShare.None,
                 1,
                 FileOptions.WriteThrough);
+            var recoveryState = BridgeHostCutoverCheckpointRecovery.Inspect(
+                fullDataDirectory);
+            if (recoveryState is not BridgeHostCutoverCheckpointRecoveryState.Clean)
+            {
+                return ValueTask.FromResult(RecoveryBlocked(recoveryState));
+            }
             var store = new BridgeHostCutoverCheckpointStore(fullDataDirectory);
-            return ValueTask.FromResult(
-                new BridgeHostCutoverCheckpointWriterAcquireResult(
-                    BridgeHostCutoverCheckpointWriterAcquireState.Acquired,
-                    new(store, lockStream, operationId)));
+            var writer = new BridgeHostCutoverCheckpointWriter(
+                store,
+                lockStream,
+                operationId);
+            var result = new BridgeHostCutoverCheckpointWriterAcquireResult(
+                BridgeHostCutoverCheckpointWriterAcquireState.Acquired,
+                writer);
+            lockStream = null;
+            return ValueTask.FromResult(result);
         }
         catch (UnauthorizedAccessException)
         {
@@ -107,7 +127,19 @@ internal sealed class BridgeHostCutoverCheckpointWriter : IDisposable
                 new BridgeHostCutoverCheckpointWriterAcquireResult(
                     BridgeHostCutoverCheckpointWriterAcquireState.Busy));
         }
+        finally
+        {
+            lockStream?.Dispose();
+        }
     }
+
+    internal static ValueTask<BridgeHostCutoverCheckpointRecoveryResult>
+        TryRecoverOrphanedFilesAsync(
+            string dataDirectory,
+            CancellationToken cancellationToken = default) =>
+        BridgeHostCutoverCheckpointRecovery.TryQuarantineOrphanedFilesAsync(
+            dataDirectory,
+            cancellationToken);
 
     public async ValueTask<BridgeHostCutoverCheckpointWriteResult> TryWriteAsync(
         BridgeHostCutoverCheckpoint checkpoint,
@@ -258,6 +290,13 @@ internal sealed class BridgeHostCutoverCheckpointWriter : IDisposable
     private static BridgeHostCutoverCheckpointWriteResult Conflict(
         BridgeHostCutoverCheckpointReadState currentState) =>
         new(BridgeHostCutoverCheckpointWriteState.OperationConflict, currentState);
+
+    private static BridgeHostCutoverCheckpointWriterAcquireResult RecoveryBlocked(
+        BridgeHostCutoverCheckpointRecoveryState recoveryState) =>
+        new(
+            recoveryState is BridgeHostCutoverCheckpointRecoveryState.Unavailable
+                ? BridgeHostCutoverCheckpointWriterAcquireState.Unavailable
+                : BridgeHostCutoverCheckpointWriterAcquireState.RecoveryRequired);
 
     private void ThrowIfDisposed()
     {
