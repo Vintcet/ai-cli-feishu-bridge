@@ -325,6 +325,40 @@ public sealed class BridgeBusinessStateOwnerTests
                 new { })));
     }
 
+    [TestMethod]
+    public async Task RefreshReloadsTheCurrentShadowProjectionAndResetsRevision()
+    {
+        var store = new MutableStoreShadow(LoadedStore(
+            SessionDirectoryState.Empty,
+            ApprovalRegistryState.Empty).Snapshot);
+        var owner = new BridgeBusinessStateOwner(store);
+        await owner.StartAsync(CancellationToken.None);
+        using var ingress = new BridgeRuntimeEventIngress([owner]);
+        await ingress.PublishAsync(Event(
+            "session-started",
+            RuntimeEventTypes.SessionStarted,
+            Origin,
+            new { }));
+        Assert.AreEqual(1, owner.Snapshot.Revision);
+
+        store.Current = LoadedStore(
+            SessionStateMachine.Register(
+                SessionDirectoryState.Empty,
+                new SessionState(
+                    "shadow-session",
+                    RuntimeNames.OpenCode,
+                    "C:/shadow",
+                    SessionStatuses.Waiting,
+                    Origin,
+                    Origin)),
+            ApprovalRegistryState.Empty).Snapshot;
+        await owner.RefreshAsync(CancellationToken.None);
+
+        Assert.AreEqual(0, owner.Snapshot.Revision);
+        Assert.IsTrue(owner.Snapshot.Sessions.Sessions.ContainsKey("shadow-session"));
+        Assert.IsFalse(owner.Snapshot.Sessions.Sessions.ContainsKey("session-1"));
+    }
+
     private static RuntimeEventEnvelope Event(
         string eventId,
         string eventType,
@@ -365,6 +399,19 @@ public sealed class BridgeBusinessStateOwnerTests
         public BridgeComponentHealth ComponentHealth => new(
             "fixed-store",
             "ready");
+
+        public Task RefreshAsync(CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+    }
+
+    private sealed class MutableStoreShadow(BridgeStoreShadowSnapshot snapshot)
+        : IBridgeStoreShadow
+    {
+        public BridgeStoreShadowSnapshot Current { get; set; } = snapshot;
+
+        public BridgeStoreShadowSnapshot Snapshot => Current;
+
+        public BridgeComponentHealth ComponentHealth => new("mutable-store", "ready");
 
         public Task RefreshAsync(CancellationToken cancellationToken = default) =>
             Task.CompletedTask;

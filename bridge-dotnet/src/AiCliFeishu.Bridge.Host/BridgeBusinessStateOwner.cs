@@ -68,6 +68,19 @@ public sealed class BridgeBusinessStateOwner(IBridgeStoreShadow storeShadow)
     public Task StartAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        RefreshFromShadow();
+        return Task.CompletedTask;
+    }
+
+    public Task RefreshAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        RefreshFromShadow();
+        return Task.CompletedTask;
+    }
+
+    private void RefreshFromShadow()
+    {
         var source = storeShadow.Snapshot;
         lock (sync)
         {
@@ -85,7 +98,6 @@ public sealed class BridgeBusinessStateOwner(IBridgeStoreShadow storeShadow)
                     source.Core.Approvals,
                     InputRegistryState.Empty);
         }
-        return Task.CompletedTask;
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;

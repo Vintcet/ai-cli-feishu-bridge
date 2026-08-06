@@ -120,6 +120,19 @@ public sealed class BridgeControlApiTests
         Assert.AreEqual(2, store.GetProperty("approvals").GetInt32());
         Assert.AreEqual(1, store.GetProperty("pendingApprovals").GetInt32());
         Assert.AreEqual(10, store.EnumerateObject().Count());
+        var business = root.GetProperty("businessState");
+        Assert.IsTrue(business.GetProperty("initialized").GetBoolean());
+        Assert.AreEqual("loaded", business.GetProperty("sourceStatus").GetString());
+        Assert.AreEqual(0, business.GetProperty("revision").GetInt64());
+        Assert.AreEqual(0, business.GetProperty("rejectedFeishuIntents").GetInt64());
+        Assert.AreEqual(2, business.GetProperty("sessions").GetInt32());
+        Assert.AreEqual(1, business.GetProperty("activeSessions").GetInt32());
+        Assert.AreEqual(1, business.GetProperty("endedSessions").GetInt32());
+        Assert.AreEqual(2, business.GetProperty("approvals").GetInt32());
+        Assert.AreEqual(1, business.GetProperty("pendingApprovals").GetInt32());
+        Assert.AreEqual(0, business.GetProperty("inputs").GetInt32());
+        Assert.AreEqual(0, business.GetProperty("pendingInputs").GetInt32());
+        Assert.AreEqual(11, business.EnumerateObject().Count());
         Assert.IsFalse(json.Contains("secret", StringComparison.OrdinalIgnoreCase));
         Assert.IsFalse(json.Contains(directory!, StringComparison.OrdinalIgnoreCase));
 

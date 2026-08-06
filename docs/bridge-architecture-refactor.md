@@ -322,7 +322,7 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 - `ReadOnlyNodeStoreShadow` 只用 M2 的 `NodeStoreAccess.ReadOnly` 加载现有 Store 并生成 C# Core 投影；缺失 Store 不创建文件，非法 Store 不隔离、不修复、不覆盖，健康摘要只包含文件、会话、路由、审批和绑定数量或不兼容文件名，不暴露令牌、路径和业务标识；
 - `BridgeBusinessStateOwner` 是 Host 内唯一的 Runtime 事件和飞书意图处理器；它必须在 `ReadOnlyNodeStoreShadow` 成功投影后启动，再以不可变的 `SessionDirectoryState`、`ApprovalRegistryState` 和 `InputRegistryState` 维护唯一内存业务快照。标准事件只能通过 Core 状态机原子更新该快照；未知请求或非法顺序不会产生部分更新，Event ID 重复和已完成请求的语义重复不会增加业务 revision；
 - Shadow 的飞书意图不会调用 Runtime Adapter、发送飞书消息或写 Store，而是明确返回“只读观测、未执行”的 warning。此拒绝是所有权闸门，不得伪装成业务成功；
-- C# Host 将业务状态从生命周期探针中分离：`GET /control/status` 必须携带本机控制令牌并通过 Fetch Metadata 检查，只返回 Host 身份、生命周期和 Store 聚合计数，`?refresh=1` 会从磁盘重新执行一次只读投影；会话 ID、工作目录、Open ID、Chat ID、消息/请求 ID、工具预览、用户内容、控制令牌及完整路径均不会进入响应；公开 `/health` 的语义和响应保持不变；
+- C# Host 将业务状态从生命周期探针中分离：`GET /control/status` 必须携带本机控制令牌并通过 Fetch Metadata 检查，除 Store 聚合计数外只返回业务状态的初始化标志、来源状态、revision、Shadow 飞书意图拒绝计数以及会话/审批/补充问题数量；`?refresh=1` 会从磁盘重新执行一次只读投影；会话 ID、工作目录、Open ID、Chat ID、消息/请求 ID、工具预览、用户内容、控制令牌及完整路径均不会进入响应；公开 `/health` 的语义和响应保持不变；
 - Node 与 C# Host 的认证健康响应统一声明 `hostKind`、`managementApiVersion`、`ownershipMode`、`activeOwner` 和进程号；公开 `/health` 仍只返回 `{ ok: true }`。停止请求必须回传预期 Host 类型、管理 API 版本和刚探测到的进程号，Host 会和自身身份再次比对，防止控制面板因端口复用或进程重启停错目标；
 - 控制面板新增显式 `AI_CLI_FEISHU_BRIDGE_HOST=dotnet-shadow` 灰度入口：仅在设置该值时才启动 `AiCliFeishuBridgeHost.exe --ownership passive --instance desktop-shadow`，固定使用隔离端口 `8876`，不安装生产 Hook，也不开放 CLI 启动、审批或设置写操作；未设置或设置为 `node` 时仍严格使用现有 Node 生产 Host 和 `.env` 中的端口，不会静默回退到 C#；
 - 当前 `active` 所有权被硬性拒绝，Host 不连接真实飞书、不启动 CLI、不写生产 Store，Node 仍是唯一 Active Owner。

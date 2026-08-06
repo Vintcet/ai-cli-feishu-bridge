@@ -64,6 +64,7 @@ public static class BridgeControlApi
             HttpRequest request,
             BridgeControlStatusReader status,
             IBridgeStoreShadow storeShadow,
+            BridgeBusinessStateOwner businessStateOwner,
             BridgeHealthRegistry health,
             IBridgeControlTokenProvider tokenProvider,
             CancellationToken cancellationToken) =>
@@ -83,8 +84,13 @@ public static class BridgeControlApi
             if (request.Query["refresh"].ToString() == "1")
             {
                 await storeShadow.RefreshAsync(cancellationToken);
+                await businessStateOwner.RefreshAsync(cancellationToken);
                 var component = storeShadow.ComponentHealth;
                 health.Report(component.Name, component.Status, component.Detail);
+                health.Report(
+                    businessStateOwner.ComponentHealth.Name,
+                    businessStateOwner.ComponentHealth.Status,
+                    businessStateOwner.ComponentHealth.Detail);
             }
             return Results.Ok(status.Snapshot());
         });
