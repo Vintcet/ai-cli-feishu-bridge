@@ -37,9 +37,16 @@ public sealed record BridgeControlFeishuAdapterStatus(
     bool LiveEventStreamEnabled,
     bool OutboundMessagingEnabled);
 
+public sealed record BridgeControlRuntimeIngressStatus(
+    string Mode,
+    IReadOnlyList<string> Components,
+    bool ManagedHookHttpEnabled,
+    bool OpenCodeEventStreamEnabled);
+
 public sealed record BridgeControlBoundaryStatus(
     int RuntimeEventHandlers,
     int FeishuIntentHandlers,
+    BridgeControlRuntimeIngressStatus RuntimeIngress,
     BridgeControlFeishuAdapterStatus FeishuAdapter,
     bool RuntimeCommandsEnabled,
     string RuntimeCommandStatus,
@@ -123,6 +130,11 @@ public sealed class BridgeControlStatusReader(
             new BridgeControlBoundaryStatus(
                 boundaries.RuntimeEventHandlers,
                 boundaries.FeishuIntentHandlers,
+                new BridgeControlRuntimeIngressStatus(
+                    boundaries.RuntimeIngress.Mode,
+                    boundaries.RuntimeIngress.Components,
+                    boundaries.RuntimeIngress.ManagedHookHttpEnabled,
+                    boundaries.RuntimeIngress.OpenCodeEventStreamEnabled),
                 new BridgeControlFeishuAdapterStatus(
                     boundaries.FeishuAdapter.Mode,
                     boundaries.FeishuAdapter.Components,

@@ -35,6 +35,13 @@ public static class BridgeHostApplication
         builder.Services.AddSingleton<BridgeRuntimeEventIngress>();
         builder.Services.AddSingleton<IRuntimeEventSink>(services =>
             services.GetRequiredService<BridgeRuntimeEventIngress>());
+        builder.Services.AddSingleton<ManagedRuntimeHookNormalizer>();
+        builder.Services.AddSingleton<ManagedRuntimeHookBridge>();
+        builder.Services.AddSingleton<IOpenCodeEventSource, PassiveOpenCodeEventSource>();
+        builder.Services.AddSingleton<OpenCodeEventNormalizer>();
+        builder.Services.AddSingleton<OpenCodeRuntimeEventPump>();
+        builder.Services.AddSingleton<IBridgeRuntimeIngressAssembly,
+            BridgeRuntimeIngressAssembly>();
         builder.Services.AddSingleton<BridgeFeishuIntentIngress>();
         builder.Services.AddSingleton<IFeishuIntentSink>(services =>
             services.GetRequiredService<BridgeFeishuIntentIngress>());

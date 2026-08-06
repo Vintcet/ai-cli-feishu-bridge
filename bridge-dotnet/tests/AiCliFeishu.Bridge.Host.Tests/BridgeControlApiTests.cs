@@ -137,6 +137,24 @@ public sealed class BridgeControlApiTests
         var boundaries = root.GetProperty("boundaries");
         Assert.AreEqual(1, boundaries.GetProperty("runtimeEventHandlers").GetInt32());
         Assert.AreEqual(1, boundaries.GetProperty("feishuIntentHandlers").GetInt32());
+        var runtimeIngress = boundaries.GetProperty("runtimeIngress");
+        Assert.AreEqual("passive", runtimeIngress.GetProperty("mode").GetString());
+        Assert.IsFalse(runtimeIngress.GetProperty("managedHookHttpEnabled").GetBoolean());
+        Assert.IsFalse(runtimeIngress.GetProperty("openCodeEventStreamEnabled").GetBoolean());
+        CollectionAssert.AreEquivalent(
+            new[]
+            {
+                "managed-hook-bridge",
+                "managed-hook-normalizer",
+                "opencode-event-normalizer",
+                "opencode-event-pump",
+                "opencode-event-source",
+                "runtime-event-sink",
+            },
+            runtimeIngress.GetProperty("components")
+                .EnumerateArray()
+                .Select(component => component.GetString()!)
+                .ToArray());
         var feishuAdapter = boundaries.GetProperty("feishuAdapter");
         Assert.AreEqual("passive", feishuAdapter.GetProperty("mode").GetString());
         Assert.IsFalse(feishuAdapter.GetProperty("liveEventStreamEnabled").GetBoolean());

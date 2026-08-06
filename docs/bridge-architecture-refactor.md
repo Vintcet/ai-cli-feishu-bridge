@@ -329,6 +329,7 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 - C# Host 将业务状态从生命周期探针中分离：`GET /control/status` 必须携带本机控制令牌并通过 Fetch Metadata 检查，除 Store 聚合计数外只返回业务状态的初始化标志、来源状态、revision、Shadow 飞书意图拒绝计数以及会话/审批/补充问题数量；`?refresh=1` 会从磁盘重新执行一次只读投影；会话 ID、工作目录、Open ID、Chat ID、消息/请求 ID、工具预览、用户内容、控制令牌及完整路径均不会进入响应；公开 `/health` 的语义和响应保持不变；
 - 认证状态同时返回标准边界清单：唯一 Runtime 事件/飞书意图处理器数量、Runtime 命令所有权闸门状态，以及已注册 Adapter 的 runtime 和标准能力名。该清单不探测或暴露任何具体会话，只用于控制面判断装配完整度；Passive Host 固定报告 `blocked_passive_owner`；
 - Host 已注册 Codex、Claude Code 和 OpenCode 三个真实标准 Adapter 类型，使协议分派和能力清单进入正式装配根；其底层在 Passive 模式使用显式拒绝端口，所有会话均报告未就绪，不连接命名管道、不调用 OpenCode HTTP、不启动/停止 CLI，也不回写同步 Hook。命令仍先经过 `BridgeRuntimeCommandIngress` 的所有权闸门，因此不会到达这些端口；
+- Runtime 入站侧也已把 Managed Terminal 的 Hook Normalizer / Bridge 与 OpenCode 的事件 Normalizer / Pump 接入唯一 `IRuntimeEventSink`，认证状态只报告固定组件清单。Passive 模式不开放 Hook HTTP 路由，并使用立即结束的 OpenCode 事件源，不订阅 SSE、不连接 CLI；装配校验只解析对象图，不处理真实 Runtime 事件；
 - Host 也将 Feishu Adapter 的事件源、事件规范化器、标准意图 Sink、卡片渲染器、交互协调器、事件泵和 Gateway 纳入唯一装配边界，并在认证状态中报告不含凭据的组件清单。Passive 模式只装配空事件源和显式拒绝外发的 Gateway，不创建真实 WebSocket、不请求飞书 API、不发送或更新消息；边界校验只解析对象图，不运行事件泵；
 - Node 与 C# Host 的认证健康响应统一声明 `hostKind`、`managementApiVersion`、`ownershipMode`、`activeOwner` 和进程号；公开 `/health` 仍只返回 `{ ok: true }`。停止请求必须回传预期 Host 类型、管理 API 版本和刚探测到的进程号，Host 会和自身身份再次比对，防止控制面板因端口复用或进程重启停错目标；
 - 控制面板新增显式 `AI_CLI_FEISHU_BRIDGE_HOST=dotnet-shadow` 灰度入口：仅在设置该值时才启动 `AiCliFeishuBridgeHost.exe --ownership passive --instance desktop-shadow`，固定使用隔离端口 `8876`，不安装生产 Hook，也不开放 CLI 启动、审批或设置写操作；未设置或设置为 `node` 时仍严格使用现有 Node 生产 Host 和 `.env` 中的端口，不会静默回退到 C#；

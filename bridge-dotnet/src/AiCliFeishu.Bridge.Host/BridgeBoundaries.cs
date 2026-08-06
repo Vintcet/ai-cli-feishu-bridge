@@ -280,6 +280,7 @@ public sealed class BridgeFeishuIntentIngress(
 public sealed record BridgeBoundarySnapshot(
     IReadOnlyList<string> RegisteredRuntimes,
     IReadOnlyList<BridgeRuntimeAdapterSnapshot> RuntimeAdapters,
+    BridgeRuntimeIngressSnapshot RuntimeIngress,
     BridgeFeishuAdapterSnapshot FeishuAdapter,
     int RuntimeEventHandlers,
     int FeishuIntentHandlers,
@@ -294,11 +295,14 @@ public sealed class BridgeBoundaryCatalog(
     BridgeRuntimeEventIngress runtimeIngress,
     BridgeFeishuIntentIngress feishuIngress,
     BridgeHostOptions options,
-    IEnumerable<IBridgeFeishuAdapterAssembly>? feishuAdapters = null)
+    IEnumerable<IBridgeFeishuAdapterAssembly>? feishuAdapters = null,
+    IEnumerable<IBridgeRuntimeIngressAssembly>? runtimeIngressAdapters = null)
 {
     private readonly IRuntimeAdapter[] registeredAdapters = adapters.ToArray();
     private readonly IBridgeFeishuAdapterAssembly[] registeredFeishuAdapters =
         feishuAdapters?.ToArray() ?? [];
+    private readonly IBridgeRuntimeIngressAssembly[] registeredRuntimeIngressAdapters =
+        runtimeIngressAdapters?.ToArray() ?? [];
 
     public RuntimeAdapterRegistry BuildRuntimeRegistry()
     {
@@ -315,6 +319,7 @@ public sealed class BridgeBoundaryCatalog(
         runtimeIngress.ValidateConfiguration();
         feishuIngress.ValidateConfiguration();
         _ = BuildRuntimeRegistry();
+        _ = RequireSingleRuntimeIngressAdapter().Validate();
         _ = RequireSingleFeishuAdapter().Validate();
         return Snapshot();
     }
@@ -330,6 +335,7 @@ public sealed class BridgeBoundaryCatalog(
         return new(
             runtimeAdapters.Select(adapter => adapter.Runtime).ToArray(),
             runtimeAdapters,
+            RequireSingleRuntimeIngressAdapter().Snapshot(),
             RequireSingleFeishuAdapter().Snapshot(),
             runtimeIngress.HandlerCount,
             feishuIngress.HandlerCount,
@@ -344,6 +350,16 @@ public sealed class BridgeBoundaryCatalog(
                 "Bridge Host 尚未注册 Feishu Adapter 装配边界。"),
             _ => throw new InvalidOperationException(
                 "Bridge Host 只能注册一个 Feishu Adapter，以保证飞书事件和发送所有权唯一。"),
+        };
+
+    private IBridgeRuntimeIngressAssembly RequireSingleRuntimeIngressAdapter() =>
+        registeredRuntimeIngressAdapters.Length switch
+        {
+            1 => registeredRuntimeIngressAdapters[0],
+            0 => throw new InvalidOperationException(
+                "Bridge Host 尚未注册 Runtime 入站 Adapter 装配边界。"),
+            _ => throw new InvalidOperationException(
+                "Bridge Host 只能注册一个 Runtime 入站 Adapter 所有者。"),
         };
 }
 

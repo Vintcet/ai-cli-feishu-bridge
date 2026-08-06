@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using AiCliFeishu.Bridge.Adapters.ManagedTerminal;
 using AiCliFeishu.Bridge.Adapters.OpenCode;
 using AiCliFeishu.Bridge.Core;
@@ -87,6 +88,19 @@ public sealed class PassiveManagedHookResponseSink : IManagedHookResponseSink
 public sealed class PassiveOpenCodeEndpointDirectory : IOpenCodeEndpointDirectory
 {
     public OpenCodeEndpoint? FindBySession(string sessionExternalId) => null;
+}
+
+public sealed class PassiveOpenCodeEventSource : IOpenCodeEventSource
+{
+    public async IAsyncEnumerable<OpenCodeRawEvent> ReadAllAsync(
+        OpenCodeEndpoint endpoint,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
+        cancellationToken.ThrowIfCancellationRequested();
+        await Task.CompletedTask;
+        yield break;
+    }
 }
 
 public sealed class PassiveOpenCodeTransport : IOpenCodeTransport

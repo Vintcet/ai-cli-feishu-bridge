@@ -1,6 +1,8 @@
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using AiCliFeishu.Bridge.Adapters.Feishu;
+using AiCliFeishu.Bridge.Adapters.ManagedTerminal;
+using AiCliFeishu.Bridge.Adapters.OpenCode;
 using AiCliFeishu.Bridge.Core;
 using AiCliFeishu.Bridge.Protocol;
 
@@ -183,6 +185,44 @@ public sealed class BridgeBoundaryTests
     }
 
     [TestMethod]
+    public async Task PassiveHostAssemblesRuntimeIngressWithoutOpeningIngressTransport()
+    {
+        var options = BridgeHostOptions.Passive(
+            Path.Combine(Path.GetTempPath(), $"bridge-passive-ingress-{Guid.NewGuid():N}"));
+        using var app = BridgeHostApplication.Build(options);
+        var assembly = app.Services.GetRequiredService<IBridgeRuntimeIngressAssembly>();
+        var snapshot = assembly.Validate();
+
+        Assert.AreEqual("passive", snapshot.Mode);
+        CollectionAssert.AreEquivalent(
+            new[]
+            {
+                "managed-hook-bridge",
+                "managed-hook-normalizer",
+                "opencode-event-normalizer",
+                "opencode-event-pump",
+                "opencode-event-source",
+                "runtime-event-sink",
+            },
+            snapshot.Components.ToArray());
+        Assert.IsFalse(snapshot.ManagedHookHttpEnabled);
+        Assert.IsFalse(snapshot.OpenCodeEventStreamEnabled);
+        Assert.IsNotNull(app.Services.GetRequiredService<ManagedRuntimeHookBridge>());
+        Assert.IsNotNull(app.Services.GetRequiredService<OpenCodeRuntimeEventPump>());
+        Assert.IsInstanceOfType<PassiveOpenCodeEventSource>(
+            app.Services.GetRequiredService<IOpenCodeEventSource>());
+
+        var received = 0;
+        var endpoint = new OpenCodeEndpoint(new Uri("http://127.0.0.1:1"), null);
+        await foreach (var _ in app.Services.GetRequiredService<IOpenCodeEventSource>()
+            .ReadAllAsync(endpoint))
+        {
+            received++;
+        }
+        Assert.AreEqual(0, received);
+    }
+
+    [TestMethod]
     public async Task FeishuIntentCanOnlyReachCliThroughStandardCommandGateway()
     {
         var codex = new RecordingRuntimeAdapter(RuntimeNames.Codex);
@@ -229,7 +269,8 @@ public sealed class BridgeBoundaryTests
             configuredRuntimeIngress,
             configuredFeishuIngress,
             passive,
-            [new RecordingFeishuAdapterAssembly()]).Validate();
+            [new RecordingFeishuAdapterAssembly()],
+            [new RecordingRuntimeIngressAssembly()]).Validate();
 
         Assert.IsTrue(configured.Passive);
         Assert.AreEqual(0, configured.RegisteredRuntimes.Count);
@@ -239,6 +280,9 @@ public sealed class BridgeBoundaryTests
         Assert.AreEqual("passive", configured.FeishuAdapter.Mode);
         Assert.IsFalse(configured.FeishuAdapter.LiveEventStreamEnabled);
         Assert.IsFalse(configured.FeishuAdapter.OutboundMessagingEnabled);
+        Assert.AreEqual("passive", configured.RuntimeIngress.Mode);
+        Assert.IsFalse(configured.RuntimeIngress.ManagedHookHttpEnabled);
+        Assert.IsFalse(configured.RuntimeIngress.OpenCodeEventStreamEnabled);
 
         var duplicates = new BridgeBoundaryCatalog(
             [
@@ -248,7 +292,8 @@ public sealed class BridgeBoundaryTests
             configuredRuntimeIngress,
             configuredFeishuIngress,
             passive,
-            [new RecordingFeishuAdapterAssembly()]);
+            [new RecordingFeishuAdapterAssembly()],
+            [new RecordingRuntimeIngressAssembly()]);
         Assert.ThrowsException<InvalidOperationException>(duplicates.Validate);
 
         var duplicateFeishuAdapters = new BridgeBoundaryCatalog(
@@ -256,8 +301,18 @@ public sealed class BridgeBoundaryTests
             configuredRuntimeIngress,
             configuredFeishuIngress,
             passive,
-            [new RecordingFeishuAdapterAssembly(), new RecordingFeishuAdapterAssembly()]);
+            [new RecordingFeishuAdapterAssembly(), new RecordingFeishuAdapterAssembly()],
+            [new RecordingRuntimeIngressAssembly()]);
         Assert.ThrowsException<InvalidOperationException>(duplicateFeishuAdapters.Validate);
+
+        var duplicateRuntimeIngressAdapters = new BridgeBoundaryCatalog(
+            [],
+            configuredRuntimeIngress,
+            configuredFeishuIngress,
+            passive,
+            [new RecordingFeishuAdapterAssembly()],
+            [new RecordingRuntimeIngressAssembly(), new RecordingRuntimeIngressAssembly()]);
+        Assert.ThrowsException<InvalidOperationException>(duplicateRuntimeIngressAdapters.Validate);
     }
 
     private static RuntimeEventEnvelope Event(string eventId) => new()
@@ -373,6 +428,16 @@ public sealed class BridgeBoundaryTests
         public BridgeFeishuAdapterSnapshot Validate() => snapshot;
 
         public BridgeFeishuAdapterSnapshot Snapshot() => snapshot;
+    }
+
+    private sealed class RecordingRuntimeIngressAssembly : IBridgeRuntimeIngressAssembly
+    {
+        private static readonly BridgeRuntimeIngressSnapshot snapshot =
+            new("passive", ["test-component"], false, false);
+
+        public BridgeRuntimeIngressSnapshot Validate() => snapshot;
+
+        public BridgeRuntimeIngressSnapshot Snapshot() => snapshot;
     }
 
     private sealed class PromptIntentHandler(
