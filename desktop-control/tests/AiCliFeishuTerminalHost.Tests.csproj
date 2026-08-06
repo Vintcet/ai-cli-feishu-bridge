@@ -24,5 +24,7 @@
     <Compile Include="..\Models.cs" Link="Models.cs" />
     <Compile Include="..\BridgeHostTarget.cs" Link="BridgeHostTarget.cs" />
     <Compile Include="..\BridgeHostExitWaiter.cs" Link="BridgeHostExitWaiter.cs" />
+    <Compile Include="..\BridgeHostCutoverTransaction.cs" Link="BridgeHostCutoverTransaction.cs" />
+    <Compile Include="BridgeHostCutoverTransactionTests.cs" />
   </ItemGroup>
 </Project>

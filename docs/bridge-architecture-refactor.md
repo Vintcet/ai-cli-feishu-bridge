@@ -341,6 +341,8 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 - 控制面板新增显式 `AI_CLI_FEISHU_BRIDGE_HOST=dotnet-shadow` 灰度入口：仅在设置该值时才启动 `AiCliFeishuBridgeHost.exe --ownership passive --instance desktop-shadow`，固定使用隔离端口 `8876`，不安装生产 Hook，也不开放 CLI 启动、审批或设置写操作；未设置或设置为 `node` 时仍严格使用现有 Node 生产 Host 和 `.env` 中的端口，不会静默回退到 C#；
 - 桌面发布和 Windows ZIP 现在携带版本一致的单文件 `AiCliFeishuBridgeHost.exe` sidecar，并校验该文件存在、版本正确且没有 loose DLL、runtimeconfig、deps 或 PDB 残留；这只让显式 `dotnet-shadow` 灰度入口在安装产物中可用，不改变 Node 的默认生产所有权；
 - CI 会运行全部 C# 测试，并从干净临时目录发布桌面产物、校验三个 EXE 的版本和单文件边界，再按控制面板使用的 `DOTNET_ROLL_FORWARD=Major` 环境真实启动 Passive Host 并探测回环 `/health`；验证数据和进程只存在于隔离临时目录，不接触生产 Store、CLI 或飞书；
+- 桌面控制层新增纯 `BridgeHostCutoverTransaction` 模型，用认证身份、目标 PID、Store 刷盘/兼容性和 Active Owner 租约证据约束 `停止 Node → 确认原 PID 离线 → 验证 Store 可交接 → 记录 C# 启动 PID → 验证 C# Active → 完成`。事件越序会被拒绝且不改变状态，重复的当前阶段事件幂等；Node 身份不匹配、Store 未刷盘或不兼容、租约仍为 `live`/`invalid` 时安全中止；C# 进程一旦启动，身份或健康验证失败只能进入 `RollbackRequired`，并强制 `停止 C# → 确认其 PID 离线 → 启动并验证新的 Node PID` 后才能标记回退完成；
+- 该切换事务目前只编译进桌面控制程序集和隔离单元测试，不被 `BridgeClient`、`MainForm`、启动配置或 Host DI 调用，不执行进程、HTTP、Store、租约或飞书操作；公开快照只包含阶段、是否仍需回退和粗粒度失败原因，不暴露 PID、路径、令牌或 leaseId；
 - 当前 `active` 所有权被硬性拒绝，Host 不连接真实飞书、不启动 CLI、不写生产 Store，Node 仍是唯一 Active Owner。
 
 被动 Host 的本地无外部副作用验证：
@@ -349,7 +351,7 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 dotnet test .\bridge-dotnet\tests\AiCliFeishu.Bridge.Host.Tests\AiCliFeishu.Bridge.Host.Tests.csproj -c Release
 ```
 
-Host 子系统的初始化顺序固定为 `PassiveOwnerGuard → Boundary validation → ReadOnlyNodeStoreShadow → BridgeBusinessStateOwner → Feishu Event Pump → OpenCode Event Pump`，停止时按相反顺序执行。Node 和 C# 回收死亡 PID 的有效租约时，都会按旧 `leaseId` 原子改名并保留确定性墓碑；并发启动者因此不能把刚建立的新租约误当成旧租约移动。后续 M5 纵切片需要由控制面板建立不直接执行生产切换的事务状态机，验证“停止 Node → 等待 PID 退出 → 验证 Store 已刷盘且租约可接管 → 启动 C# Active”的阶段、前置条件与失败回退。只有该切换与回退演练完成后，才能解除 `active` 闸门；任何时刻仍只允许一个生产写入者。
+Host 子系统的初始化顺序固定为 `PassiveOwnerGuard → Boundary validation → ReadOnlyNodeStoreShadow → BridgeBusinessStateOwner → Feishu Event Pump → OpenCode Event Pump`，停止时按相反顺序执行。Node 和 C# 回收死亡 PID 的有效租约时，都会按旧 `leaseId` 原子改名并保留确定性墓碑；并发启动者因此不能把刚建立的新租约误当成旧租约移动。控制面板的纯切换事务状态机已经固定阶段、前置条件和失败回退，但仍没有生产执行入口。后续 M5 纵切片需要在隔离临时目录中实现可注入的切换协调器和故障演练，证明执行层严格遵守该状态机；只有完整切换与回退演练完成后，才能单独评审是否解除 `active` 闸门。任何时刻仍只允许一个生产写入者。
 
 ### M6：删除旧实现
 
