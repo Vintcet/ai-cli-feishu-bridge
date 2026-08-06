@@ -157,6 +157,21 @@ internal sealed class BridgeHostCutoverTransaction
 
     public BridgeHostCutoverSnapshot Snapshot => snapshot;
 
+    internal BridgeHostCutoverCheckpoint ExportCheckpoint(
+        string operationId,
+        DateTimeOffset updatedAt) =>
+        new BridgeHostCutoverCheckpoint(
+            BridgeHostCutoverCheckpoint.CurrentSchemaVersion,
+            operationId,
+            updatedAt,
+            snapshot.Stage,
+            snapshot.RequiresRollback,
+            snapshot.FailureReason,
+            expectedNode,
+            expectedDotNetInstanceName,
+            dotNetProcessId,
+            nodeRollbackProcessId).Validate();
+
     public static BridgeHostCutoverTransaction Create(
         BridgeCutoverHostIdentity expectedNode,
         string expectedDotNetInstanceName)
