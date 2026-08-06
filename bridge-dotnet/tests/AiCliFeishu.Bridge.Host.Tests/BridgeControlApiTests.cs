@@ -141,7 +141,29 @@ public sealed class BridgeControlApiTests
         Assert.AreEqual(
             "blocked_passive_owner",
             boundaries.GetProperty("runtimeCommandStatus").GetString());
-        Assert.AreEqual(0, boundaries.GetProperty("runtimeAdapters").GetArrayLength());
+        var runtimeAdapters = boundaries.GetProperty("runtimeAdapters")
+            .EnumerateArray()
+            .ToDictionary(
+                adapter => adapter.GetProperty("runtime").GetString()!,
+                adapter => adapter.GetProperty("capabilities")
+                    .EnumerateArray()
+                    .Select(capability => capability.GetString()!)
+                    .ToArray(),
+                StringComparer.Ordinal);
+        CollectionAssert.AreEquivalent(
+            new[] { "codex", "claudecode", "opencode" },
+            runtimeAdapters.Keys.ToArray());
+        CollectionAssert.Contains(runtimeAdapters["codex"], "prompt.queue");
+        CollectionAssert.Contains(runtimeAdapters["claudecode"], "prompt.queue");
+        CollectionAssert.DoesNotContain(runtimeAdapters["opencode"], "prompt.queue");
+        Assert.IsTrue(runtimeAdapters.Values.All(capabilities =>
+            capabilities.Contains("prompt.send", StringComparer.Ordinal) &&
+            capabilities.Contains("approval.resolve", StringComparer.Ordinal) &&
+            capabilities.Contains("input.resolve", StringComparer.Ordinal) &&
+            capabilities.Contains("session.launch", StringComparer.Ordinal) &&
+            capabilities.Contains("session.resume", StringComparer.Ordinal) &&
+            capabilities.Contains("session.stop", StringComparer.Ordinal) &&
+            capabilities.Contains("activity.stream", StringComparer.Ordinal)));
         Assert.AreEqual(12, root.EnumerateObject().Count());
         Assert.IsFalse(json.Contains("secret", StringComparison.OrdinalIgnoreCase));
         Assert.IsFalse(json.Contains(directory!, StringComparison.OrdinalIgnoreCase));

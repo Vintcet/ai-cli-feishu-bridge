@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 using AiCliFeishu.Bridge.Adapters.Feishu;
 using AiCliFeishu.Bridge.Core;
 using AiCliFeishu.Bridge.Protocol;
@@ -120,6 +121,22 @@ public sealed class BridgeBoundaryTests
         await Assert.ThrowsExceptionAsync<BridgeRuntimeCommandUnavailableException>(() =>
             gateway.DispatchAsync(Command(RuntimeNames.Codex)));
         Assert.IsNull(adapter.LastCommand);
+    }
+
+    [TestMethod]
+    public void PassiveHostRuntimeAdaptersAreRegisteredButNeverReady()
+    {
+        var options = BridgeHostOptions.Passive(
+            Path.Combine(Path.GetTempPath(), $"bridge-passive-adapters-{Guid.NewGuid():N}"));
+        using var app = BridgeHostApplication.Build(options);
+        var registry = app.Services.GetRequiredService<RuntimeAdapterRegistry>();
+
+        foreach (var runtime in RuntimeNames.All)
+        {
+            var adapter = registry.ForRuntime(runtime);
+            Assert.AreEqual(runtime, adapter.Runtime);
+            Assert.IsFalse(adapter.IsReady(new RuntimeSession("session-1", "C:/repo")));
+        }
     }
 
     [TestMethod]

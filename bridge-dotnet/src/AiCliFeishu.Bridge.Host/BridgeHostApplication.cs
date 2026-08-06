@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using AiCliFeishu.Bridge.Adapters.Feishu;
+using AiCliFeishu.Bridge.Adapters.ManagedTerminal;
+using AiCliFeishu.Bridge.Adapters.OpenCode;
 using AiCliFeishu.Bridge.Core;
 
 namespace AiCliFeishu.Bridge.Host;
@@ -44,6 +46,16 @@ public static class BridgeHostApplication
         builder.Services.AddSingleton<BridgeRuntimeCommandIngress>();
         builder.Services.AddSingleton<IBridgeRuntimeCommandGateway>(services =>
             services.GetRequiredService<BridgeRuntimeCommandIngress>());
+        builder.Services.AddSingleton<IManagedTerminalDirectory, PassiveManagedTerminalDirectory>();
+        builder.Services.AddSingleton<IManagedTerminalTransport, PassiveManagedTerminalTransport>();
+        builder.Services.AddSingleton<IManagedRuntimeLifecycle, PassiveManagedRuntimeLifecycle>();
+        builder.Services.AddSingleton<IManagedHookResponseSink, PassiveManagedHookResponseSink>();
+        builder.Services.AddSingleton<IOpenCodeEndpointDirectory, PassiveOpenCodeEndpointDirectory>();
+        builder.Services.AddSingleton<IOpenCodeTransport, PassiveOpenCodeTransport>();
+        builder.Services.AddSingleton<IOpenCodeRuntimeLifecycle, PassiveOpenCodeRuntimeLifecycle>();
+        builder.Services.AddSingleton<IRuntimeAdapter, CodexRuntimeAdapter>();
+        builder.Services.AddSingleton<IRuntimeAdapter, ClaudeCodeRuntimeAdapter>();
+        builder.Services.AddSingleton<IRuntimeAdapter, OpenCodeRuntimeAdapter>();
         builder.Services.AddSingleton<ReadOnlyNodeStoreShadow>();
         builder.Services.AddSingleton<IBridgeStoreShadow>(services =>
             services.GetRequiredService<ReadOnlyNodeStoreShadow>());
