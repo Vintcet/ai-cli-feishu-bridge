@@ -16,6 +16,7 @@ internal enum BridgeHostCutoverCheckpointWriteState
     Written,
     Unchanged,
     OperationConflict,
+    VersionConflict,
     InvalidCurrentCheckpoint,
     Unavailable,
 }
@@ -132,8 +133,10 @@ internal sealed class BridgeHostCutoverCheckpointWriter : IDisposable
                 {
                     return Conflict(current.State);
                 }
-                await store.WriteAsync(checkpoint, cancellationToken);
-                return Written(current.State);
+                return await WriteIfCurrentVersionAsync(
+                    checkpoint,
+                    current,
+                    cancellationToken);
 
             case BridgeHostCutoverCheckpointReadState.Invalid:
                 return new(
@@ -194,8 +197,10 @@ internal sealed class BridgeHostCutoverCheckpointWriter : IDisposable
                 return Conflict(current.State);
             }
 
-            await store.WriteAsync(checkpoint, cancellationToken);
-            return Written(current.State);
+            return await WriteIfCurrentVersionAsync(
+                checkpoint,
+                current,
+                cancellationToken);
         }
 
         if (!BridgeHostCutoverCheckpointTransition.IsAllowed(existing, checkpoint))
@@ -203,8 +208,38 @@ internal sealed class BridgeHostCutoverCheckpointWriter : IDisposable
             return Conflict(current.State);
         }
 
-        await store.WriteAsync(checkpoint, cancellationToken);
-        return Written(current.State);
+        return await WriteIfCurrentVersionAsync(
+            checkpoint,
+            current,
+            cancellationToken);
+    }
+
+    private async ValueTask<BridgeHostCutoverCheckpointWriteResult>
+        WriteIfCurrentVersionAsync(
+            BridgeHostCutoverCheckpoint checkpoint,
+            BridgeHostCutoverCheckpointReadResult current,
+            CancellationToken cancellationToken)
+    {
+        var result = await store.TryWriteIfVersionAsync(
+            checkpoint,
+            current,
+            cancellationToken);
+        return result switch
+        {
+            BridgeHostCutoverCheckpointStore.CompareAndSwapState.Written =>
+                Written(current.State),
+            BridgeHostCutoverCheckpointStore.CompareAndSwapState.VersionConflict =>
+                new(
+                    BridgeHostCutoverCheckpointWriteState.VersionConflict,
+                    current.State),
+            BridgeHostCutoverCheckpointStore.CompareAndSwapState.Unavailable =>
+                new(
+                    BridgeHostCutoverCheckpointWriteState.Unavailable,
+                    current.State),
+            _ => new(
+                BridgeHostCutoverCheckpointWriteState.VersionConflict,
+                current.State),
+        };
     }
 
     private static bool CanStartNewOperation(

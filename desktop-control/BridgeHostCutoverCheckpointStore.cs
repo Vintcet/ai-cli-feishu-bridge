@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -23,6 +24,41 @@ internal sealed class BridgeHostCutoverCheckpointStore
 
     internal string CheckpointPath { get; }
 
+    internal static bool HasSameFileVersion(
+        BridgeHostCutoverCheckpointReadResult expected,
+        BridgeHostCutoverCheckpointReadResult actual) =>
+        expected.State == actual.State &&
+        string.Equals(
+            expected.FileVersion,
+            actual.FileVersion,
+            StringComparison.Ordinal);
+
+    internal enum CompareAndSwapState
+    {
+        Written,
+        VersionConflict,
+        Unavailable,
+    }
+
+    internal async ValueTask<CompareAndSwapState> TryWriteIfVersionAsync(
+        BridgeHostCutoverCheckpoint checkpoint,
+        BridgeHostCutoverCheckpointReadResult expected,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        ArgumentNullException.ThrowIfNull(expected);
+        var current = await ReadAsync(cancellationToken);
+        if (!HasSameFileVersion(expected, current))
+        {
+            return current.State is BridgeHostCutoverCheckpointReadState.Unavailable
+                ? CompareAndSwapState.Unavailable
+                : CompareAndSwapState.VersionConflict;
+        }
+
+        await WriteAsync(checkpoint, cancellationToken);
+        return CompareAndSwapState.Written;
+    }
+
     public async ValueTask<BridgeHostCutoverCheckpointReadResult> ReadAsync(
         CancellationToken cancellationToken = default)
     {
@@ -47,12 +83,20 @@ internal sealed class BridgeHostCutoverCheckpointStore
         }
 
         string json;
+        string? fileVersion = null;
         try
         {
-            json = await File.ReadAllTextAsync(
+            var bytes = await File.ReadAllBytesAsync(
                 CheckpointPath,
-                Encoding.UTF8,
                 cancellationToken);
+            fileVersion = Convert.ToHexString(SHA256.HashData(bytes));
+            json = new UTF8Encoding(
+                encoderShouldEmitUTF8Identifier: false,
+                throwOnInvalidBytes: true).GetString(bytes);
+            if (json.Length > 0 && json[0] is '\uFEFF')
+            {
+                json = json[1..];
+            }
         }
         catch (Exception error) when (
             error is FileNotFoundException or DirectoryNotFoundException)
@@ -63,18 +107,27 @@ internal sealed class BridgeHostCutoverCheckpointStore
         {
             return new(BridgeHostCutoverCheckpointReadState.Unavailable);
         }
+        catch (ArgumentException)
+        {
+            return new(
+                BridgeHostCutoverCheckpointReadState.Invalid,
+                FileVersion: fileVersion);
+        }
 
         try
         {
             return new(
                 BridgeHostCutoverCheckpointReadState.Present,
-                BridgeHostCutoverCheckpointJson.Deserialize(json));
+                BridgeHostCutoverCheckpointJson.Deserialize(json),
+                fileVersion);
         }
         catch (Exception error) when (
             error is JsonException or InvalidDataException or ArgumentException or
                 InvalidOperationException or NotSupportedException)
         {
-            return new(BridgeHostCutoverCheckpointReadState.Invalid);
+            return new(
+                BridgeHostCutoverCheckpointReadState.Invalid,
+                FileVersion: fileVersion);
         }
     }
 

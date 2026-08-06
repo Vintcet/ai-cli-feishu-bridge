@@ -236,7 +236,8 @@ internal enum BridgeHostCutoverCheckpointReadState
 
 internal sealed record BridgeHostCutoverCheckpointReadResult(
     BridgeHostCutoverCheckpointReadState State,
-    BridgeHostCutoverCheckpoint? Checkpoint = null);
+    BridgeHostCutoverCheckpoint? Checkpoint = null,
+    string? FileVersion = null);
 
 internal static class BridgeHostCutoverCheckpointJson
 {

@@ -283,7 +283,11 @@ internal sealed class BridgeHostRecoveryObserver : IDisposable
         var checkpointAfter = await readCheckpoint(cancellationToken);
 
         if (checkpointAfter.State is not BridgeHostCutoverCheckpointReadState.Present ||
-            checkpointAfter.Checkpoint != checkpoint)
+            checkpointAfter.Checkpoint != checkpoint ||
+            !string.Equals(
+                checkpointAfter.FileVersion,
+                checkpointBefore.FileVersion,
+                StringComparison.Ordinal))
         {
             return Manual(
                 NormalizeCheckpointState(checkpointAfter.State),

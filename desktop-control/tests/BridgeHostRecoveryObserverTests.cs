@@ -145,6 +145,30 @@ public sealed class BridgeHostRecoveryObserverTests
     }
 
     [TestMethod]
+    public async Task ARawRewriteWithTheSameCheckpointIsStillAChangedObservation()
+    {
+        var checkpoint = Checkpoint(BridgeHostCutoverStage.Planned);
+        var identity = Node(83012);
+        using var observer = Observer(
+            [
+                new(
+                    BridgeHostCutoverCheckpointReadState.Present,
+                    checkpoint,
+                    "version-a"),
+                new(
+                    BridgeHostCutoverCheckpointReadState.Present,
+                    checkpoint,
+                    "version-b"),
+            ],
+            [Authenticated(identity), Authenticated(identity)],
+            [LiveLease(identity, "node-live"), LiveLease(identity, "node-live")]);
+
+        var result = await observer.InspectAsync();
+
+        Assert.AreEqual(BridgeHostRecoveryReason.CheckpointChanged, result.Plan.Reason);
+    }
+
+    [TestMethod]
     public async Task EndpointChangesDuringObservationCannotProduceAPlan()
     {
         var checkpoint = Checkpoint(BridgeHostCutoverStage.Planned);

@@ -55,6 +55,8 @@ public sealed class BridgeHostCutoverCheckpointTests
             BridgeHostCutoverCheckpointReadState.Present,
             result.State);
         Assert.AreEqual(checkpoint, result.Checkpoint);
+        Assert.IsNotNull(result.FileVersion);
+        Assert.AreEqual(64, result.FileVersion!.Length);
         var json = await File.ReadAllTextAsync(store.CheckpointPath);
         StringAssert.Contains(json, "\"stage\":\"DotNetStartRequested\"");
         StringAssert.Contains(json, "\"failureReason\":\"None\"");
@@ -112,6 +114,7 @@ public sealed class BridgeHostCutoverCheckpointTests
             result.State);
         Assert.IsNull(result.Checkpoint);
         Assert.AreEqual(beforeRead, await File.ReadAllTextAsync(store.CheckpointPath));
+        Assert.IsNotNull(result.FileVersion);
     }
 
     [TestMethod]
@@ -251,6 +254,32 @@ public sealed class BridgeHostCutoverCheckpointTests
 
         Assert.AreEqual(before, await File.ReadAllTextAsync(store.CheckpointPath));
         Assert.AreEqual(0, Directory.EnumerateFiles(directory!, "*.tmp").Count());
+    }
+
+    [TestMethod]
+    public async Task FileVersionCasRejectsAChangedRawFileAndAcceptsTheFreshVersion()
+    {
+        var store = Store();
+        await store.WriteAsync(Checkpoint(BridgeHostCutoverStage.Planned));
+        var expected = await store.ReadAsync();
+        var original = await File.ReadAllTextAsync(store.CheckpointPath);
+        await File.WriteAllTextAsync(store.CheckpointPath, original + "\n");
+
+        var next = Checkpoint(BridgeHostCutoverStage.NodeStopRequested);
+        var conflict = await store.TryWriteIfVersionAsync(next, expected);
+
+        Assert.AreEqual(
+            BridgeHostCutoverCheckpointStore.CompareAndSwapState.VersionConflict,
+            conflict);
+        Assert.AreEqual(original + "\n", await File.ReadAllTextAsync(store.CheckpointPath));
+
+        var fresh = await store.ReadAsync();
+        var written = await store.TryWriteIfVersionAsync(next, fresh);
+
+        Assert.AreEqual(
+            BridgeHostCutoverCheckpointStore.CompareAndSwapState.Written,
+            written);
+        Assert.AreEqual(next, (await store.ReadAsync()).Checkpoint);
     }
 
     [TestMethod]
