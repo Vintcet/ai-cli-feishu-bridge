@@ -113,7 +113,7 @@ public sealed class ActiveOwnerLeaseObserver
         {
             return new(ActiveOwnerLeaseState.Invalid);
         }
-        if (!IsValid(record))
+        if (!IsValidRecord(record))
         {
             return new(ActiveOwnerLeaseState.Invalid);
         }
@@ -122,7 +122,7 @@ public sealed class ActiveOwnerLeaseObserver
             : new(ActiveOwnerLeaseState.Stale, record);
     }
 
-    private static bool IsValid(ActiveOwnerLeaseRecord? record) =>
+    public static bool IsValidRecord(ActiveOwnerLeaseRecord? record) =>
         record is not null &&
         record.SchemaVersion == SchemaVersion &&
         record.HostKind is "node" or "dotnet" &&
