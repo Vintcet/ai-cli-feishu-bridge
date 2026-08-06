@@ -23,6 +23,10 @@ internal enum BridgeHostRecoveryReason
 {
     None,
     InvalidCheckpoint,
+    CheckpointMissing,
+    CheckpointUnavailable,
+    CheckpointChanged,
+    ObservationChanged,
     EndpointUncertain,
     ActiveOwnerLeaseInvalid,
     ActiveOwnerLeaseStale,

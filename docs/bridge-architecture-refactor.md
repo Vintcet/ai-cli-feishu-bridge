@@ -352,8 +352,9 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 - 桌面控制层新增未接入生产入口的 `ProductionBridgeStoreHandoffInspector`。它只以 `NodeStoreAccess.ReadOnly` 加载已登记的六个 Node Store 文件，并在校验前后各观察一次共享租约：只有稳定的 `missing + Store 兼容` 同时证明 Node 已按平滑关闭顺序完成 `store.close()` 并允许交接；稳定 `stale` 只表示旧 PID 死亡，不能证明崩溃前已刷盘，因此要求恢复 Node；`live`/`invalid` 在读取 Store 前立即安全拒绝，并保留 `StoreCompatible` 为未否定状态而不伪造一次未执行的 Store 检查结论；
 - 交接检查期间租约状态或完整身份发生任何变化（例如 `missing → live`、`stale A → stale B` 或租约消失）都会返回粗粒度 `invalid` 证据，禁止启动新 Owner。Store 文件缺失继续采用 Node 的空文档兼容回退；结构不兼容、畸形 JSON、I/O 或访问失败只报告不兼容，不修复、不隔离、不重写或创建任何生产文件；取消与未知程序错误不会被吞成兼容证据；
 - 桌面控制层新增纯 `BridgeHostRecoveryPlanner`，把 `Completed` 作为唯一切换提交点：提交前若观察到身份和 `live` 租约完全一致的 C# Owner，只生成 `停止 C# → 确认离线 → 重新检查 Store → 启动并验证 Node` 的回退步骤；提交后才允许保留或在无 Owner 且租约稳定缺失时重启 C#。Node 已恢复且身份/租约一致时不执行动作；端点不确定、认证身份与租约不一致、`stale`/`invalid`、隐藏的 `live` Owner 或提交后意外出现 Node 时一律只返回人工接管；
-- 恢复计划公开结果只包含粗粒度 disposition、reason 和固定步骤名，不含 PID、路径、令牌、leaseId 或时间。该计划目前不探测端点、不执行停止/启动、不持久化切换检查点，也没有接入生产入口；后续必须先增加耐崩溃检查点与只读恢复观察器，再评审恢复执行器；
+- 恢复计划公开结果只包含粗粒度 disposition、reason 和固定步骤名，不含 PID、路径、令牌、leaseId 或时间。纯 `BridgeHostRecoveryPlanner` 仍不探测端点、不执行停止/启动、不持久化切换检查点；后续的观察器和执行器必须把它当作无副作用的决策函数使用；
 - 桌面控制层新增未接入生产入口的版本化 `bridge-host-cutover.checkpoint.json` 检查点契约与 `BridgeHostCutoverCheckpointStore`：阶段、失败原因、预期 Node 身份、目标 .NET 实例名和必要进程号使用严格字符串枚举与精确字段集；读取区分 `missing`、`present`、`invalid`、`unavailable`，不会因路径类型错误、畸形 JSON、未知字段或权限/I/O 故障猜测为缺失；写入先校验、同目录临时文件写入并刷盘，再原子替换，失败或取消会清理临时文件且不覆盖旧检查点；JSON 不含控制令牌、Store leaseId、业务路径或用户内容；
+- 桌面控制层新增未接入生产入口的 `BridgeHostRecoveryObserver`：先读检查点，再以双重采样读取认证回环 `/health` 身份和共享 Active Owner 租约，最后复读检查点；检查点、端点身份或租约在采样窗口内变化时只返回人工接管，连接被拒绝才可判定离线，未认证响应、超时、畸形响应和其他传输异常一律是不确定；稳定证据才交给纯规划器。观察器不读取或修改 Store，不停止/启动进程，也不把 PID、路径、控制令牌或 leaseId 暴露到检查结果；真正执行 `InspectStoreHandoff` 仍必须紧贴 Owner 启动前重新完成；
 - 切换事务、协调器和真实进程适配器都没有被 `BridgeClient`、`MainForm`、`Program`、Host DI、启动配置或发布脚本注册；当前 `active` 所有权仍被硬性拒绝，Host 不连接真实飞书、不启动 CLI、不写生产 Store，Node 仍是唯一 Active Owner。
 
 被动 Host 的本地无外部副作用验证：
@@ -362,7 +363,7 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 dotnet test .\bridge-dotnet\tests\AiCliFeishu.Bridge.Host.Tests\AiCliFeishu.Bridge.Host.Tests.csproj -c Release
 ```
 
-Host 子系统的初始化顺序固定为 `PassiveOwnerGuard → Boundary validation → ReadOnlyNodeStoreShadow → BridgeBusinessStateOwner → Feishu Event Pump → OpenCode Event Pump`，停止时按相反顺序执行。Node 和 C# 回收死亡 PID 的有效租约时，都会按旧 `leaseId` 原子改名并保留确定性墓碑；并发启动者因此不能把刚建立的新租约误当成旧租约移动。控制面板的纯切换事务、隔离协调器、真实进程适配器、正式只读 Store/租约检查器、保守恢复计划和未接入入口的耐崩溃检查点存储已经固定阶段、提交点、执行顺序、身份边界、失败回退和刷盘证据语义，但仍没有生产执行入口。下一纵切片应增加只读恢复观察器，并明确检查点单写者/并发更新协议；在检查点、恢复执行器和生产装配分别完成审查前，不得把切换能力接入 `BridgeClient`、`MainForm`、`Program`、Host DI、启动配置或发布脚本，也不得解除 `active` 闸门。任何时刻仍只允许一个生产写入者。
+Host 子系统的初始化顺序固定为 `PassiveOwnerGuard → Boundary validation → ReadOnlyNodeStoreShadow → BridgeBusinessStateOwner → Feishu Event Pump → OpenCode Event Pump`，停止时按相反顺序执行。Node 和 C# 回收死亡 PID 的有效租约时，都会按旧 `leaseId` 原子改名并保留确定性墓碑；并发启动者因此不能把刚建立的新租约误当成旧租约移动。控制面板的纯切换事务、隔离协调器、真实进程适配器、正式只读 Store/租约检查器、保守恢复计划、未接入入口的耐崩溃检查点存储和只读恢复观察器已经固定阶段、提交点、采样顺序、身份边界、失败回退和刷盘证据语义，但仍没有生产执行入口。下一纵切片应明确检查点单写者/并发更新协议（包括 operationId 冲突和 compare-and-swap 语义）；在检查点写入协议、恢复执行器和生产装配分别完成审查前，不得把切换能力接入 `BridgeClient`、`MainForm`、`Program`、Host DI、启动配置或发布脚本，也不得解除 `active` 闸门。任何时刻仍只允许一个生产写入者。
 
 ### M6：删除旧实现
 

@@ -36,6 +36,7 @@
     <Compile Include="..\BridgeHostCutoverCheckpoint.cs" Link="BridgeHostCutoverCheckpoint.cs" />
     <Compile Include="..\BridgeHostCutoverCheckpointStore.cs" Link="BridgeHostCutoverCheckpointStore.cs" />
     <Compile Include="..\BridgeHostRecoveryPlan.cs" Link="BridgeHostRecoveryPlan.cs" />
+    <Compile Include="..\BridgeHostRecoveryObserver.cs" Link="BridgeHostRecoveryObserver.cs" />
     <Compile Include="..\ProductionBridgeStoreHandoffInspector.cs" Link="ProductionBridgeStoreHandoffInspector.cs" />
     <Compile Include="BridgeHostCutoverTransactionTests.cs" />
     <Compile Include="BridgeHostCutoverCoordinatorTests.cs" />
@@ -43,6 +44,7 @@
     <Compile Include="BridgeHostCutoverProcessIntegrationTests.cs" />
     <Compile Include="BridgeHostCutoverCheckpointTests.cs" />
     <Compile Include="BridgeHostRecoveryPlanTests.cs" />
+    <Compile Include="BridgeHostRecoveryObserverTests.cs" />
     <Compile Include="ProductionBridgeStoreHandoffInspectorTests.cs" />
   </ItemGroup>
 
