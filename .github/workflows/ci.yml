@@ -45,5 +45,18 @@ jobs:
       - name: Run desktop tests
         run: dotnet test .\desktop-control\tests\AiCliFeishuTerminalHost.Tests.csproj -c Release
 
-      - name: Build desktop application
-        run: dotnet build .\desktop-control\AiCliFeishuControl.csproj -c Release
+      - name: Run .NET bridge tests
+        shell: pwsh
+        run: |
+          Get-ChildItem .\bridge-dotnet\tests -Filter *.csproj -Recurse |
+            Sort-Object FullName |
+            ForEach-Object {
+              dotnet test $_.FullName -c Release
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
+            }
+
+      - name: Verify desktop and passive .NET Host release
+        shell: pwsh
+        run: .\scripts\verify-dotnet-shadow-release.ps1
