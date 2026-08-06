@@ -27,6 +27,19 @@ public interface IBridgeRuntimeCommandGateway
         CancellationToken cancellationToken = default);
 }
 
+public sealed class BridgeRuntimeCommandUnavailableException : InvalidOperationException
+{
+    public BridgeRuntimeCommandUnavailableException(string message)
+        : base(message)
+    {
+    }
+
+    public BridgeRuntimeCommandUnavailableException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}
+
 public sealed class BridgeRuntimeCommandGateway(RuntimeCommandDispatcher dispatcher)
     : IBridgeRuntimeCommandGateway
 {
@@ -37,6 +50,116 @@ public sealed class BridgeRuntimeCommandGateway(RuntimeCommandDispatcher dispatc
         RuntimeCommandEnvelope command,
         CancellationToken cancellationToken = default) =>
         dispatcher.DispatchAsync(command, cancellationToken);
+}
+
+public sealed class BridgeRuntimeCommandIngress : IBridgeRuntimeCommandGateway, IDisposable
+{
+    private readonly BridgeRuntimeCommandGateway gateway;
+    private readonly BridgeHostOptions options;
+    private readonly int capacity;
+    private readonly SemaphoreSlim dispatchGate = new(1, 1);
+    private readonly LinkedList<string> completedOrder = [];
+    private readonly HashSet<string> completed = new(StringComparer.Ordinal);
+
+    public BridgeRuntimeCommandIngress(
+        BridgeRuntimeCommandGateway gateway,
+        BridgeHostOptions options,
+        int completedCommandCapacity = 4_096)
+    {
+        this.gateway = gateway;
+        this.options = options;
+        capacity = Math.Max(1, completedCommandCapacity);
+    }
+
+    public bool IsReady(string runtime, RuntimeSession session)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runtime);
+        ArgumentNullException.ThrowIfNull(session);
+        if (options.OwnershipMode is not BridgeOwnershipMode.Active)
+        {
+            return false;
+        }
+        try
+        {
+            return gateway.IsReady(runtime, session);
+        }
+        catch (KeyNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    public async Task DispatchAsync(
+        RuntimeCommandEnvelope command,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        var validation = BridgeProtocolValidator.Validate(command);
+        if (!validation.IsValid)
+        {
+            throw new InvalidDataException(
+                $"运行时命令不符合 Bridge Protocol：{string.Join("；", validation.Errors)}");
+        }
+        if (options.OwnershipMode is not BridgeOwnershipMode.Active)
+        {
+            throw new BridgeRuntimeCommandUnavailableException(
+                "C# Bridge Host 当前是 Shadow，不允许执行 Runtime 命令。");
+        }
+
+        await dispatchGate.WaitAsync(cancellationToken);
+        try
+        {
+            var commandKey = $"{command.Runtime}\n{command.CommandId}";
+            if (completed.Contains(commandKey))
+            {
+                return;
+            }
+
+            var session = new RuntimeSession(command.Session!.ExternalId, command.Session.Cwd);
+            bool ready;
+            try
+            {
+                ready = gateway.IsReady(command.Runtime, session);
+            }
+            catch (KeyNotFoundException error)
+            {
+                throw new BridgeRuntimeCommandUnavailableException(
+                    $"运行时 {command.Runtime} 尚未注册 Adapter。",
+                    error);
+            }
+            if (!ready)
+            {
+                throw new BridgeRuntimeCommandUnavailableException(
+                    $"运行时 {command.Runtime} 的目标会话尚未就绪。");
+            }
+
+            try
+            {
+                await gateway.DispatchAsync(command, cancellationToken);
+            }
+            catch (Exception error) when (error is KeyNotFoundException or NotSupportedException)
+            {
+                throw new BridgeRuntimeCommandUnavailableException(
+                    $"运行时 {command.Runtime} 当前无法执行 {command.CommandType}。",
+                    error);
+            }
+
+            completed.Add(commandKey);
+            completedOrder.AddLast(commandKey);
+            while (completedOrder.Count > capacity)
+            {
+                var oldest = completedOrder.First!;
+                completedOrder.RemoveFirst();
+                completed.Remove(oldest.Value);
+            }
+        }
+        finally
+        {
+            dispatchGate.Release();
+        }
+    }
+
+    public void Dispose() => dispatchGate.Dispose();
 }
 
 public sealed class BridgeRuntimeEventIngress(

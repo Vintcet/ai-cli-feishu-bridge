@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using AiCliFeishu.Bridge.Protocol;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
@@ -256,6 +257,58 @@ public sealed class BridgeControlApiTests
     }
 
     [TestMethod]
+    public async Task RuntimeCommandEndpointRejectsUnauthenticatedInvalidAndPassiveCommands()
+    {
+        await WriteStoreAsync();
+        using var refresh = StatusRequest(refresh: true);
+        using var refreshResponse = await client!.SendAsync(refresh);
+        Assert.AreEqual(HttpStatusCode.OK, refreshResponse.StatusCode);
+
+        using var missingToken = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/control/runtime-commands")
+        {
+            Content = CommandContent("command-1"),
+        };
+        using var missingResponse = await client!.SendAsync(missingToken);
+        Assert.AreEqual(HttpStatusCode.Unauthorized, missingResponse.StatusCode);
+
+        using var invalid = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/control/runtime-commands")
+        {
+            Content = JsonContent.Create(new { commandType = RuntimeCommandTypes.PromptSend }),
+        };
+        invalid.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var invalidResponse = await client.SendAsync(invalid);
+        Assert.AreEqual(HttpStatusCode.UnprocessableEntity, invalidResponse.StatusCode);
+
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/control/runtime-commands")
+        {
+            Content = CommandContent("command-1"),
+        };
+        request.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var response = await client.SendAsync(request);
+        Assert.AreEqual(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+    }
+
+    [TestMethod]
+    public async Task RuntimeCommandEndpointReturnsUnavailableBeforeStoreProjectionIsReady()
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/control/runtime-commands")
+        {
+            Content = CommandContent("command-unavailable"),
+        };
+        request.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var response = await client!.SendAsync(request);
+        Assert.AreEqual(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+    }
+
+    [TestMethod]
     public async Task StandardIngressReturnsUnavailableWhenStoreProjectionIsIncompatible()
     {
         await File.WriteAllTextAsync(Path.Combine(directory!, "sessions.json"), "{invalid");
@@ -373,6 +426,18 @@ public sealed class BridgeControlApiTests
             traceId = $"trace-{eventId}",
             text = "继续",
         });
+
+    private static JsonContent CommandContent(string commandId) => JsonContent.Create(new
+    {
+        protocolVersion = 1,
+        runtime = "codex",
+        session = new { externalId = "secret-active", cwd = "K:\\secret-active" },
+        traceId = $"trace-{commandId}",
+        commandId,
+        commandType = "prompt.send",
+        createdAt = "2026-08-06T00:02:00Z",
+        payload = new { prompt = "继续", mode = "steer" },
+    });
 
     private async Task WriteStoreAsync()
     {

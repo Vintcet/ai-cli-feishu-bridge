@@ -40,7 +40,10 @@ public static class BridgeHostApplication
         builder.Services.AddSingleton<RuntimeAdapterRegistry>(services =>
             services.GetRequiredService<BridgeBoundaryCatalog>().BuildRuntimeRegistry());
         builder.Services.AddSingleton<RuntimeCommandDispatcher>();
-        builder.Services.AddSingleton<IBridgeRuntimeCommandGateway, BridgeRuntimeCommandGateway>();
+        builder.Services.AddSingleton<BridgeRuntimeCommandGateway>();
+        builder.Services.AddSingleton<BridgeRuntimeCommandIngress>();
+        builder.Services.AddSingleton<IBridgeRuntimeCommandGateway>(services =>
+            services.GetRequiredService<BridgeRuntimeCommandIngress>());
         builder.Services.AddSingleton<ReadOnlyNodeStoreShadow>();
         builder.Services.AddSingleton<IBridgeStoreShadow>(services =>
             services.GetRequiredService<ReadOnlyNodeStoreShadow>());

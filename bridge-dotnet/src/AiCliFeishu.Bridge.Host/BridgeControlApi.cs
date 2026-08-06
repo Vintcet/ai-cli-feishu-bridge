@@ -162,6 +162,79 @@ public static class BridgeControlApi
             return Results.Accepted(value: new ControlAccepted(true));
         });
 
+        app.MapPost("/control/runtime-commands", async (
+            HttpRequest request,
+            IBridgeRuntimeCommandGateway commands,
+            BridgeBusinessStateOwner businessStateOwner,
+            IBridgeControlTokenProvider tokenProvider,
+            CancellationToken cancellationToken) =>
+        {
+            if (!request.HasJsonContentType())
+            {
+                return Results.Json(
+                    new ControlError(false, "请求必须使用 application/json。"),
+                    statusCode: StatusCodes.Status415UnsupportedMediaType);
+            }
+            if (IsCrossSite(request))
+            {
+                return Results.Json(
+                    new ControlError(false, "拒绝跨站请求。"),
+                    statusCode: StatusCodes.Status403Forbidden);
+            }
+            if (!await IsAuthenticatedAsync(request, tokenProvider, cancellationToken))
+            {
+                return Results.Json(
+                    new ControlError(false, "本机控制令牌无效。"),
+                    statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            RuntimeCommandEnvelope command;
+            try
+            {
+                command = await JsonSerializer.DeserializeAsync<RuntimeCommandEnvelope>(
+                    request.Body,
+                    BridgeProtocolJson.SerializerOptions,
+                    cancellationToken) ?? throw new JsonException("命令不能为空。");
+            }
+            catch (JsonException)
+            {
+                return Results.Json(
+                    new ControlError(false, "Runtime 命令 JSON 无效。"),
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+            var validation = BridgeProtocolValidator.Validate(command);
+            if (!validation.IsValid)
+            {
+                return Results.Json(
+                    new ControlError(false, "Runtime 命令未通过 Bridge Protocol 校验。"),
+                    statusCode: StatusCodes.Status422UnprocessableEntity);
+            }
+            if (!businessStateOwner.Snapshot.Initialized)
+            {
+                return Results.Json(
+                    new ControlError(false, "业务状态尚未从 Store 初始化。"),
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            try
+            {
+                await commands.DispatchAsync(command, cancellationToken);
+            }
+            catch (Exception error) when (error is InvalidDataException or ArgumentException)
+            {
+                return Results.Json(
+                    new ControlError(false, "Runtime 命令未通过 Bridge Protocol 校验。"),
+                    statusCode: StatusCodes.Status422UnprocessableEntity);
+            }
+            catch (BridgeRuntimeCommandUnavailableException)
+            {
+                return Results.Json(
+                    new ControlError(false, "Runtime 命令执行入口当前不可用。"),
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+            return Results.Accepted(value: new ControlAccepted(true));
+        });
+
         app.MapPost("/control/feishu-intents", async (
             HttpRequest request,
             IFeishuIntentSink intents,

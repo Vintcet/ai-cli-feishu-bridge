@@ -105,6 +105,24 @@ public sealed class BridgeBoundaryTests
     }
 
     [TestMethod]
+    public async Task PassiveCommandGatewayNeverExecutesRuntimeAdapter()
+    {
+        var adapter = new RecordingRuntimeAdapter(RuntimeNames.Codex);
+        var registry = new RuntimeAdapterRegistry();
+        registry.Register(adapter);
+        var adapterGateway = new BridgeRuntimeCommandGateway(
+            new RuntimeCommandDispatcher(registry));
+        using var gateway = new BridgeRuntimeCommandIngress(
+            adapterGateway,
+            BridgeHostOptions.Passive(Path.Combine(Path.GetTempPath(), "bridge-passive-test")));
+
+        Assert.IsFalse(gateway.IsReady(RuntimeNames.Codex, new("session-1")));
+        await Assert.ThrowsExceptionAsync<BridgeRuntimeCommandUnavailableException>(() =>
+            gateway.DispatchAsync(Command(RuntimeNames.Codex)));
+        Assert.IsNull(adapter.LastCommand);
+    }
+
+    [TestMethod]
     public async Task FeishuIntentCanOnlyReachCliThroughStandardCommandGateway()
     {
         var codex = new RecordingRuntimeAdapter(RuntimeNames.Codex);
