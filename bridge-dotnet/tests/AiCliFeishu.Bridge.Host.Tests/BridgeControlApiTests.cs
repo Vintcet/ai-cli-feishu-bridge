@@ -74,6 +74,13 @@ public sealed class BridgeControlApiTests
         Assert.AreEqual("passive", body.RootElement.GetProperty("ownershipMode").GetString());
         Assert.IsFalse(body.RootElement.GetProperty("activeOwner").GetBoolean());
         Assert.IsTrue(body.RootElement.GetProperty("processId").GetInt32() > 0);
+        var components = body.RootElement.GetProperty("components")
+            .EnumerateArray()
+            .ToDictionary(
+                component => component.GetProperty("name").GetString()!,
+                component => component.GetProperty("status").GetString()!,
+                StringComparer.Ordinal);
+        Assert.AreEqual("passive", components["feishu-event-pump"]);
     }
 
     [TestMethod]

@@ -84,6 +84,7 @@ public static class BridgeHostApplication
             services.GetRequiredService<ReadOnlyNodeStoreShadow>());
         builder.Services.AddSingleton<IBridgeHostSubsystem>(services =>
             services.GetRequiredService<BridgeBusinessStateOwner>());
+        builder.Services.AddSingleton<IBridgeHostSubsystem, BridgeFeishuEventSubsystem>();
         builder.Services.AddHostedService<BridgeInstanceLeaseService>();
         builder.Services.AddHostedService<BridgeRuntimeWorker>();
         configureServices?.Invoke(builder.Services);
