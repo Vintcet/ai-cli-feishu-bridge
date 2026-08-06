@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using AiCliFeishu.Bridge.Core;
+using AiCliFeishu.Bridge.Protocol;
 
 namespace AiCliFeishu.Bridge.Host;
 
@@ -93,6 +95,63 @@ public static class BridgeControlApi
                     businessStateOwner.ComponentHealth.Detail);
             }
             return Results.Ok(status.Snapshot());
+        });
+
+        app.MapPost("/control/runtime-events", async (
+            HttpRequest request,
+            IRuntimeEventSink runtimeEvents,
+            IBridgeControlTokenProvider tokenProvider,
+            CancellationToken cancellationToken) =>
+        {
+            if (!request.HasJsonContentType())
+            {
+                return Results.Json(
+                    new ControlError(false, "请求必须使用 application/json。"),
+                    statusCode: StatusCodes.Status415UnsupportedMediaType);
+            }
+            if (IsCrossSite(request))
+            {
+                return Results.Json(
+                    new ControlError(false, "拒绝跨站请求。"),
+                    statusCode: StatusCodes.Status403Forbidden);
+            }
+            if (!await IsAuthenticatedAsync(request, tokenProvider, cancellationToken))
+            {
+                return Results.Json(
+                    new ControlError(false, "本机控制令牌无效。"),
+                    statusCode: StatusCodes.Status401Unauthorized);
+            }
+
+            RuntimeEventEnvelope runtimeEvent;
+            try
+            {
+                runtimeEvent = await JsonSerializer.DeserializeAsync<RuntimeEventEnvelope>(
+                    request.Body,
+                    BridgeProtocolJson.SerializerOptions,
+                    cancellationToken) ?? throw new JsonException("事件不能为空。");
+            }
+            catch (JsonException)
+            {
+                return Results.Json(
+                    new ControlError(false, "Runtime 事件 JSON 无效。"),
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            try
+            {
+                await runtimeEvents.PublishAsync(runtimeEvent, cancellationToken);
+            }
+            catch (Exception error) when (
+                error is InvalidDataException or
+                KeyNotFoundException or
+                InvalidOperationException or
+                ArgumentException)
+            {
+                return Results.Json(
+                    new ControlError(false, "Runtime 事件未通过 Bridge Protocol 或业务顺序校验。"),
+                    statusCode: StatusCodes.Status422UnprocessableEntity);
+            }
+            return Results.Accepted(value: new ControlAccepted(true));
         });
 
         app.MapPost("/control/shutdown", async (

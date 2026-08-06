@@ -158,6 +158,66 @@ public sealed class BridgeControlApiTests
     }
 
     [TestMethod]
+    public async Task RuntimeEventEndpointAuthenticatesValidatesAndPublishesThroughIngress()
+    {
+        await WriteStoreAsync();
+
+        using var missingToken = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/control/runtime-events")
+        {
+            Content = EventContent("event-1", "turn.started", "secret-active"),
+        };
+        using var missingResponse = await client!.SendAsync(missingToken);
+        Assert.AreEqual(HttpStatusCode.Unauthorized, missingResponse.StatusCode);
+
+        using var refresh = StatusRequest(refresh: true);
+        using var refreshResponse = await client.SendAsync(refresh);
+        Assert.AreEqual(HttpStatusCode.OK, refreshResponse.StatusCode);
+
+        using var invalid = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/control/runtime-events")
+        {
+            Content = JsonContent.Create(new { eventType = "turn.started" }),
+        };
+        invalid.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var invalidResponse = await client.SendAsync(invalid);
+        Assert.AreEqual(HttpStatusCode.UnprocessableEntity, invalidResponse.StatusCode);
+
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/control/runtime-events")
+        {
+            Content = EventContent("event-1", "turn.started", "secret-active"),
+        };
+        request.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var response = await client.SendAsync(request);
+        Assert.AreEqual(HttpStatusCode.Accepted, response.StatusCode);
+
+        using var duplicate = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/control/runtime-events")
+        {
+            Content = EventContent("event-1", "turn.started", "secret-active"),
+        };
+        duplicate.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var duplicateResponse = await client.SendAsync(duplicate);
+        Assert.AreEqual(HttpStatusCode.Accepted, duplicateResponse.StatusCode);
+
+        using var statusRequest = StatusRequest();
+        using var statusResponse = await client.SendAsync(statusRequest);
+        using var statusBody = JsonDocument.Parse(
+            await statusResponse.Content.ReadAsStringAsync());
+        var business = statusBody.RootElement.GetProperty("businessState");
+        Assert.AreEqual(1, business.GetProperty("revision").GetInt64());
+        Assert.AreEqual(
+            "loaded",
+            statusBody.RootElement.GetProperty("store").GetProperty("status").GetString());
+        Assert.AreEqual(1, business.GetProperty("activeSessions").GetInt32());
+    }
+
+    [TestMethod]
     public async Task ShutdownRejectsMissingTokenAndCrossSiteRequests()
     {
         using var missingToken = await client!.PostAsJsonAsync("/control/shutdown", new { });
@@ -217,6 +277,21 @@ public sealed class BridgeControlApiTests
         request.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
         return request;
     }
+
+    private static JsonContent EventContent(
+        string eventId,
+        string eventType,
+        string sessionId) => JsonContent.Create(new
+        {
+            protocolVersion = 1,
+            runtime = "codex",
+            session = new { externalId = sessionId, cwd = "K:\\secret-active" },
+            traceId = $"trace-{eventId}",
+            eventId,
+            eventType,
+            occurredAt = "2026-08-06T00:02:00Z",
+            payload = new { turnId = "turn-1" },
+        });
 
     private async Task WriteStoreAsync()
     {
