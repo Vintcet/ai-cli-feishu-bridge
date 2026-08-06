@@ -1,0 +1,222 @@
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Text.Json;
+
+namespace AiCliFeishu.Bridge.Host;
+
+internal sealed class ActiveOwnerLeaseAcquirer : IAsyncDisposable
+{
+    private const int MaximumAcquireAttempts = 8;
+
+    private readonly string dataDirectory;
+    private readonly ActiveOwnerLeaseObserver observer;
+    private readonly ActiveOwnerLeaseRecord record;
+    private bool held;
+
+    internal ActiveOwnerLeaseAcquirer(
+        string dataDirectory,
+        string instanceName,
+        int processId,
+        TimeProvider? timeProvider = null,
+        Func<int, bool>? processAlive = null,
+        Func<string>? leaseIdFactory = null)
+    {
+        if (string.IsNullOrWhiteSpace(dataDirectory))
+        {
+            throw new ArgumentException("Active Owner 数据目录不能为空。", nameof(dataDirectory));
+        }
+        if (!IsAsciiToken(instanceName))
+        {
+            throw new ArgumentException(
+                "Active Owner 实例名只能包含 ASCII 字母、数字、连字符和下划线。",
+                nameof(instanceName));
+        }
+        if (processId <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(processId),
+                "Active Owner 进程号必须是正整数。");
+        }
+
+        var leaseId = (leaseIdFactory ?? (() => Guid.NewGuid().ToString("N")))();
+        if (!IsAsciiToken(leaseId))
+        {
+            throw new InvalidOperationException(
+                "Active Owner leaseId 只能包含 ASCII 字母、数字、连字符和下划线。");
+        }
+
+        this.dataDirectory = Path.GetFullPath(dataDirectory);
+        var options = BridgeHostOptions.Passive(this.dataDirectory, port: 0);
+        observer = processAlive is null
+            ? new ActiveOwnerLeaseObserver(options)
+            : new ActiveOwnerLeaseObserver(options, processAlive);
+        record = new ActiveOwnerLeaseRecord(
+            ActiveOwnerLeaseObserver.SchemaVersion,
+            "dotnet",
+            "active",
+            processId,
+            instanceName,
+            leaseId,
+            (timeProvider ?? TimeProvider.System).GetUtcNow());
+    }
+
+    internal string LockDirectoryPath => observer.LockDirectoryPath;
+
+    internal string MetadataPath => observer.MetadataPath;
+
+    internal ActiveOwnerLeaseRecord Record => record;
+
+    internal bool IsHeld => held;
+
+    internal async ValueTask<ActiveOwnerLeaseRecord> AcquireAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (held)
+        {
+            throw new InvalidOperationException("Active Owner 租约已取得。");
+        }
+
+        Directory.CreateDirectory(dataDirectory);
+        var stagingDirectory = Path.Combine(
+            dataDirectory,
+            $"bridge-active-owner.pending-{record.LeaseId}");
+        try
+        {
+            await PrepareStagingDirectoryAsync(stagingDirectory, cancellationToken);
+            for (var attempt = 0; attempt < MaximumAcquireAttempts; attempt++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var snapshot = await observer.InspectAsync(cancellationToken);
+                switch (snapshot.State)
+                {
+                    case ActiveOwnerLeaseState.Invalid:
+                        throw InvalidLease();
+                    case ActiveOwnerLeaseState.Live:
+                        throw AlreadyOwned(snapshot.Record!);
+                    case ActiveOwnerLeaseState.Stale:
+                        _ = TryQuarantineStaleLease(snapshot.Record!);
+                        continue;
+                    case ActiveOwnerLeaseState.Missing:
+                        break;
+                    default:
+                        throw new InvalidOperationException("未知的 Active Owner 租约状态。");
+                }
+
+                try
+                {
+                    Directory.Move(stagingDirectory, LockDirectoryPath);
+                    held = true;
+                    return record;
+                }
+                catch (IOException error)
+                {
+                    var afterConflict = await observer.InspectAsync(cancellationToken);
+                    if (afterConflict.State is ActiveOwnerLeaseState.Missing)
+                    {
+                        throw new InvalidOperationException(
+                            "无法原子发布 Active Owner 租约。",
+                            error);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            TryDeleteDirectory(stagingDirectory);
+        }
+
+        throw new InvalidOperationException(
+            "Active Owner 租约在取得期间反复变化，已中止切换。");
+    }
+
+    internal async ValueTask ReleaseAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (!held)
+        {
+            return;
+        }
+
+        var snapshot = await observer.InspectAsync(cancellationToken);
+        if (snapshot.Record?.LeaseId != record.LeaseId)
+        {
+            throw new InvalidOperationException(
+                "Active Owner 租约身份已变化，拒绝删除其他 Owner 的租约。");
+        }
+
+        Directory.Delete(LockDirectoryPath, recursive: true);
+        held = false;
+    }
+
+    public ValueTask DisposeAsync() => ReleaseAsync();
+
+    private async Task PrepareStagingDirectoryAsync(
+        string stagingDirectory,
+        CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(stagingDirectory);
+        var metadataPath = Path.Combine(
+            stagingDirectory,
+            ActiveOwnerLeaseObserver.MetadataFileName);
+        var metadata = JsonSerializer.SerializeToUtf8Bytes(
+            record,
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+        await using var stream = new FileStream(
+            metadataPath,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.Read,
+            4_096,
+            FileOptions.Asynchronous | FileOptions.WriteThrough);
+        await stream.WriteAsync(metadata, cancellationToken);
+        await stream.WriteAsync("\n"u8.ToArray(), cancellationToken);
+        stream.Flush(flushToDisk: true);
+    }
+
+    private bool TryQuarantineStaleLease(ActiveOwnerLeaseRecord staleRecord)
+    {
+        var staleDirectory = Path.Combine(
+            dataDirectory,
+            $"bridge-active-owner.stale-{staleRecord.LeaseId}");
+        try
+        {
+            Directory.Move(LockDirectoryPath, staleDirectory);
+            return true;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+        catch (IOException) when (
+            Directory.Exists(staleDirectory) ||
+            !Directory.Exists(LockDirectoryPath))
+        {
+            return false;
+        }
+    }
+
+    private static InvalidOperationException InvalidLease() => new(
+        "Active Owner 租约路径或元数据无效，拒绝自动抢占。");
+
+    private static InvalidOperationException AlreadyOwned(ActiveOwnerLeaseRecord owner) => new(
+        $"生产 Store 已由 {owner.HostKind} Active Owner 持有（pid={owner.ProcessId}）。");
+
+    private static bool IsAsciiToken(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        value.All(character =>
+            character is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '-' or '_');
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+}

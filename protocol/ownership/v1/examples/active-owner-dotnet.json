@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "hostKind": "dotnet",
+  "ownershipMode": "active",
+  "processId": 61001,
+  "instanceName": "cutover-test",
+  "leaseId": "dotnet-lease-1",
+  "acquiredAt": "2026-08-06T10:00:00.000Z"
+}

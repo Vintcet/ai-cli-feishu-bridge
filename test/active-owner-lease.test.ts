@@ -235,3 +235,21 @@ test("node reads the shared active owner lease example", async () => {
 
   assert.deepEqual(parseActiveOwnerLeaseRecord(example), example);
 });
+
+test("node reads the shared dotnet active owner lease example", async () => {
+  const example = JSON.parse(
+    await readFile(
+      path.join(
+        process.cwd(),
+        "protocol",
+        "ownership",
+        "v1",
+        "examples",
+        "active-owner-dotnet.json",
+      ),
+      "utf8",
+    ),
+  );
+
+  assert.deepEqual(parseActiveOwnerLeaseRecord(example), example);
+});

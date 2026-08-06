@@ -20,6 +20,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="AiCliFeishu.Bridge.Host.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\AiCliFeishu.Bridge.Core\AiCliFeishu.Bridge.Core.csproj" />
     <ProjectReference Include="..\AiCliFeishu.Bridge.Adapters.Feishu\AiCliFeishu.Bridge.Adapters.Feishu.csproj" />
     <ProjectReference Include="..\AiCliFeishu.Bridge.Adapters.ManagedTerminal\AiCliFeishu.Bridge.Adapters.ManagedTerminal.csproj" />
