@@ -342,10 +342,13 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 - 桌面发布和 Windows ZIP 现在携带版本一致的单文件 `AiCliFeishuBridgeHost.exe` sidecar，并校验该文件存在、版本正确且没有 loose DLL、runtimeconfig、deps 或 PDB 残留；这只让显式 `dotnet-shadow` 灰度入口在安装产物中可用，不改变 Node 的默认生产所有权；
 - CI 会运行全部 C# 测试，并从干净临时目录发布桌面产物、校验三个 EXE 的版本和单文件边界，再按控制面板使用的 `DOTNET_ROLL_FORWARD=Major` 环境真实启动 Passive Host 并探测回环 `/health`；验证数据和进程只存在于隔离临时目录，不接触生产 Store、CLI 或飞书；
 - 桌面控制层新增纯 `BridgeHostCutoverTransaction` 模型，用认证身份、目标 PID、Store 刷盘/兼容性和 Active Owner 租约证据约束 `停止 Node → 确认原 PID 离线 → 验证 Store 可交接 → 记录 C# 启动 PID → 验证 C# Active → 完成`。事件越序会被拒绝且不改变状态，重复的当前阶段事件幂等；Node 身份不匹配、Store 未刷盘或不兼容、租约仍为 `live`/`invalid` 时安全中止；C# 进程一旦启动，身份或健康验证失败只能进入 `RollbackRequired`，并强制 `停止 C# → 确认其 PID 离线 → 启动并验证新的 Node PID` 后才能标记回退完成；
-- 该切换事务目前只编译进桌面控制程序集和隔离单元测试，不被 `BridgeClient`、`MainForm`、启动配置或 Host DI 调用，不执行进程、HTTP、Store、租约或飞书操作；公开快照只包含阶段、是否仍需回退和粗粒度失败原因，不暴露 PID、路径、令牌或 leaseId；
+- 纯 `BridgeHostCutoverTransaction` 模型本身不执行进程、HTTP、Store、租约或飞书操作；公开快照只包含阶段、是否仍需回退和粗粒度失败原因，不暴露 PID、路径、令牌或 leaseId；
 - 在纯模型之上增加了只依赖 `IBridgeHostCutoverOperations` 的 `BridgeHostCutoverCoordinator`，但当前仍只在桌面隔离测试中使用。它把发起 Node 停止请求作为不可取消安全阶段的起点：请求发出后，调用方取消不会打断离线确认、Store 检查或恢复链；Store 未刷盘/不兼容且没有 Active Owner 冲突时会恢复并验证 Node；Node 停止结果不确定、租约为 `live`/`invalid`、C# 启动返回无效 PID，或“启动调用抛错但实际是否启动未知”时不会猜测所有权，不自动启动任何 Owner，而是返回 `FailedSafe` 并要求后续人工/专门恢复流程；
-- 协调器的操作接口只表达停止、离线验证、只读 Store/租约检查、启动和身份验证，不包含实现类型、真实路径、控制令牌、HTTP 客户端或进程对象；测试使用记录型假操作演练成功、租约冲突、Store 恢复、身份替换、回退失败、取消和并发事务隔离。它没有被 `BridgeClient`、`MainForm`、启动配置、DI 或发布脚本注册；
-- 当前 `active` 所有权被硬性拒绝，Host 不连接真实飞书、不启动 CLI、不写生产 Store，Node 仍是唯一 Active Owner。
+- 协调器的操作接口只表达停止、离线验证、只读 Store/租约检查、启动和身份验证，不向状态机暴露实现类型、真实路径、控制令牌、HTTP 客户端或进程对象；记录型假操作继续覆盖成功、租约冲突、Store 恢复、身份替换、回退失败、取消和并发事务隔离；
+- 桌面控制层已有未接入生产入口的 `BridgeHostCutoverProcessOperations` 真实进程适配器。它只接受精确的本机回环 HTTP Origin、禁止自动重定向，且要求显式注入控制令牌、Node/C# 进程启动描述和只读 Store/租约检查器；Node 通过认证 `/health`、C# 通过认证 `/control/status` 读取身份，停止请求携带 Host/API/PID 三重身份，离线确认复用 `BridgeHostExitWaiter` 并同时检查目标 PID 和端口；未知 HTTP 响应、无法认证的占用者或探测超时都不会被误判为离线，停止或启动结果不确定时统一进入 `OwnershipUncertain`；
+- Node 的认证 `/health` 现在包含固定 `instanceName: production`，使切换事务可以在停止前验证完整 Node 身份；公开、未认证的健康响应仍只包含存活信息；
+- 真实进程演练已在随机回环端口、临时工作目录和专用最小 ASP.NET 测试子进程中覆盖 `Node → C#` 成功切换、C# 身份不匹配后的停止与 Node 回退，以及 `live`/`invalid` 租约冲突下不启动第二 Owner。演练不读取或写入生产 Store，不连接 CLI 或飞书，临时进程和目录在测试结束后清理；
+- 切换事务、协调器和真实进程适配器都没有被 `BridgeClient`、`MainForm`、`Program`、Host DI、启动配置或发布脚本注册；当前 `active` 所有权仍被硬性拒绝，Host 不连接真实飞书、不启动 CLI、不写生产 Store，Node 仍是唯一 Active Owner。
 
 被动 Host 的本地无外部副作用验证：
 
@@ -353,7 +356,7 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 dotnet test .\bridge-dotnet\tests\AiCliFeishu.Bridge.Host.Tests\AiCliFeishu.Bridge.Host.Tests.csproj -c Release
 ```
 
-Host 子系统的初始化顺序固定为 `PassiveOwnerGuard → Boundary validation → ReadOnlyNodeStoreShadow → BridgeBusinessStateOwner → Feishu Event Pump → OpenCode Event Pump`，停止时按相反顺序执行。Node 和 C# 回收死亡 PID 的有效租约时，都会按旧 `leaseId` 原子改名并保留确定性墓碑；并发启动者因此不能把刚建立的新租约误当成旧租约移动。控制面板的纯切换事务状态机和隔离协调器已经固定阶段、前置条件、执行顺序和失败回退，但仍没有生产执行入口。后续 M5 纵切片需要把这组接口适配到真实桌面边界，并在隔离临时目录中完成完整切换与回退演练，证明执行层严格遵守该状态机；只有演练完成并单独评审后，才能考虑是否解除 `active` 闸门。任何时刻仍只允许一个生产写入者。
+Host 子系统的初始化顺序固定为 `PassiveOwnerGuard → Boundary validation → ReadOnlyNodeStoreShadow → BridgeBusinessStateOwner → Feishu Event Pump → OpenCode Event Pump`，停止时按相反顺序执行。Node 和 C# 回收死亡 PID 的有效租约时，都会按旧 `leaseId` 原子改名并保留确定性墓碑；并发启动者因此不能把刚建立的新租约误当成旧租约移动。控制面板的纯切换事务、隔离协调器和真实进程适配器已经固定阶段、前置条件、执行顺序、身份边界和失败回退，并完成不接触生产系统的真实子进程演练，但仍没有生产执行入口。下一纵切片应实现正式的只读 Store/租约检查器并单独评审；在该检查器、生产装配和恢复预案分别完成审查前，不得把切换能力接入生产，也不得解除 `active` 闸门。任何时刻仍只允许一个生产写入者。
 
 ### M6：删除旧实现
 

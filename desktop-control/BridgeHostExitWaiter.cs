@@ -28,6 +28,7 @@ internal sealed record BridgeHostExitObservation(
 internal static class BridgeHostExitWaiter
 {
     public const int DefaultMaxAttempts = 41;
+    public static TimeSpan DefaultPollInterval { get; } = TimeSpan.FromMilliseconds(250);
 
     public static async Task WaitAsync(
         int expectedProcessId,
@@ -45,7 +46,7 @@ internal static class BridgeHostExitWaiter
         {
             throw new ArgumentOutOfRangeException(nameof(maxAttempts));
         }
-        var interval = pollInterval ?? TimeSpan.FromMilliseconds(250);
+        var interval = pollInterval ?? DefaultPollInterval;
         if (interval < TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(pollInterval));

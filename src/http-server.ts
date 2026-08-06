@@ -3,6 +3,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 
 export const NODE_BRIDGE_HOST_KIND = "node";
 export const BRIDGE_MANAGEMENT_API_VERSION = 1;
+export const NODE_BRIDGE_INSTANCE_NAME = "production";
 export const EXPECTED_HOST_KIND_HEADER = "x-ai-cli-feishu-expected-host-kind";
 export const MANAGEMENT_API_VERSION_HEADER = "x-ai-cli-feishu-management-api-version";
 export const EXPECTED_PROCESS_ID_HEADER = "x-ai-cli-feishu-expected-process-id";
@@ -115,6 +116,7 @@ async function routeRequest(
       ...await handlers.health(true, forceRefresh),
       hostKind: NODE_BRIDGE_HOST_KIND,
       managementApiVersion: BRIDGE_MANAGEMENT_API_VERSION,
+      instanceName: NODE_BRIDGE_INSTANCE_NAME,
       processId: process.pid,
       ownershipMode: "active",
       activeOwner: true,

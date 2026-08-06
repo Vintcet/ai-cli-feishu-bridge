@@ -400,6 +400,7 @@ test("health returns only liveness data to unauthenticated callers", async () =>
       pairingCode?: string;
       hostKind?: string;
       managementApiVersion?: number;
+      instanceName?: string;
       ownershipMode?: string;
       activeOwner?: boolean;
       processId?: number;
@@ -407,6 +408,7 @@ test("health returns only liveness data to unauthenticated callers", async () =>
     assert.equal(authorizedBody.pairingCode, "SECRET1234");
     assert.equal(authorizedBody.hostKind, "node");
     assert.equal(authorizedBody.managementApiVersion, 1);
+    assert.equal(authorizedBody.instanceName, "production");
     assert.equal(authorizedBody.ownershipMode, "active");
     assert.equal(authorizedBody.activeOwner, true);
     assert.equal(authorizedBody.processId, process.pid);

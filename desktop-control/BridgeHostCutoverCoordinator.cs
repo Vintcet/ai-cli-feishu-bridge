@@ -41,7 +41,8 @@ internal sealed class BridgeHostCutoverOperationException : Exception
 {
     public BridgeHostCutoverOperationException(
         BridgeCutoverFailureReason reason,
-        string message) : base(message)
+        string message,
+        Exception? innerException = null) : base(message, innerException)
     {
         if (reason is BridgeCutoverFailureReason.None or
             BridgeCutoverFailureReason.InvalidEventOrder)

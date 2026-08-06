@@ -16,6 +16,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="cutover-host-fixture\CutoverHostFixture.csproj"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Compile Include="Program.cs" />
     <Compile Include="..\RuntimeProfile.cs" Link="RuntimeProfile.cs" />
     <Compile Include="..\RuntimeArgumentParser.cs" Link="RuntimeArgumentParser.cs" />
@@ -26,7 +31,22 @@
     <Compile Include="..\BridgeHostExitWaiter.cs" Link="BridgeHostExitWaiter.cs" />
     <Compile Include="..\BridgeHostCutoverTransaction.cs" Link="BridgeHostCutoverTransaction.cs" />
     <Compile Include="..\BridgeHostCutoverCoordinator.cs" Link="BridgeHostCutoverCoordinator.cs" />
+    <Compile Include="..\BridgeHostCutoverProcessOperations.cs" Link="BridgeHostCutoverProcessOperations.cs" />
     <Compile Include="BridgeHostCutoverTransactionTests.cs" />
     <Compile Include="BridgeHostCutoverCoordinatorTests.cs" />
+    <Compile Include="BridgeHostCutoverProcessOperationsTests.cs" />
+    <Compile Include="BridgeHostCutoverProcessIntegrationTests.cs" />
   </ItemGroup>
+
+  <Target Name="CopyCutoverHostFixture" AfterTargets="Build">
+    <PropertyGroup>
+      <CutoverHostFixtureOutputDirectory>$(MSBuildThisFileDirectory)cutover-host-fixture\bin\$(Configuration)\net8.0\</CutoverHostFixtureOutputDirectory>
+    </PropertyGroup>
+    <ItemGroup>
+      <CutoverHostFixtureFiles Include="$(CutoverHostFixtureOutputDirectory)CutoverHostFixture.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(CutoverHostFixtureFiles)"
+          DestinationFolder="$(OutDir)cutover-host-fixture\"
+          SkipUnchangedFiles="true" />
+  </Target>
 </Project>
