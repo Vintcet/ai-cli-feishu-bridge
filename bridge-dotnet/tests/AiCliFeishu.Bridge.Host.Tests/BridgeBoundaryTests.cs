@@ -140,6 +140,49 @@ public sealed class BridgeBoundaryTests
     }
 
     [TestMethod]
+    public async Task PassiveHostAssemblesFeishuAdapterWithoutLiveTransport()
+    {
+        var options = BridgeHostOptions.Passive(
+            Path.Combine(Path.GetTempPath(), $"bridge-passive-feishu-{Guid.NewGuid():N}"));
+        using var app = BridgeHostApplication.Build(options);
+        var assembly = app.Services.GetRequiredService<IBridgeFeishuAdapterAssembly>();
+        var snapshot = assembly.Validate();
+
+        Assert.AreEqual("passive", snapshot.Mode);
+        CollectionAssert.AreEquivalent(
+            new[]
+            {
+                "card-renderer",
+                "event-normalizer",
+                "event-pump",
+                "event-source",
+                "gateway",
+                "intent-sink",
+                "interaction-coordinator",
+            },
+            snapshot.Components.ToArray());
+        Assert.IsFalse(snapshot.LiveEventStreamEnabled);
+        Assert.IsFalse(snapshot.OutboundMessagingEnabled);
+        Assert.IsInstanceOfType<PassiveFeishuEventSource>(
+            app.Services.GetRequiredService<IFeishuEventSource>());
+        Assert.IsInstanceOfType<PassiveFeishuGateway>(
+            app.Services.GetRequiredService<IFeishuGateway>());
+        Assert.IsNotNull(app.Services.GetRequiredService<IFeishuCardRenderer>()
+            .CommandMenu());
+
+        var received = 0;
+        await foreach (var _ in app.Services.GetRequiredService<IFeishuEventSource>()
+            .ReadAllAsync())
+        {
+            received++;
+        }
+        Assert.AreEqual(0, received);
+        await Assert.ThrowsExceptionAsync<InvalidOperationException>(() =>
+            app.Services.GetRequiredService<IFeishuGateway>()
+                .SendTextAsync("chat-1", "must-not-send"));
+    }
+
+    [TestMethod]
     public async Task FeishuIntentCanOnlyReachCliThroughStandardCommandGateway()
     {
         var codex = new RecordingRuntimeAdapter(RuntimeNames.Codex);
@@ -185,13 +228,17 @@ public sealed class BridgeBoundaryTests
             [],
             configuredRuntimeIngress,
             configuredFeishuIngress,
-            passive).Validate();
+            passive,
+            [new RecordingFeishuAdapterAssembly()]).Validate();
 
         Assert.IsTrue(configured.Passive);
         Assert.AreEqual(0, configured.RegisteredRuntimes.Count);
         Assert.AreEqual(0, configured.RuntimeAdapters.Count);
         Assert.AreEqual(1, configured.RuntimeEventHandlers);
         Assert.AreEqual(1, configured.FeishuIntentHandlers);
+        Assert.AreEqual("passive", configured.FeishuAdapter.Mode);
+        Assert.IsFalse(configured.FeishuAdapter.LiveEventStreamEnabled);
+        Assert.IsFalse(configured.FeishuAdapter.OutboundMessagingEnabled);
 
         var duplicates = new BridgeBoundaryCatalog(
             [
@@ -200,8 +247,17 @@ public sealed class BridgeBoundaryTests
             ],
             configuredRuntimeIngress,
             configuredFeishuIngress,
-            passive);
+            passive,
+            [new RecordingFeishuAdapterAssembly()]);
         Assert.ThrowsException<InvalidOperationException>(duplicates.Validate);
+
+        var duplicateFeishuAdapters = new BridgeBoundaryCatalog(
+            [],
+            configuredRuntimeIngress,
+            configuredFeishuIngress,
+            passive,
+            [new RecordingFeishuAdapterAssembly(), new RecordingFeishuAdapterAssembly()]);
+        Assert.ThrowsException<InvalidOperationException>(duplicateFeishuAdapters.Validate);
     }
 
     private static RuntimeEventEnvelope Event(string eventId) => new()
@@ -307,6 +363,16 @@ public sealed class BridgeBoundaryTests
             LastCommand = command;
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class RecordingFeishuAdapterAssembly : IBridgeFeishuAdapterAssembly
+    {
+        private static readonly BridgeFeishuAdapterSnapshot snapshot =
+            new("passive", ["test-component"], false, false);
+
+        public BridgeFeishuAdapterSnapshot Validate() => snapshot;
+
+        public BridgeFeishuAdapterSnapshot Snapshot() => snapshot;
     }
 
     private sealed class PromptIntentHandler(

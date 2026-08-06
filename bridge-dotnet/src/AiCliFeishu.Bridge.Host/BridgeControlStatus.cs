@@ -31,9 +31,16 @@ public sealed record BridgeControlRuntimeAdapterStatus(
     string Runtime,
     IReadOnlyList<string> Capabilities);
 
+public sealed record BridgeControlFeishuAdapterStatus(
+    string Mode,
+    IReadOnlyList<string> Components,
+    bool LiveEventStreamEnabled,
+    bool OutboundMessagingEnabled);
+
 public sealed record BridgeControlBoundaryStatus(
     int RuntimeEventHandlers,
     int FeishuIntentHandlers,
+    BridgeControlFeishuAdapterStatus FeishuAdapter,
     bool RuntimeCommandsEnabled,
     string RuntimeCommandStatus,
     IReadOnlyList<BridgeControlRuntimeAdapterStatus> RuntimeAdapters);
@@ -116,6 +123,11 @@ public sealed class BridgeControlStatusReader(
             new BridgeControlBoundaryStatus(
                 boundaries.RuntimeEventHandlers,
                 boundaries.FeishuIntentHandlers,
+                new BridgeControlFeishuAdapterStatus(
+                    boundaries.FeishuAdapter.Mode,
+                    boundaries.FeishuAdapter.Components,
+                    boundaries.FeishuAdapter.LiveEventStreamEnabled,
+                    boundaries.FeishuAdapter.OutboundMessagingEnabled),
                 runtimeCommandsEnabled,
                 runtimeCommandStatus,
                 runtimeAdapters));

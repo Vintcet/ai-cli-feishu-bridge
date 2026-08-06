@@ -38,6 +38,17 @@ public static class BridgeHostApplication
         builder.Services.AddSingleton<BridgeFeishuIntentIngress>();
         builder.Services.AddSingleton<IFeishuIntentSink>(services =>
             services.GetRequiredService<BridgeFeishuIntentIngress>());
+        builder.Services.AddSingleton<IFeishuEventSource, PassiveFeishuEventSource>();
+        builder.Services.AddSingleton<IFeishuGateway, PassiveFeishuGateway>();
+        builder.Services.AddSingleton<IFeishuCardRenderer, FeishuCardRenderer>();
+        builder.Services.AddSingleton<IFeishuCardPatchLedger, InMemoryFeishuCardPatchLedger>();
+        builder.Services.AddSingleton<IFeishuInboundDeduplicator,
+            InMemoryFeishuInboundDeduplicator>();
+        builder.Services.AddSingleton<FeishuEventNormalizer>();
+        builder.Services.AddSingleton<FeishuInteractionCoordinator>();
+        builder.Services.AddSingleton<FeishuEventPump>();
+        builder.Services.AddSingleton<IBridgeFeishuAdapterAssembly,
+            BridgeFeishuAdapterAssembly>();
         builder.Services.AddSingleton<BridgeBoundaryCatalog>();
         builder.Services.AddSingleton<RuntimeAdapterRegistry>(services =>
             services.GetRequiredService<BridgeBoundaryCatalog>().BuildRuntimeRegistry());

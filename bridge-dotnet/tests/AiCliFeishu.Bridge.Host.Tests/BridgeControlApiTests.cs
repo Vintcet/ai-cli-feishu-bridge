@@ -137,6 +137,25 @@ public sealed class BridgeControlApiTests
         var boundaries = root.GetProperty("boundaries");
         Assert.AreEqual(1, boundaries.GetProperty("runtimeEventHandlers").GetInt32());
         Assert.AreEqual(1, boundaries.GetProperty("feishuIntentHandlers").GetInt32());
+        var feishuAdapter = boundaries.GetProperty("feishuAdapter");
+        Assert.AreEqual("passive", feishuAdapter.GetProperty("mode").GetString());
+        Assert.IsFalse(feishuAdapter.GetProperty("liveEventStreamEnabled").GetBoolean());
+        Assert.IsFalse(feishuAdapter.GetProperty("outboundMessagingEnabled").GetBoolean());
+        CollectionAssert.AreEquivalent(
+            new[]
+            {
+                "card-renderer",
+                "event-normalizer",
+                "event-pump",
+                "event-source",
+                "gateway",
+                "intent-sink",
+                "interaction-coordinator",
+            },
+            feishuAdapter.GetProperty("components")
+                .EnumerateArray()
+                .Select(component => component.GetString()!)
+                .ToArray());
         Assert.IsFalse(boundaries.GetProperty("runtimeCommandsEnabled").GetBoolean());
         Assert.AreEqual(
             "blocked_passive_owner",

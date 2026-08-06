@@ -280,6 +280,7 @@ public sealed class BridgeFeishuIntentIngress(
 public sealed record BridgeBoundarySnapshot(
     IReadOnlyList<string> RegisteredRuntimes,
     IReadOnlyList<BridgeRuntimeAdapterSnapshot> RuntimeAdapters,
+    BridgeFeishuAdapterSnapshot FeishuAdapter,
     int RuntimeEventHandlers,
     int FeishuIntentHandlers,
     bool Passive);
@@ -292,9 +293,12 @@ public sealed class BridgeBoundaryCatalog(
     IEnumerable<IRuntimeAdapter> adapters,
     BridgeRuntimeEventIngress runtimeIngress,
     BridgeFeishuIntentIngress feishuIngress,
-    BridgeHostOptions options)
+    BridgeHostOptions options,
+    IEnumerable<IBridgeFeishuAdapterAssembly>? feishuAdapters = null)
 {
     private readonly IRuntimeAdapter[] registeredAdapters = adapters.ToArray();
+    private readonly IBridgeFeishuAdapterAssembly[] registeredFeishuAdapters =
+        feishuAdapters?.ToArray() ?? [];
 
     public RuntimeAdapterRegistry BuildRuntimeRegistry()
     {
@@ -311,6 +315,7 @@ public sealed class BridgeBoundaryCatalog(
         runtimeIngress.ValidateConfiguration();
         feishuIngress.ValidateConfiguration();
         _ = BuildRuntimeRegistry();
+        _ = RequireSingleFeishuAdapter().Validate();
         return Snapshot();
     }
 
@@ -325,10 +330,21 @@ public sealed class BridgeBoundaryCatalog(
         return new(
             runtimeAdapters.Select(adapter => adapter.Runtime).ToArray(),
             runtimeAdapters,
+            RequireSingleFeishuAdapter().Snapshot(),
             runtimeIngress.HandlerCount,
             feishuIngress.HandlerCount,
             options.OwnershipMode is BridgeOwnershipMode.Passive);
     }
+
+    private IBridgeFeishuAdapterAssembly RequireSingleFeishuAdapter() =>
+        registeredFeishuAdapters.Length switch
+        {
+            1 => registeredFeishuAdapters[0],
+            0 => throw new InvalidOperationException(
+                "Bridge Host 尚未注册 Feishu Adapter 装配边界。"),
+            _ => throw new InvalidOperationException(
+                "Bridge Host 只能注册一个 Feishu Adapter，以保证飞书事件和发送所有权唯一。"),
+        };
 }
 
 public sealed class BridgeBoundarySubsystem(BridgeBoundaryCatalog catalog) : IBridgeHostSubsystem
