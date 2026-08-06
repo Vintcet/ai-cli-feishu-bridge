@@ -315,6 +315,8 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 
 - Generic Host / Kestrel 只监听回环地址，默认使用与当前生产端口隔离的 `8876`；
 - `data/bridge-host-{instance}.lock` 使用跨进程独占写句柄实现单实例租约，进程退出后可重新取得；
+- 生产 Store 另有跨语言 `data/bridge-active-owner.lock/owner.json` 所有权租约，契约版本保存在 `protocol/ownership/v1/`。Node 会在加载或写入 Store 前，以完整临时目录写入、刷盘并原子发布该租约；第二个在线 Owner 会被拒绝，有效但 PID 已退出的残留可原子隔离回收，路径类型或元数据损坏则安全拒绝。平滑停止时只有完成 Controller/CLI 清理、Store 刷盘和行为记录器关闭后才释放租约，且释放前核对 `leaseId`，不会删除已替换的 Owner；
+- Passive C# Host 的第一个子系统只读取共享租约并以不含路径、PID、leaseId 或时间的粗粒度健康状态报告 `live`、`stale`、`missing` 或 `invalid`，不会创建、隔离、删除或取得生产租约。`BridgeHostOptions.Validate()` 仍硬性拒绝 `active`，因此这一切片只建立交接协议，不改变生产流量或写入所有权；
 - `/health` 无令牌时只返回存活结果，携带既有本机控制令牌时才返回进程、生命周期、组件和所有权状态；
 - `/control/shutdown` 沿用 JSON Content-Type、Fetch Metadata 和定时比较控制令牌的安全边界；
 - 后台子系统按注册顺序启动、逆序停止，启动失败会清理已启动组件并保留 `faulted` 健康状态；
@@ -346,7 +348,7 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 dotnet test .\bridge-dotnet\tests\AiCliFeishu.Bridge.Host.Tests\AiCliFeishu.Bridge.Host.Tests.csproj -c Release
 ```
 
-Host 子系统的初始化顺序固定为 `PassiveOwnerGuard → Boundary validation → ReadOnlyNodeStoreShadow → BridgeBusinessStateOwner → Feishu Event Pump → OpenCode Event Pump`，停止时按相反顺序执行。后续 M5 纵切片需要继续补齐 Host 内部的 Core / Adapter 运行时装配和完整本机 API，再由控制面板通过显式灰度开关管理 C# Host。只有停止 Node、完成 Store 刷盘并验证锁交接后，才能解除 `active` 闸门；任何时刻仍只允许一个生产写入者。
+Host 子系统的初始化顺序固定为 `PassiveOwnerGuard → Boundary validation → ReadOnlyNodeStoreShadow → BridgeBusinessStateOwner → Feishu Event Pump → OpenCode Event Pump`，停止时按相反顺序执行。Node 回收死亡 PID 的有效租约时，会按旧 `leaseId` 原子改名并保留确定性墓碑；并发启动者因此不能把刚建立的新租约误当成旧租约移动。后续 M5 纵切片需要实现 C# 对同一共享租约的原子取得与身份校验，再由控制面板执行“停止 Node → 等待 PID 退出 → 验证 Store 已刷盘且租约可接管 → 启动 C# Active”的显式事务。只有该切换与回退演练完成后，才能解除 `active` 闸门；任何时刻仍只允许一个生产写入者。
 
 ### M6：删除旧实现
 

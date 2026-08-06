@@ -9,6 +9,9 @@ data/uploads/
 data/hook-test-home/
 data/migration-recordings/
 data/bridge-host-*.lock
+data/bridge-active-owner.lock/
+data/bridge-active-owner.pending-*/
+data/bridge-active-owner.stale-*/
 *.log
 *.log.*
 desktop-control/**/bin/

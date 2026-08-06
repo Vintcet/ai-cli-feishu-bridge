@@ -1,5 +1,6 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 
+import { ActiveOwnerLease } from "./active-owner-lease.js";
 import { BridgeController } from "./bridge-controller.js";
 import { CodexRunner } from "./codex-runner.js";
 import { bridgeConfig } from "./config.js";
@@ -26,6 +27,11 @@ const behaviorRecorder = new BehaviorRecorder({
   maxBytes: bridgeConfig.migrationRecordingMaxBytes,
   maxBackups: bridgeConfig.migrationRecordingMaxBackups,
 });
+const activeOwnerLease = new ActiveOwnerLease(bridgeConfig.dataDirectory, {
+  hostKind: "node",
+  instanceName: "production",
+});
+await activeOwnerLease.acquire();
 const store = new BridgeStore(bridgeConfig.dataDirectory, {
   defaultWorkspaceRoot: bridgeConfig.defaultWorkspaceRoot,
   behaviorRecorder,
@@ -345,6 +351,7 @@ const shutdown = (): void => {
     .then(() => serverClosed)
     .then(() => store.close())
     .then(() => behaviorRecorder.close())
+    .then(() => activeOwnerLease.release())
     .then(() => {
       clearTimeout(forcedExitTimer);
       process.exit(0);

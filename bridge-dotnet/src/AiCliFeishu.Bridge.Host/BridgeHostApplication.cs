@@ -26,6 +26,7 @@ public static class BridgeHostApplication
         builder.Services.AddSingleton(options);
         builder.Services.AddSingleton<BridgeHealthRegistry>();
         builder.Services.AddSingleton<IBridgeInstanceLease, FileBridgeInstanceLease>();
+        builder.Services.AddSingleton<ActiveOwnerLeaseObserver>();
         builder.Services.AddSingleton<IBridgeControlTokenProvider, FileBridgeControlTokenProvider>();
         builder.Services.AddSingleton<BridgeBusinessStateOwner>();
         builder.Services.AddSingleton<IBridgeRuntimeEventHandler>(services =>

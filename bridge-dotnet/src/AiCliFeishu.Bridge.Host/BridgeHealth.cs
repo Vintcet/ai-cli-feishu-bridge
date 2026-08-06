@@ -96,15 +96,6 @@ public interface IBridgeHostSubsystemHealth
     BridgeComponentHealth ComponentHealth { get; }
 }
 
-public sealed class PassiveOwnerGuardSubsystem : IBridgeHostSubsystem
-{
-    public string Name => "production-owner";
-
-    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
-
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
-}
-
 public sealed class BridgeRuntimeWorker(
     IEnumerable<IBridgeHostSubsystem> subsystems,
     BridgeHealthRegistry health,
@@ -124,9 +115,7 @@ public sealed class BridgeRuntimeWorker(
                 started.Add(subsystem);
                 var component = subsystem is IBridgeHostSubsystemHealth provider
                     ? provider.ComponentHealth
-                    : new BridgeComponentHealth(
-                        subsystem.Name,
-                        subsystem is PassiveOwnerGuardSubsystem ? "passive" : "ready");
+                    : new BridgeComponentHealth(subsystem.Name, "ready");
                 health.Report(component.Name, component.Status, component.Detail);
             }
             health.SetLifecycle(BridgeHostLifecycleState.Ready);
