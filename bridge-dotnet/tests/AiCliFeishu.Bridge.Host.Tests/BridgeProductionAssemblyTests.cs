@@ -8,6 +8,7 @@ using AiCliFeishu.Bridge.Adapters.ManagedTerminal;
 using AiCliFeishu.Bridge.Adapters.OpenCode;
 using AiCliFeishu.Bridge.Adapters.Storage;
 using AiCliFeishu.Bridge.Core;
+using AiCliFeishu.Bridge.Protocol;
 
 namespace AiCliFeishu.Bridge.Host.Tests;
 
@@ -722,6 +723,44 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void ActivePreflightRejectsIncompleteRuntimeAdapterSetBeforeResolvingFactories()
+    {
+        var options = ActiveOptions();
+        var services = CompleteActiveServices();
+        var constructed = false;
+        services.AddSingleton<SideEffectProbe>(_ =>
+        {
+            constructed = true;
+            return new SideEffectProbe();
+        });
+        services.RemoveAll<IRuntimeAdapter>();
+        services.AddSingleton<IRuntimeAdapter, CodexRuntimeAdapter>();
+        services.AddSingleton<IRuntimeAdapter, ClaudeCodeRuntimeAdapter>();
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeProductionAssemblyPreflight.Validate(options, services));
+
+        StringAssert.Contains(error.Message, "Runtime Adapter");
+        Assert.IsFalse(constructed);
+    }
+
+    [TestMethod]
+    public void ActivePreflightRejectsRuntimeCommandAliasThatCanOwnAnotherInstance()
+    {
+        var options = ActiveOptions();
+        var services = CompleteActiveServices();
+        services.RemoveAll<IBridgeRuntimeCommandGateway>();
+        services.AddSingleton<IBridgeRuntimeCommandGateway,
+            BridgeRuntimeCommandGateway>();
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeProductionAssemblyPreflight.Validate(options, services));
+
+        StringAssert.Contains(error.Message, nameof(IBridgeRuntimeCommandGateway));
+        StringAssert.Contains(error.Message, "组合根工厂");
+    }
+
+    [TestMethod]
     public void ActivePreflightRejectsDuplicateCapabilityOwner()
     {
         var options = ActiveOptions();
@@ -802,8 +841,34 @@ public sealed class BridgeProductionAssemblyTests
             Owner<IOpenCodeRuntimeLifecycle, RecordingOpenCodeRuntimeLifecycle>(
                 services, BridgeProductionCapability.OpenCodeRuntimeLifecycle),
         };
+        AddCompleteActiveRuntimeAssembly(services);
         services.AddSingleton(new BridgeProductionAssemblyManifest(owners));
         return services;
+    }
+
+    private static void AddCompleteActiveRuntimeAssembly(IServiceCollection services)
+    {
+        services.AddSingleton<IBridgeRuntimeEventHandler>(provider =>
+            (IBridgeRuntimeEventHandler)provider
+                .GetRequiredService<IBridgePersistentBusinessStateOwner>());
+        services.AddSingleton<BridgeRuntimeEventIngress>();
+        services.AddSingleton<IRuntimeEventSink>(provider =>
+            provider.GetRequiredService<BridgeRuntimeEventIngress>());
+        services.AddSingleton<ManagedRuntimeHookNormalizer>();
+        services.AddSingleton<ManagedRuntimeHookBridge>();
+        services.AddSingleton<OpenCodeEventNormalizer>();
+        services.AddSingleton<OpenCodeRuntimeEventPump>();
+        services.AddSingleton<IBridgeRuntimeIngressAssembly,
+            BridgeRuntimeIngressAssembly>();
+        services.AddSingleton<IRuntimeAdapter, CodexRuntimeAdapter>();
+        services.AddSingleton<IRuntimeAdapter, ClaudeCodeRuntimeAdapter>();
+        services.AddSingleton<IRuntimeAdapter, OpenCodeRuntimeAdapter>();
+        services.AddSingleton<RuntimeAdapterRegistry>(_ => new());
+        services.AddSingleton<RuntimeCommandDispatcher>();
+        services.AddSingleton<BridgeRuntimeCommandGateway>();
+        services.AddSingleton<BridgeRuntimeCommandIngress>();
+        services.AddSingleton<IBridgeRuntimeCommandGateway>(provider =>
+            provider.GetRequiredService<BridgeRuntimeCommandIngress>());
     }
 
     private static BridgeProductionCapabilityOwner Owner<TContract, TImplementation>(
@@ -879,10 +944,15 @@ public sealed class BridgeProductionAssemblyTests
             ValueTask.CompletedTask;
     }
     private sealed class RecordingPersistentBusinessStateOwner
-        : IBridgePersistentBusinessStateOwner
+        : IBridgePersistentBusinessStateOwner,
+          IBridgeRuntimeEventHandler
     {
         public BridgeBusinessStateSnapshot Snapshot { get; } =
             BridgeBusinessStateSnapshot.NotInitialized;
+
+        public Task HandleAsync(
+            RuntimeEventEnvelope runtimeEvent,
+            CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
     private sealed class RecordingFeishuCredentialSource : IBridgeFeishuCredentialSource
     {

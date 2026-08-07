@@ -18,8 +18,8 @@ public sealed record BridgeRuntimeIngressSnapshot(
     bool OpenCodeEventStreamEnabled);
 
 /// <summary>
-/// Runtime 入站 Adapter 的被动组合根。它验证 Hook 和 SSE 的原生事件都能经过
-/// 各自 Normalizer 进入唯一标准事件 Sink，但不会开放 Hook HTTP 或订阅 SSE。
+/// Runtime 入站 Adapter 的组合根。它验证 Hook 和 SSE 的原生事件都能经过
+/// 各自 Normalizer 进入唯一标准事件 Sink，并按所有权模式报告真实入口状态。
 /// </summary>
 public sealed class BridgeRuntimeIngressAssembly(
     ManagedRuntimeHookNormalizer managedHookNormalizer,
@@ -53,12 +53,22 @@ public sealed class BridgeRuntimeIngressAssembly(
             throw new InvalidOperationException(
                 "Passive Host 的 Runtime 入站链必须使用无网络 OpenCode 事件源。");
         }
+        if (options.OwnershipMode is BridgeOwnershipMode.Active &&
+            openCodeEventSource is PassiveOpenCodeEventSource)
+        {
+            throw new InvalidOperationException(
+                "Active Host 的 Runtime 入站链不得回退到无网络 OpenCode 事件源。");
+        }
         return Snapshot();
     }
 
-    public BridgeRuntimeIngressSnapshot Snapshot() => new(
-        options.OwnershipMode is BridgeOwnershipMode.Active ? "active" : "passive",
-        componentNames,
-        ManagedHookHttpEnabled: false,
-        OpenCodeEventStreamEnabled: false);
+    public BridgeRuntimeIngressSnapshot Snapshot()
+    {
+        var active = options.OwnershipMode is BridgeOwnershipMode.Active;
+        return new(
+            active ? "active" : "passive",
+            componentNames,
+            ManagedHookHttpEnabled: active,
+            OpenCodeEventStreamEnabled: active);
+    }
 }

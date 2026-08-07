@@ -100,13 +100,6 @@ public static class BridgeHostApplication
         services.AddSingleton<IBridgeFeishuAdapterAssembly,
             BridgeFeishuAdapterAssembly>();
         services.AddSingleton<BridgeBoundaryCatalog>();
-        services.AddSingleton<RuntimeAdapterRegistry>(services =>
-            services.GetRequiredService<BridgeBoundaryCatalog>().BuildRuntimeRegistry());
-        services.AddSingleton<RuntimeCommandDispatcher>();
-        services.AddSingleton<BridgeRuntimeCommandGateway>();
-        services.AddSingleton<BridgeRuntimeCommandIngress>();
-        services.AddSingleton<IBridgeRuntimeCommandGateway>(services =>
-            services.GetRequiredService<BridgeRuntimeCommandIngress>());
         services.AddSingleton<IManagedTerminalDirectory, PassiveManagedTerminalDirectory>();
         services.AddSingleton<IManagedTerminalTransport, PassiveManagedTerminalTransport>();
         services.AddSingleton<IManagedRuntimeLifecycle, PassiveManagedRuntimeLifecycle>();
@@ -114,9 +107,7 @@ public static class BridgeHostApplication
         services.AddSingleton<IOpenCodeEndpointDirectory, PassiveOpenCodeEndpointDirectory>();
         services.AddSingleton<IOpenCodeTransport, PassiveOpenCodeTransport>();
         services.AddSingleton<IOpenCodeRuntimeLifecycle, PassiveOpenCodeRuntimeLifecycle>();
-        services.AddSingleton<IRuntimeAdapter, CodexRuntimeAdapter>();
-        services.AddSingleton<IRuntimeAdapter, ClaudeCodeRuntimeAdapter>();
-        services.AddSingleton<IRuntimeAdapter, OpenCodeRuntimeAdapter>();
+        AddRuntimeCommandAssembly(services);
         services.AddSingleton<IBridgeStoreShadow, ReadOnlyNodeStoreShadow>();
         services.AddSingleton<BridgeControlStatusReader>();
         services.AddSingleton<IBridgeHostSubsystem, PassiveOwnerGuardSubsystem>();
@@ -197,6 +188,9 @@ public static class BridgeHostApplication
                 .GetRequiredService<IOpenCodeRuntimeLifecycle>());
         services.AddSingleton<IOpenCodeTransport,
             ActiveOpenCodeTransport>();
+        services.AddSingleton<IBridgeRuntimeIngressAssembly,
+            BridgeRuntimeIngressAssembly>();
+        AddRuntimeCommandAssembly(services);
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             (IBridgeHostSubsystem)services
                 .GetRequiredService<IOpenCodeEndpointDirectory>());
@@ -255,5 +249,26 @@ public static class BridgeHostApplication
         ]));
         // The production graph is complete, but BridgeHostOptions.Validate keeps
         // the Active cutover gate closed until the end-to-end owner audit lands.
+    }
+
+    private static void AddRuntimeCommandAssembly(IServiceCollection services)
+    {
+        services.AddSingleton<IRuntimeAdapter, CodexRuntimeAdapter>();
+        services.AddSingleton<IRuntimeAdapter, ClaudeCodeRuntimeAdapter>();
+        services.AddSingleton<IRuntimeAdapter, OpenCodeRuntimeAdapter>();
+        services.AddSingleton<RuntimeAdapterRegistry>(services =>
+        {
+            var registry = new RuntimeAdapterRegistry();
+            foreach (var adapter in services.GetServices<IRuntimeAdapter>())
+            {
+                registry.Register(adapter);
+            }
+            return registry;
+        });
+        services.AddSingleton<RuntimeCommandDispatcher>();
+        services.AddSingleton<BridgeRuntimeCommandGateway>();
+        services.AddSingleton<BridgeRuntimeCommandIngress>();
+        services.AddSingleton<IBridgeRuntimeCommandGateway>(services =>
+            services.GetRequiredService<BridgeRuntimeCommandIngress>());
     }
 }

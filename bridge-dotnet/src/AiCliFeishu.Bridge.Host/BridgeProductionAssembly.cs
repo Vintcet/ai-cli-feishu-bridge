@@ -4,6 +4,7 @@ using AiCliFeishu.Bridge.Adapters.Feishu;
 using AiCliFeishu.Bridge.Adapters.ManagedTerminal;
 using AiCliFeishu.Bridge.Adapters.OpenCode;
 using AiCliFeishu.Bridge.Adapters.Storage;
+using AiCliFeishu.Bridge.Core;
 
 namespace AiCliFeishu.Bridge.Host;
 
@@ -179,6 +180,36 @@ internal static class BridgeProductionAssemblyPreflight
         passivePorts.Select(port => port.Implementation)
             .Append(typeof(PassiveOwnerGuardSubsystem))
             .ToHashSet();
+    private static readonly Type[] runtimeAdapterTypes =
+    [
+        typeof(CodexRuntimeAdapter),
+        typeof(ClaudeCodeRuntimeAdapter),
+        typeof(OpenCodeRuntimeAdapter),
+    ];
+    private static readonly (Type Contract, Type Implementation)[]
+        activeRuntimePorts =
+    [
+        (typeof(IBridgeRuntimeIngressAssembly),
+            typeof(BridgeRuntimeIngressAssembly)),
+    ];
+    private static readonly Type[] activeRuntimeConcreteServices =
+    [
+        typeof(BridgeRuntimeEventIngress),
+        typeof(ManagedRuntimeHookNormalizer),
+        typeof(ManagedRuntimeHookBridge),
+        typeof(OpenCodeEventNormalizer),
+        typeof(OpenCodeRuntimeEventPump),
+        typeof(RuntimeCommandDispatcher),
+        typeof(BridgeRuntimeCommandGateway),
+        typeof(BridgeRuntimeCommandIngress),
+    ];
+    private static readonly Type[] activeRuntimeFactoryServices =
+    [
+        typeof(IBridgeRuntimeEventHandler),
+        typeof(IRuntimeEventSink),
+        typeof(RuntimeAdapterRegistry),
+        typeof(IBridgeRuntimeCommandGateway),
+    ];
 
     public static BridgeProductionAssemblySnapshot Validate(
         BridgeHostOptions options,
@@ -309,6 +340,7 @@ internal static class BridgeProductionAssemblyPreflight
             typeof(BridgeInstanceLeaseService),
             typeof(ActiveOwnerLeaseHostedService),
             typeof(BridgeRuntimeWorker));
+        ValidateActiveRuntimeAssembly(services);
 
         foreach (var owner in manifest.Owners)
         {
@@ -353,6 +385,67 @@ internal static class BridgeProductionAssemblyPreflight
         {
             throw new InvalidOperationException(
                 $"{hostName} 后台生命周期注册缺失、重复、越序或包含未知实现。");
+        }
+    }
+
+    private static void ValidateActiveRuntimeAssembly(IServiceCollection services)
+    {
+        foreach (var (contract, implementation) in activeRuntimePorts)
+        {
+            RequireSingleImplementation(
+                services,
+                contract,
+                implementation,
+                "Active Host 标准 Runtime 装配");
+        }
+        foreach (var implementation in activeRuntimeConcreteServices)
+        {
+            RequireSingleImplementation(
+                services,
+                implementation,
+                implementation,
+                "Active Host 标准 Runtime 装配");
+        }
+
+        var adapters = services
+            .Where(descriptor => descriptor.ServiceType == typeof(IRuntimeAdapter))
+            .ToArray();
+        if (adapters.Length != runtimeAdapterTypes.Length ||
+            adapters.Where((descriptor, index) =>
+                descriptor.ImplementationType != runtimeAdapterTypes[index]).Any())
+        {
+            throw new InvalidOperationException(
+                "Active Host 必须按 Codex、Claude Code、OpenCode 顺序唯一注册标准 Runtime Adapter。");
+        }
+
+        foreach (var serviceType in activeRuntimeFactoryServices)
+        {
+            var registrations = services
+                .Where(descriptor => descriptor.ServiceType == serviceType)
+                .ToArray();
+            if (registrations.Length != 1 ||
+                registrations[0].ImplementationFactory is null)
+            {
+                throw new InvalidOperationException(
+                    $"Active Host 标准 Runtime 装配端口 {serviceType.Name} 必须且只能使用组合根工厂。");
+            }
+        }
+    }
+
+    private static void RequireSingleImplementation(
+        IServiceCollection services,
+        Type contract,
+        Type implementation,
+        string owner)
+    {
+        var registrations = services
+            .Where(descriptor => descriptor.ServiceType == contract)
+            .ToArray();
+        if (registrations.Length != 1 ||
+            registrations[0].ImplementationType != implementation)
+        {
+            throw new InvalidOperationException(
+                $"{owner}端口 {contract.Name} 必须且只能使用 {implementation.Name}。");
         }
     }
 
