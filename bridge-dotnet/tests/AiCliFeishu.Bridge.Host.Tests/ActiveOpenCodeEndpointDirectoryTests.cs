@@ -111,6 +111,27 @@ public sealed class ActiveOpenCodeEndpointDirectoryTests
     }
 
     [TestMethod]
+    public async Task AvailableRegistrationNeverReplacesAnExistingGeneration()
+    {
+        var directory = Directory();
+        await directory.StartAsync(CancellationToken.None);
+        var existing = directory.Register(5_109, Cwd);
+
+        Assert.IsNull(directory.TryRegisterAvailable(
+            5_109,
+            Path.Combine(Cwd, "replacement")));
+        var current = directory.ListRegistrations().Single();
+        Assert.AreEqual(existing.Generation, current.Generation);
+        Assert.AreEqual(existing.Cwd, current.Cwd);
+
+        var available = directory.TryRegisterAvailable(
+            5_110,
+            Path.Combine(Cwd, "available"));
+        Assert.IsNotNull(available);
+        Assert.AreEqual(2, directory.ListRegistrations().Count);
+    }
+
+    [TestMethod]
     public async Task SessionMappingMovesAtomicallyAndOnlyCurrentOwnerCanForgetIt()
     {
         var directory = Directory();

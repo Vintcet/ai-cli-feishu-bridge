@@ -668,7 +668,8 @@ internal sealed class ActiveManagedRuntimeLifecycle :
     {
         RuntimeNames.Codex => RuntimeNames.Codex,
         RuntimeNames.ClaudeCode => RuntimeNames.ClaudeCode,
-        _ => throw new ArgumentException("托管终端运行时无效。", nameof(runtime)),
+        RuntimeNames.OpenCode => RuntimeNames.OpenCode,
+        _ => throw new ArgumentException("桌面运行时无效。", nameof(runtime)),
     };
 
     private static string RequireSessionId(string sessionExternalId) =>

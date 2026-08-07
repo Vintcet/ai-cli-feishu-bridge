@@ -332,6 +332,36 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void PassivePreflightRejectsConcreteActiveOpenCodeRuntimeLifecycle()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<ActiveOpenCodeRuntimeLifecycle>()));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+    }
+
+    [TestMethod]
+    public void PassivePreflightRejectsOpenCodeRuntimeLifecycleOwnerBeforeResolvingIt()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+        var constructed = false;
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<IBridgeOpenCodeRuntimeLifecycleOwner>(_ =>
+                {
+                    constructed = true;
+                    throw new InvalidOperationException("must not resolve");
+                })));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+        Assert.IsFalse(constructed);
+    }
+
+    [TestMethod]
     public void PassivePreflightRejectsOpenCodeEventStreamOwnerBeforeResolvingIt()
     {
         var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
@@ -383,61 +413,19 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
-    public void ActiveAssemblyIsIsolatedAndFailsClosedWhileCapabilitiesAreMissing()
+    public void ActiveAssemblyIsCompleteAndIsolatedWhileCutoverGateRemainsClosed()
     {
         var options = ActiveOptions();
         var services = new ServiceCollection();
 
         BridgeHostApplication.AddOwnershipAssembly(services, options);
-        var error = Assert.ThrowsException<InvalidOperationException>(() =>
-            BridgeProductionAssemblyPreflight.Validate(options, services));
+        var snapshot = BridgeProductionAssemblyPreflight.Validate(options, services);
 
-        StringAssert.Contains(error.Message, "Active Host 生产装配不完整");
-        Assert.IsFalse(error.Message.Contains(
-            nameof(BridgeProductionCapability.ActiveOwnerLease),
-            StringComparison.Ordinal));
-        Assert.IsFalse(error.Message.Contains(
-            nameof(BridgeProductionCapability.ProductionStoreOwner),
-            StringComparison.Ordinal));
-        Assert.IsFalse(error.Message.Contains(
-            nameof(BridgeProductionCapability.PersistentBusinessState),
-            StringComparison.Ordinal));
-        Assert.IsFalse(error.Message.Contains(
-            nameof(BridgeProductionCapability.FeishuCredentials),
-            StringComparison.Ordinal));
-        Assert.IsFalse(error.Message.Contains(
-            nameof(BridgeProductionCapability.FeishuEventStream),
-            StringComparison.Ordinal));
-        Assert.IsFalse(error.Message.Contains(
-            nameof(BridgeProductionCapability.FeishuOutboundMessaging),
-            StringComparison.Ordinal));
-        Assert.IsFalse(error.Message.Contains(
-            nameof(BridgeProductionCapability.ManagedTerminalDirectory),
-            StringComparison.Ordinal));
-        Assert.IsFalse(error.Message.Contains(
-            nameof(BridgeProductionCapability.ManagedTerminalTransport),
-            StringComparison.Ordinal));
-        Assert.IsFalse(error.Message.Contains(
-            nameof(BridgeProductionCapability.ManagedRuntimeLifecycle),
-            StringComparison.Ordinal));
-        Assert.IsFalse(error.Message.Contains(
-            nameof(BridgeProductionCapability.ManagedHookIngress),
-            StringComparison.Ordinal));
-        Assert.IsFalse(error.Message.Contains(
-            nameof(BridgeProductionCapability.ManagedHookResponses),
-            StringComparison.Ordinal));
-        Assert.IsFalse(error.Message.Contains(
-            nameof(BridgeProductionCapability.OpenCodeEndpointDirectory),
-            StringComparison.Ordinal));
-        Assert.IsFalse(error.Message.Contains(
-            nameof(BridgeProductionCapability.OpenCodeEventStream),
-            StringComparison.Ordinal));
-        Assert.IsFalse(error.Message.Contains(
-            nameof(BridgeProductionCapability.OpenCodeTransport),
-            StringComparison.Ordinal));
-        StringAssert.Contains(
-            error.Message,
-            nameof(BridgeProductionCapability.OpenCodeRuntimeLifecycle));
+        Assert.AreEqual("active", snapshot.Mode);
+        Assert.IsTrue(snapshot.Complete);
+        CollectionAssert.AreEqual(
+            Enum.GetValues<BridgeProductionCapability>(),
+            snapshot.Capabilities.ToArray());
         Assert.IsFalse(services.Any(descriptor =>
             descriptor.ImplementationType?.Name.StartsWith("Passive", StringComparison.Ordinal) == true));
         Assert.IsFalse(services.Any(descriptor =>
@@ -466,7 +454,7 @@ public sealed class BridgeProductionAssemblyTests
         var manifest = (BridgeProductionAssemblyManifest)services.Single(descriptor =>
             descriptor.ServiceType == typeof(BridgeProductionAssemblyManifest))
             .ImplementationInstance!;
-        Assert.AreEqual(14, manifest.Owners.Count);
+        Assert.AreEqual(15, manifest.Owners.Count);
         Assert.AreEqual(
             BridgeProductionCapability.ActiveOwnerLease,
             manifest.Owners[0].Capability);
@@ -547,6 +535,12 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveOpenCodeTransport),
             manifest.Owners[13].OwnerType);
+        Assert.AreEqual(
+            BridgeProductionCapability.OpenCodeRuntimeLifecycle,
+            manifest.Owners[14].Capability);
+        Assert.AreEqual(
+            typeof(ActiveOpenCodeRuntimeLifecycle),
+            manifest.Owners[14].OwnerType);
         var businessOwner = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgePersistentBusinessStateOwner));
         Assert.AreEqual(
@@ -614,6 +608,14 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveOpenCodeTransport),
             openCodeTransport.ImplementationType);
+        var openCodeLifecycle = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IOpenCodeRuntimeLifecycle));
+        Assert.AreEqual(
+            typeof(ActiveOpenCodeRuntimeLifecycle),
+            openCodeLifecycle.ImplementationType);
+        var openCodeLifecycleAlias = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IBridgeOpenCodeRuntimeLifecycleOwner));
+        Assert.IsNotNull(openCodeLifecycleAlias.ImplementationFactory);
         var openCodeRegistrations = services.Single(descriptor =>
             descriptor.ServiceType ==
                 typeof(IBridgeOpenCodeEndpointRegistrationDirectory));
@@ -636,6 +638,16 @@ public sealed class BridgeProductionAssemblyTests
             Assert.AreSame(
                 eventStreamOwner,
                 openCodeEventOwner.ImplementationFactory(provider));
+        }
+        var openCodeLifecycleOwner = new RecordingOpenCodeRuntimeLifecycle();
+        var openCodeLifecycleServices = new ServiceCollection();
+        openCodeLifecycleServices.AddSingleton<IOpenCodeRuntimeLifecycle>(
+            openCodeLifecycleOwner);
+        using (var provider = openCodeLifecycleServices.BuildServiceProvider())
+        {
+            Assert.AreSame(
+                openCodeLifecycleOwner,
+                openCodeLifecycleAlias.ImplementationFactory(provider));
         }
         var lifecycleOwner = new RecordingManagedRuntimeLifecycle();
         var lifecycleServices = new ServiceCollection();
@@ -986,6 +998,9 @@ public sealed class BridgeProductionAssemblyTests
         public IReadOnlyList<OpenCodeEndpoint> ListReady() => [];
         public BridgeOpenCodeEndpointIdentity Register(int port, string cwd) =>
             throw new NotSupportedException();
+        public BridgeOpenCodeEndpointIdentity? TryRegisterAvailable(
+            int port,
+            string cwd) => throw new NotSupportedException();
         public bool Unregister(int port) => false;
         public bool Unregister(int port, long generation) => false;
         public bool SetReady(int port, long generation, bool ready) => false;
@@ -1038,8 +1053,19 @@ public sealed class BridgeProductionAssemblyTests
         public Task StopAsync(RuntimeCommandContext context, string sessionExternalId, string? reason, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
-    private sealed class RecordingOpenCodeRuntimeLifecycle : IOpenCodeRuntimeLifecycle
+    private sealed class RecordingOpenCodeRuntimeLifecycle :
+        IBridgeOpenCodeRuntimeLifecycleOwner
     {
+        public ValueTask<BridgeOpenCodeEndpointIdentity> ReserveAsync(
+            string cwd,
+            string? sessionExternalId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new BridgeOpenCodeEndpointIdentity(
+                5_100,
+                cwd,
+                1,
+                Ready: false));
+        public bool Release(int port) => true;
         public Task LaunchAsync(RuntimeCommandContext context, string requestedExternalId, string cwd, bool elevated, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task ResumeAsync(RuntimeCommandContext context, string sessionExternalId, string? cwd, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task WaitUntilReadyAsync(RuntimeCommandContext context, string sessionExternalId, CancellationToken cancellationToken = default) => Task.CompletedTask;

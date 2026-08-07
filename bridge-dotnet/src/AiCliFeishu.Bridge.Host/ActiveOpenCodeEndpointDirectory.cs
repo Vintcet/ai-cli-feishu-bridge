@@ -27,6 +27,8 @@ internal interface IBridgeOpenCodeEndpointRegistrationDirectory
 
     BridgeOpenCodeEndpointIdentity Register(int port, string cwd);
 
+    BridgeOpenCodeEndpointIdentity? TryRegisterAvailable(int port, string cwd);
+
     bool Unregister(int port);
 
     bool Unregister(int port, long generation);
@@ -239,6 +241,30 @@ internal sealed class ActiveOpenCodeEndpointDirectory :
             var generation = checked(++nextGeneration);
             var registration = new Registration(port, cwd, generation, Ready: false);
             registrations[port] = registration;
+            SignalChangedLocked();
+            return Identity(registration);
+        }
+    }
+
+    public BridgeOpenCodeEndpointIdentity? TryRegisterAvailable(int port, string cwd)
+    {
+        EnsureActive();
+        port = RequirePort(port);
+        cwd = NormalizeCwd(cwd);
+        lock (sync)
+        {
+            EnsureInitializedLocked();
+            if (registrations.ContainsKey(port))
+            {
+                return null;
+            }
+            if (registrations.Count >= registrationCapacity)
+            {
+                throw new InvalidOperationException("OpenCode 端点目录已达到容量上限。");
+            }
+            var generation = checked(++nextGeneration);
+            var registration = new Registration(port, cwd, generation, Ready: false);
+            registrations.Add(port, registration);
             SignalChangedLocked();
             return Identity(registration);
         }

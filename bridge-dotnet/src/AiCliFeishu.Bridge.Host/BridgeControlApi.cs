@@ -479,8 +479,107 @@ public static class BridgeControlApi
     internal static void MapOpenCodeEndpointApi(WebApplication app)
     {
         ArgumentNullException.ThrowIfNull(app);
+        app.MapPost(
+            "/opencode/launch",
+            (Func<HttpContext, Task<IResult>>)HandleOpenCodeLaunchAsync);
         MapOpenCodeEndpointIngress(app, "/opencode/register", register: true);
         MapOpenCodeEndpointIngress(app, "/opencode/unregister", register: false);
+    }
+
+    private static async Task<IResult> HandleOpenCodeLaunchAsync(
+        HttpContext context)
+    {
+        const int maximumBodyBytes = 1024 * 1024;
+        var request = context.Request;
+        var cancellationToken = context.RequestAborted;
+        if (!HasApplicationJsonContentType(request))
+        {
+            return Results.Json(
+                new ControlError(false, "请求必须使用 application/json。"),
+                statusCode: StatusCodes.Status415UnsupportedMediaType);
+        }
+        if (IsCrossSite(request))
+        {
+            return Results.Json(
+                new ControlError(false, "拒绝跨站请求。"),
+                statusCode: StatusCodes.Status403Forbidden);
+        }
+        var tokenProvider = context.RequestServices
+            .GetRequiredService<IBridgeControlTokenProvider>();
+        if (!await IsAuthenticatedAsync(request, tokenProvider, cancellationToken))
+        {
+            return Results.Json(
+                new ControlError(false, "本机控制令牌无效。"),
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+        var body = await ReadLimitedJsonObjectAsync(
+            request,
+            maximumBodyBytes,
+            cancellationToken);
+        if (body.Status is ManagedJsonReadStatus.TooLarge)
+        {
+            return Results.Json(
+                new ControlError(false, "请求体不能超过 1 MiB。"),
+                statusCode: StatusCodes.Status413PayloadTooLarge);
+        }
+        if (body.Status is not ManagedJsonReadStatus.Valid)
+        {
+            return Results.Json(
+                new ControlError(false, "请求格式不正确。"),
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+        var options = context.RequestServices.GetRequiredService<BridgeHostOptions>();
+        if (options.OwnershipMode is not BridgeOwnershipMode.Active)
+        {
+            return Results.Json(
+                new ControlError(false, "Passive Host 不预留 OpenCode 端口。"),
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+
+        var cwd = body.Value.TryGetProperty("cwd", out var cwdValue) &&
+            cwdValue.ValueKind is JsonValueKind.String
+                ? cwdValue.GetString()?.Trim()
+                : null;
+        var hasSession = body.Value.TryGetProperty("sessionId", out var sessionValue);
+        var sessionId = hasSession && sessionValue.ValueKind is JsonValueKind.String
+            ? sessionValue.GetString()?.Trim()
+            : null;
+        if (string.IsNullOrEmpty(cwd) || cwd.Length > 1024 ||
+            hasSession && sessionValue.ValueKind is not JsonValueKind.String ||
+            sessionId?.Length > 512)
+        {
+            return Results.Json(
+                new ControlError(false, "OpenCode 启动参数不正确。"),
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var lifecycle = context.RequestServices
+            .GetRequiredService<IBridgeOpenCodeRuntimeLifecycleOwner>();
+        try
+        {
+            var identity = await lifecycle.ReserveAsync(
+                cwd,
+                sessionId,
+                cancellationToken);
+            return Results.Ok(new
+            {
+                ok = true,
+                port = identity.Port,
+                cwd = identity.Cwd,
+            });
+        }
+        catch (ArgumentException)
+        {
+            return Results.Json(
+                new ControlError(false, "OpenCode 启动参数不正确。"),
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+        catch (InvalidOperationException)
+        {
+            return Results.Json(
+                new ControlError(false, "OpenCode 启动端口当前不可用。"),
+                statusCode: StatusCodes.Status409Conflict);
+        }
     }
 
     private static async Task<IResult> HandleOpenCodeEndpointIngressAsync(
@@ -543,7 +642,9 @@ public static class BridgeControlApi
         {
             if (!register)
             {
-                directory.Unregister(port);
+                context.RequestServices
+                    .GetRequiredService<IBridgeOpenCodeRuntimeLifecycleOwner>()
+                    .Release(port);
                 return Results.Ok(new { ok = true, port });
             }
             var cwd = body.Value.TryGetProperty("cwd", out var cwdValue) &&

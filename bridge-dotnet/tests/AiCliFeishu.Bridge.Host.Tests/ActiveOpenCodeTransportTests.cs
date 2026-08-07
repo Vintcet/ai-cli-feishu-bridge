@@ -442,6 +442,9 @@ public sealed class ActiveOpenCodeTransportTests
             string sessionExternalId) => Current && Equals(Target, identity);
         public BridgeOpenCodeEndpointIdentity Register(int port, string cwd) =>
             throw new NotSupportedException();
+        public BridgeOpenCodeEndpointIdentity? TryRegisterAvailable(
+            int port,
+            string cwd) => throw new NotSupportedException();
         public bool Unregister(int port) => false;
         public bool Unregister(int port, long generation) => false;
         public bool SetReady(int port, long generation, bool ready) => false;

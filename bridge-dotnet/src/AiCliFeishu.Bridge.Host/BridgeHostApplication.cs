@@ -190,6 +190,11 @@ public static class BridgeHostApplication
         services.AddSingleton<IBridgeOpenCodeEndpointRegistrationDirectory>(services =>
             (IBridgeOpenCodeEndpointRegistrationDirectory)services
                 .GetRequiredService<IOpenCodeEndpointDirectory>());
+        services.AddSingleton<IOpenCodeRuntimeLifecycle,
+            ActiveOpenCodeRuntimeLifecycle>();
+        services.AddSingleton<IBridgeOpenCodeRuntimeLifecycleOwner>(services =>
+            (IBridgeOpenCodeRuntimeLifecycleOwner)services
+                .GetRequiredService<IOpenCodeRuntimeLifecycle>());
         services.AddSingleton<IOpenCodeTransport,
             ActiveOpenCodeTransport>();
         services.AddSingleton<IBridgeHostSubsystem>(services =>
@@ -244,9 +249,11 @@ public static class BridgeHostApplication
             new(
                 BridgeProductionCapability.OpenCodeTransport,
                 typeof(ActiveOpenCodeTransport)),
+            new(
+                BridgeProductionCapability.OpenCodeRuntimeLifecycle,
+                typeof(ActiveOpenCodeRuntimeLifecycle)),
         ]));
-        // Production ports are registered only by their owning migration slices.
-        // The incomplete manifest fails preflight and prevents Active mode from
-        // building a provider or acquiring this lease until every owner exists.
+        // The production graph is complete, but BridgeHostOptions.Validate keeps
+        // the Active cutover gate closed until the end-to-end owner audit lands.
     }
 }
