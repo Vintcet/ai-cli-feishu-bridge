@@ -96,6 +96,11 @@ public interface IBridgeHostSubsystemHealth
     BridgeComponentHealth ComponentHealth { get; }
 }
 
+public interface IBridgeBackgroundSubsystem
+{
+    Task? Completion { get; }
+}
+
 public sealed class BridgeRuntimeWorker(
     IEnumerable<IBridgeHostSubsystem> subsystems,
     BridgeHealthRegistry health,
@@ -119,7 +124,7 @@ public sealed class BridgeRuntimeWorker(
                 health.Report(component.Name, component.Status, component.Detail);
             }
             health.SetLifecycle(BridgeHostLifecycleState.Ready);
-            await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken);
+            await AwaitShutdownOrBackgroundFailureAsync(stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -155,5 +160,33 @@ public sealed class BridgeRuntimeWorker(
                     ? BridgeHostLifecycleState.Faulted
                     : BridgeHostLifecycleState.Stopped);
         }
+    }
+
+    private async Task AwaitShutdownOrBackgroundFailureAsync(
+        CancellationToken stoppingToken)
+    {
+        var completions = started
+            .OfType<IBridgeBackgroundSubsystem>()
+            .Select(subsystem => subsystem.Completion)
+            .Where(completion => completion is not null)
+            .Cast<Task>()
+            .ToArray();
+        if (completions.Length == 0)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken);
+            return;
+        }
+
+        var shutdown = Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken);
+        var completed = await Task.WhenAny(completions.Append(shutdown));
+        stoppingToken.ThrowIfCancellationRequested();
+        if (ReferenceEquals(completed, shutdown))
+        {
+            await shutdown;
+            return;
+        }
+        await completed;
+        throw new InvalidOperationException(
+            "Bridge Host 后台子系统在停止信号前意外退出。");
     }
 }

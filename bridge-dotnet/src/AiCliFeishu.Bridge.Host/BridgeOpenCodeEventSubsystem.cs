@@ -9,7 +9,8 @@ namespace AiCliFeishu.Bridge.Host;
 /// </summary>
 public sealed class BridgeOpenCodeEventSubsystem :
     IBridgeHostSubsystem,
-    IBridgeHostSubsystemHealth
+    IBridgeHostSubsystemHealth,
+    IBridgeBackgroundSubsystem
 {
     private static readonly TimeSpan DefaultRetryBase = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan DefaultRetryMaximum = TimeSpan.FromSeconds(30);
@@ -69,6 +70,19 @@ public sealed class BridgeOpenCodeEventSubsystem :
     }
 
     public string Name => "opencode-event-pump";
+
+    public Task? Completion
+    {
+        get
+        {
+            lock (sync)
+            {
+                return options.OwnershipMode is BridgeOwnershipMode.Active
+                    ? supervisor
+                    : null;
+            }
+        }
+    }
 
     public BridgeComponentHealth ComponentHealth
     {
@@ -175,6 +189,7 @@ public sealed class BridgeOpenCodeEventSubsystem :
         IBridgeOpenCodeEventStreamOwner source,
         CancellationToken cancellationToken)
     {
+        await Task.Yield();
         try
         {
             while (true)

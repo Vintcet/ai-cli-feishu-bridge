@@ -150,6 +150,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveFeishuCredentialSource),
         typeof(ActiveFeishuEventSource),
         typeof(ActiveFeishuGateway),
+        typeof(ActiveFeishuIntentHandler),
         typeof(ActiveManagedTerminalDirectory),
         typeof(ActiveManagedTerminalTransport),
         typeof(ActiveManagedRuntimeLifecycle),
@@ -209,6 +210,32 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IRuntimeEventSink),
         typeof(RuntimeAdapterRegistry),
         typeof(IBridgeRuntimeCommandGateway),
+    ];
+    private static readonly (Type Contract, Type Implementation)[]
+        activeFeishuPorts =
+    [
+        (typeof(IFeishuCardRenderer), typeof(FeishuCardRenderer)),
+        (typeof(IFeishuCardPatchLedger), typeof(InMemoryFeishuCardPatchLedger)),
+        (typeof(IFeishuInboundDeduplicator),
+            typeof(InMemoryFeishuInboundDeduplicator)),
+        (typeof(IBridgeFeishuAdapterAssembly),
+            typeof(BridgeFeishuAdapterAssembly)),
+    ];
+    private static readonly Type[] activeFeishuConcreteServices =
+    [
+        typeof(ActiveFeishuIntentHandler),
+        typeof(BridgeFeishuIntentIngress),
+        typeof(FeishuEventNormalizer),
+        typeof(FeishuInteractionCoordinator),
+        typeof(FeishuEventPump),
+        typeof(BridgeBoundaryCatalog),
+        typeof(BridgeBoundarySubsystem),
+        typeof(BridgeFeishuEventSubsystem),
+    ];
+    private static readonly Type[] activeFeishuFactoryServices =
+    [
+        typeof(IBridgeFeishuIntentHandler),
+        typeof(IFeishuIntentSink),
     ];
 
     public static BridgeProductionAssemblySnapshot Validate(
@@ -341,6 +368,7 @@ internal static class BridgeProductionAssemblyPreflight
             typeof(ActiveOwnerLeaseHostedService),
             typeof(BridgeRuntimeWorker));
         ValidateActiveRuntimeAssembly(services);
+        ValidateActiveFeishuAssembly(services);
 
         foreach (var owner in manifest.Owners)
         {
@@ -428,6 +456,38 @@ internal static class BridgeProductionAssemblyPreflight
             {
                 throw new InvalidOperationException(
                     $"Active Host 标准 Runtime 装配端口 {serviceType.Name} 必须且只能使用组合根工厂。");
+            }
+        }
+    }
+
+    private static void ValidateActiveFeishuAssembly(IServiceCollection services)
+    {
+        foreach (var (contract, implementation) in activeFeishuPorts)
+        {
+            RequireSingleImplementation(
+                services,
+                contract,
+                implementation,
+                "Active Host 标准飞书装配");
+        }
+        foreach (var implementation in activeFeishuConcreteServices)
+        {
+            RequireSingleImplementation(
+                services,
+                implementation,
+                implementation,
+                "Active Host 标准飞书装配");
+        }
+        foreach (var serviceType in activeFeishuFactoryServices)
+        {
+            var registrations = services
+                .Where(descriptor => descriptor.ServiceType == serviceType)
+                .ToArray();
+            if (registrations.Length != 1 ||
+                registrations[0].ImplementationFactory is null)
+            {
+                throw new InvalidOperationException(
+                    $"Active Host 标准飞书装配端口 {serviceType.Name} 必须且只能使用组合根工厂。");
             }
         }
     }

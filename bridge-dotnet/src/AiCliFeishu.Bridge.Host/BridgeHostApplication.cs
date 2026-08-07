@@ -85,21 +85,12 @@ public static class BridgeHostApplication
         services.AddSingleton<OpenCodeRuntimeEventPump>();
         services.AddSingleton<IBridgeRuntimeIngressAssembly,
             BridgeRuntimeIngressAssembly>();
-        services.AddSingleton<BridgeFeishuIntentIngress>();
-        services.AddSingleton<IFeishuIntentSink>(services =>
-            services.GetRequiredService<BridgeFeishuIntentIngress>());
         services.AddSingleton<IFeishuEventSource, PassiveFeishuEventSource>();
         services.AddSingleton<IFeishuGateway, PassiveFeishuGateway>();
-        services.AddSingleton<IFeishuCardRenderer, FeishuCardRenderer>();
-        services.AddSingleton<IFeishuCardPatchLedger, InMemoryFeishuCardPatchLedger>();
-        services.AddSingleton<IFeishuInboundDeduplicator,
-            InMemoryFeishuInboundDeduplicator>();
-        services.AddSingleton<FeishuEventNormalizer>();
-        services.AddSingleton<FeishuInteractionCoordinator>();
-        services.AddSingleton<FeishuEventPump>();
-        services.AddSingleton<IBridgeFeishuAdapterAssembly,
-            BridgeFeishuAdapterAssembly>();
+        AddFeishuAdapterAssembly(services);
         services.AddSingleton<BridgeBoundaryCatalog>();
+        services.AddSingleton<BridgeBoundarySubsystem>();
+        services.AddSingleton<BridgeFeishuEventSubsystem>();
         services.AddSingleton<IManagedTerminalDirectory, PassiveManagedTerminalDirectory>();
         services.AddSingleton<IManagedTerminalTransport, PassiveManagedTerminalTransport>();
         services.AddSingleton<IManagedRuntimeLifecycle, PassiveManagedRuntimeLifecycle>();
@@ -111,12 +102,14 @@ public static class BridgeHostApplication
         services.AddSingleton<IBridgeStoreShadow, ReadOnlyNodeStoreShadow>();
         services.AddSingleton<BridgeControlStatusReader>();
         services.AddSingleton<IBridgeHostSubsystem, PassiveOwnerGuardSubsystem>();
-        services.AddSingleton<IBridgeHostSubsystem, BridgeBoundarySubsystem>();
+        services.AddSingleton<IBridgeHostSubsystem>(services =>
+            services.GetRequiredService<BridgeBoundarySubsystem>());
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             (IBridgeHostSubsystem)services.GetRequiredService<IBridgeStoreShadow>());
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             services.GetRequiredService<BridgeBusinessStateOwner>());
-        services.AddSingleton<IBridgeHostSubsystem, BridgeFeishuEventSubsystem>();
+        services.AddSingleton<IBridgeHostSubsystem>(services =>
+            services.GetRequiredService<BridgeFeishuEventSubsystem>());
         services.AddSingleton<IBridgeHostSubsystem, BridgeOpenCodeEventSubsystem>();
         services.AddHostedService<BridgeInstanceLeaseService>();
         services.AddHostedService<BridgeRuntimeWorker>();
@@ -150,6 +143,10 @@ public static class BridgeHostApplication
                 .GetRequiredService<IBridgeFeishuCredentialSource>());
         services.AddSingleton<IFeishuEventSource, ActiveFeishuEventSource>();
         services.AddSingleton<IFeishuGateway, ActiveFeishuGateway>();
+        services.AddSingleton<ActiveFeishuIntentHandler>();
+        services.AddSingleton<IBridgeFeishuIntentHandler>(services =>
+            services.GetRequiredService<ActiveFeishuIntentHandler>());
+        AddFeishuAdapterAssembly(services);
         services.AddSingleton<IManagedTerminalDirectory,
             ActiveManagedTerminalDirectory>();
         services.AddSingleton<IBridgeManagedTerminalRegistrationDirectory>(services =>
@@ -191,9 +188,16 @@ public static class BridgeHostApplication
         services.AddSingleton<IBridgeRuntimeIngressAssembly,
             BridgeRuntimeIngressAssembly>();
         AddRuntimeCommandAssembly(services);
+        services.AddSingleton<BridgeBoundaryCatalog>();
+        services.AddSingleton<BridgeBoundarySubsystem>();
+        services.AddSingleton<BridgeFeishuEventSubsystem>();
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             (IBridgeHostSubsystem)services
                 .GetRequiredService<IOpenCodeEndpointDirectory>());
+        services.AddSingleton<IBridgeHostSubsystem>(services =>
+            services.GetRequiredService<BridgeBoundarySubsystem>());
+        services.AddSingleton<IBridgeHostSubsystem>(services =>
+            services.GetRequiredService<BridgeFeishuEventSubsystem>());
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             ActivatorUtilities.CreateInstance<BridgeOpenCodeEventSubsystem>(services));
         services.AddHostedService<BridgeInstanceLeaseService>();
@@ -247,8 +251,8 @@ public static class BridgeHostApplication
                 BridgeProductionCapability.OpenCodeRuntimeLifecycle,
                 typeof(ActiveOpenCodeRuntimeLifecycle)),
         ]));
-        // The production graph is complete, but BridgeHostOptions.Validate keeps
-        // the Active cutover gate closed until the end-to-end owner audit lands.
+        // Production owners and the audited adapter roots are assembled here, but
+        // the Active cutover gate stays closed until full behavior parity is proven.
     }
 
     private static void AddRuntimeCommandAssembly(IServiceCollection services)
@@ -270,5 +274,21 @@ public static class BridgeHostApplication
         services.AddSingleton<BridgeRuntimeCommandIngress>();
         services.AddSingleton<IBridgeRuntimeCommandGateway>(services =>
             services.GetRequiredService<BridgeRuntimeCommandIngress>());
+    }
+
+    private static void AddFeishuAdapterAssembly(IServiceCollection services)
+    {
+        services.AddSingleton<BridgeFeishuIntentIngress>();
+        services.AddSingleton<IFeishuIntentSink>(services =>
+            services.GetRequiredService<BridgeFeishuIntentIngress>());
+        services.AddSingleton<IFeishuCardRenderer, FeishuCardRenderer>();
+        services.AddSingleton<IFeishuCardPatchLedger, InMemoryFeishuCardPatchLedger>();
+        services.AddSingleton<IFeishuInboundDeduplicator,
+            InMemoryFeishuInboundDeduplicator>();
+        services.AddSingleton<FeishuEventNormalizer>();
+        services.AddSingleton<FeishuInteractionCoordinator>();
+        services.AddSingleton<FeishuEventPump>();
+        services.AddSingleton<IBridgeFeishuAdapterAssembly,
+            BridgeFeishuAdapterAssembly>();
     }
 }

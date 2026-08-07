@@ -436,7 +436,7 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(typeof(ActiveProductionStoreOwner), storeOwner.ImplementationType);
         var subsystems = services.Where(descriptor =>
             descriptor.ServiceType == typeof(IBridgeHostSubsystem)).ToArray();
-        Assert.AreEqual(6, subsystems.Length);
+        Assert.AreEqual(8, subsystems.Length);
         Assert.IsTrue(subsystems.All(descriptor =>
             descriptor.ImplementationFactory is not null));
         var hostedServices = services.Where(descriptor =>
@@ -675,8 +675,19 @@ public sealed class BridgeProductionAssemblyTests
         Assert.IsTrue(services.Any(descriptor =>
             descriptor.ServiceType == typeof(IBridgeRuntimeEventHandler) &&
             descriptor.ImplementationFactory is not null));
-        Assert.IsFalse(services.Any(descriptor =>
-            descriptor.ServiceType == typeof(IBridgeFeishuIntentHandler)));
+        var feishuHandler = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IBridgeFeishuIntentHandler));
+        Assert.IsNotNull(feishuHandler.ImplementationFactory);
+        Assert.AreEqual(
+            typeof(ActiveFeishuIntentHandler),
+            services.Single(descriptor =>
+                descriptor.ServiceType == typeof(ActiveFeishuIntentHandler))
+                .ImplementationType);
+        Assert.AreEqual(
+            typeof(BridgeFeishuAdapterAssembly),
+            services.Single(descriptor =>
+                descriptor.ServiceType == typeof(IBridgeFeishuAdapterAssembly))
+                .ImplementationType);
         Assert.IsFalse(Directory.Exists(options.DataDirectory));
     }
 
@@ -757,6 +768,41 @@ public sealed class BridgeProductionAssemblyTests
             BridgeProductionAssemblyPreflight.Validate(options, services));
 
         StringAssert.Contains(error.Message, nameof(IBridgeRuntimeCommandGateway));
+        StringAssert.Contains(error.Message, "组合根工厂");
+    }
+
+    [TestMethod]
+    public void ActivePreflightRejectsMissingFeishuIntentHandlerBeforeResolvingFactories()
+    {
+        var options = ActiveOptions();
+        var services = CompleteActiveServices();
+        var constructed = false;
+        services.AddSingleton<SideEffectProbe>(_ =>
+        {
+            constructed = true;
+            return new SideEffectProbe();
+        });
+        services.RemoveAll<IBridgeFeishuIntentHandler>();
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeProductionAssemblyPreflight.Validate(options, services));
+
+        StringAssert.Contains(error.Message, nameof(IBridgeFeishuIntentHandler));
+        Assert.IsFalse(constructed);
+    }
+
+    [TestMethod]
+    public void ActivePreflightRejectsFeishuIntentSinkThatCanOwnAnotherInstance()
+    {
+        var options = ActiveOptions();
+        var services = CompleteActiveServices();
+        services.RemoveAll<IFeishuIntentSink>();
+        services.AddSingleton<IFeishuIntentSink, BridgeFeishuIntentIngress>();
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeProductionAssemblyPreflight.Validate(options, services));
+
+        StringAssert.Contains(error.Message, nameof(IFeishuIntentSink));
         StringAssert.Contains(error.Message, "组合根工厂");
     }
 
@@ -842,6 +888,7 @@ public sealed class BridgeProductionAssemblyTests
                 services, BridgeProductionCapability.OpenCodeRuntimeLifecycle),
         };
         AddCompleteActiveRuntimeAssembly(services);
+        AddCompleteActiveFeishuAssembly(services);
         services.AddSingleton(new BridgeProductionAssemblyManifest(owners));
         return services;
     }
@@ -869,6 +916,28 @@ public sealed class BridgeProductionAssemblyTests
         services.AddSingleton<BridgeRuntimeCommandIngress>();
         services.AddSingleton<IBridgeRuntimeCommandGateway>(provider =>
             provider.GetRequiredService<BridgeRuntimeCommandIngress>());
+    }
+
+    private static void AddCompleteActiveFeishuAssembly(IServiceCollection services)
+    {
+        services.AddSingleton<ActiveFeishuIntentHandler>();
+        services.AddSingleton<IBridgeFeishuIntentHandler>(provider =>
+            provider.GetRequiredService<ActiveFeishuIntentHandler>());
+        services.AddSingleton<BridgeFeishuIntentIngress>();
+        services.AddSingleton<IFeishuIntentSink>(provider =>
+            provider.GetRequiredService<BridgeFeishuIntentIngress>());
+        services.AddSingleton<IFeishuCardRenderer, FeishuCardRenderer>();
+        services.AddSingleton<IFeishuCardPatchLedger, InMemoryFeishuCardPatchLedger>();
+        services.AddSingleton<IFeishuInboundDeduplicator,
+            InMemoryFeishuInboundDeduplicator>();
+        services.AddSingleton<FeishuEventNormalizer>();
+        services.AddSingleton<FeishuInteractionCoordinator>();
+        services.AddSingleton<FeishuEventPump>();
+        services.AddSingleton<IBridgeFeishuAdapterAssembly,
+            BridgeFeishuAdapterAssembly>();
+        services.AddSingleton<BridgeBoundaryCatalog>();
+        services.AddSingleton<BridgeBoundarySubsystem>();
+        services.AddSingleton<BridgeFeishuEventSubsystem>();
     }
 
     private static BridgeProductionCapabilityOwner Owner<TContract, TImplementation>(

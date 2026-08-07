@@ -129,6 +129,13 @@ public sealed class BridgeFeishuAdapterAssembly(
             throw new InvalidOperationException(
                 "Passive Host 的 Feishu Adapter 必须使用无网络事件源和拒绝发送的 Gateway。");
         }
+        if (options.OwnershipMode is BridgeOwnershipMode.Active &&
+            (eventSource is PassiveFeishuEventSource ||
+             gateway is PassiveFeishuGateway))
+        {
+            throw new InvalidOperationException(
+                "Active Host 的 Feishu Adapter 不得回退到 Passive 事件源或 Gateway。");
+        }
         return Snapshot();
     }
 
