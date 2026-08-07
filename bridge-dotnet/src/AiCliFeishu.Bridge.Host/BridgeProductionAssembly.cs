@@ -25,6 +25,35 @@ internal interface IBridgePersistentBusinessStateOwner
     BridgeBusinessStateSnapshot Snapshot { get; }
 }
 
+internal sealed record BridgeApprovalClaim(
+    ApprovalState Approval,
+    SessionState Session);
+
+internal interface IBridgeActiveApprovalStateOwner
+{
+    BridgeBusinessStateSnapshot Snapshot { get; }
+
+    ValueTask<BridgeApprovalClaim?> TryClaimApprovalAsync(
+        string requestId,
+        string sessionId,
+        CancellationToken cancellationToken = default);
+
+    ValueTask ReleaseApprovalClaimAsync(
+        string requestId,
+        CancellationToken cancellationToken = default);
+
+    ValueTask<BridgeApprovalClaim?> ResolveClaimedApprovalAsync(
+        string requestId,
+        string sessionId,
+        string resolution,
+        CancellationToken cancellationToken = default);
+
+    ValueTask<BridgeApprovalClaim?> DeferClaimedApprovalAsync(
+        string requestId,
+        string sessionId,
+        CancellationToken cancellationToken = default);
+}
+
 internal interface IBridgeFeishuCredentialSource
 {
     BridgeFeishuCredentials Credentials { get; }
@@ -133,6 +162,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IBridgeActiveOwnerLeaseLifecycle),
         typeof(IBridgeProductionStoreOwner),
         typeof(IBridgePersistentBusinessStateOwner),
+        typeof(IBridgeActiveApprovalStateOwner),
         typeof(IBridgeFeishuCredentialSource),
         typeof(IBridgeManagedTerminalRegistrationDirectory),
         typeof(IBridgeManagedRuntimeLaunchCoordinator),
@@ -151,6 +181,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveFeishuEventSource),
         typeof(ActiveFeishuGateway),
         typeof(ActiveFeishuPromptCoordinator),
+        typeof(ActiveFeishuApprovalCoordinator),
         typeof(ActiveFeishuIntentHandler),
         typeof(ActiveManagedTerminalDirectory),
         typeof(ActiveManagedTerminalTransport),
@@ -225,6 +256,7 @@ internal static class BridgeProductionAssemblyPreflight
     private static readonly Type[] activeFeishuConcreteServices =
     [
         typeof(ActiveFeishuPromptCoordinator),
+        typeof(ActiveFeishuApprovalCoordinator),
         typeof(ActiveFeishuIntentHandler),
         typeof(BridgeFeishuIntentIngress),
         typeof(FeishuEventNormalizer),
@@ -236,6 +268,7 @@ internal static class BridgeProductionAssemblyPreflight
     ];
     private static readonly Type[] activeFeishuFactoryServices =
     [
+        typeof(IBridgeActiveApprovalStateOwner),
         typeof(IBridgeFeishuIntentHandler),
         typeof(IFeishuIntentSink),
     ];

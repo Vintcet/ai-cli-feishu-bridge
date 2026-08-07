@@ -547,6 +547,9 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActivePersistentBusinessStateOwner),
             businessOwner.ImplementationType);
+        Assert.IsNotNull(services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IBridgeActiveApprovalStateOwner))
+            .ImplementationFactory);
         var credentials = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgeFeishuCredentialSource));
         Assert.AreEqual(
@@ -684,6 +687,11 @@ public sealed class BridgeProductionAssemblyTests
                 descriptor.ServiceType == typeof(ActiveFeishuIntentHandler))
                 .ImplementationType);
         Assert.AreEqual(
+            typeof(ActiveFeishuApprovalCoordinator),
+            services.Single(descriptor =>
+                descriptor.ServiceType == typeof(ActiveFeishuApprovalCoordinator))
+                .ImplementationType);
+        Assert.AreEqual(
             typeof(BridgeFeishuAdapterAssembly),
             services.Single(descriptor =>
                 descriptor.ServiceType == typeof(IBridgeFeishuAdapterAssembly))
@@ -789,6 +797,35 @@ public sealed class BridgeProductionAssemblyTests
 
         StringAssert.Contains(error.Message, nameof(IBridgeFeishuIntentHandler));
         Assert.IsFalse(constructed);
+    }
+
+    [TestMethod]
+    public void ActivePreflightRejectsMissingApprovalCoordinator()
+    {
+        var options = ActiveOptions();
+        var services = CompleteActiveServices();
+        services.RemoveAll<ActiveFeishuApprovalCoordinator>();
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeProductionAssemblyPreflight.Validate(options, services));
+
+        StringAssert.Contains(error.Message, nameof(ActiveFeishuApprovalCoordinator));
+    }
+
+    [TestMethod]
+    public void ActivePreflightRejectsApprovalStateAliasThatCanOwnAnotherInstance()
+    {
+        var options = ActiveOptions();
+        var services = CompleteActiveServices();
+        services.RemoveAll<IBridgeActiveApprovalStateOwner>();
+        services.AddSingleton<IBridgeActiveApprovalStateOwner,
+            RecordingPersistentBusinessStateOwner>();
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeProductionAssemblyPreflight.Validate(options, services));
+
+        StringAssert.Contains(error.Message, nameof(IBridgeActiveApprovalStateOwner));
+        StringAssert.Contains(error.Message, "组合根工厂");
     }
 
     [TestMethod]
@@ -920,7 +957,11 @@ public sealed class BridgeProductionAssemblyTests
 
     private static void AddCompleteActiveFeishuAssembly(IServiceCollection services)
     {
+        services.AddSingleton<IBridgeActiveApprovalStateOwner>(provider =>
+            (IBridgeActiveApprovalStateOwner)provider
+                .GetRequiredService<IBridgePersistentBusinessStateOwner>());
         services.AddSingleton<ActiveFeishuPromptCoordinator>();
+        services.AddSingleton<ActiveFeishuApprovalCoordinator>();
         services.AddSingleton<ActiveFeishuIntentHandler>();
         services.AddSingleton<IBridgeFeishuIntentHandler>(provider =>
             provider.GetRequiredService<ActiveFeishuIntentHandler>());
@@ -1015,6 +1056,7 @@ public sealed class BridgeProductionAssemblyTests
     }
     private sealed class RecordingPersistentBusinessStateOwner
         : IBridgePersistentBusinessStateOwner,
+          IBridgeActiveApprovalStateOwner,
           IBridgeRuntimeEventHandler
     {
         public BridgeBusinessStateSnapshot Snapshot { get; } =
@@ -1023,6 +1065,30 @@ public sealed class BridgeProductionAssemblyTests
         public Task HandleAsync(
             RuntimeEventEnvelope runtimeEvent,
             CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public ValueTask<BridgeApprovalClaim?> TryClaimApprovalAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<BridgeApprovalClaim?>(null);
+
+        public ValueTask ReleaseApprovalClaimAsync(
+            string requestId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.CompletedTask;
+
+        public ValueTask<BridgeApprovalClaim?> ResolveClaimedApprovalAsync(
+            string requestId,
+            string sessionId,
+            string resolution,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<BridgeApprovalClaim?>(null);
+
+        public ValueTask<BridgeApprovalClaim?> DeferClaimedApprovalAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<BridgeApprovalClaim?>(null);
     }
     private sealed class RecordingFeishuCredentialSource : IBridgeFeishuCredentialSource
     {

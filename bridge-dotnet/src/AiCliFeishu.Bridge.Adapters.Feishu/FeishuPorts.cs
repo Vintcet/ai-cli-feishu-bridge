@@ -94,6 +94,10 @@ public interface IFeishuCardRenderer
         FeishuApprovalView approval,
         string resolution);
 
+    FeishuCardView DeferredApproval(
+        FeishuSessionView session,
+        FeishuApprovalView approval);
+
     FeishuCardView PendingInput(
         FeishuSessionView session,
         string requestId,

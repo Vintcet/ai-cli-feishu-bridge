@@ -125,6 +125,9 @@ public static class BridgeHostApplication
             (IBridgeHostSubsystem)services.GetRequiredService<IBridgeProductionStoreOwner>());
         services.AddSingleton<IBridgePersistentBusinessStateOwner,
             ActivePersistentBusinessStateOwner>();
+        services.AddSingleton<IBridgeActiveApprovalStateOwner>(services =>
+            (IBridgeActiveApprovalStateOwner)services
+                .GetRequiredService<IBridgePersistentBusinessStateOwner>());
         services.AddSingleton<IBridgeRuntimeEventHandler>(services =>
             (IBridgeRuntimeEventHandler)services
                 .GetRequiredService<IBridgePersistentBusinessStateOwner>());
@@ -144,6 +147,7 @@ public static class BridgeHostApplication
         services.AddSingleton<IFeishuEventSource, ActiveFeishuEventSource>();
         services.AddSingleton<IFeishuGateway, ActiveFeishuGateway>();
         services.AddSingleton<ActiveFeishuPromptCoordinator>();
+        services.AddSingleton<ActiveFeishuApprovalCoordinator>();
         services.AddSingleton<ActiveFeishuIntentHandler>();
         services.AddSingleton<IBridgeFeishuIntentHandler>(services =>
             services.GetRequiredService<ActiveFeishuIntentHandler>());

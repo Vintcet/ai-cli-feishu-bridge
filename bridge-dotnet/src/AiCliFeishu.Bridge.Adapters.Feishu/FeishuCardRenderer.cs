@@ -212,6 +212,19 @@ public sealed class FeishuCardRenderer : IFeishuCardRenderer
             [Markdown($"**会话：** {session.Label}\n**工具：** {approval.ToolName}\n\n{result}")]);
     }
 
+    public FeishuCardView DeferredApproval(
+        FeishuSessionView session,
+        FeishuApprovalView approval)
+    {
+        var runtime = RuntimeName(session.Runtime);
+        return Card(
+            "blue",
+            $"{runtime} 已转回 PC 审批",
+            [Markdown(
+                $"**会话：** {session.Label}\n**工具：** {approval.ToolName}\n\n" +
+                "已通知 AI CLI 飞书助手，请在电脑端审批窗口处理。")]);
+    }
+
     public FeishuCardView PendingInput(
         FeishuSessionView session,
         string requestId,

@@ -120,6 +120,37 @@ public sealed class FeishuInteractionCoordinatorTests
     }
 
     [TestMethod]
+    public async Task DeferredApprovalUsesDesktopCardWithoutResolvingPendingState()
+    {
+        var gateway = new RecordingFeishuGateway();
+        var coordinator = Coordinator(gateway);
+        var pending = new ApprovalState(
+            "approval-1",
+            "session-1",
+            ApprovalStatuses.Pending,
+            Origin,
+            Origin.AddMinutes(10),
+            ["card-1"]);
+
+        await coordinator.SynchronizeDeferredApprovalAsync(
+            pending,
+            Session(),
+            Approval());
+        await coordinator.SynchronizeDeferredApprovalAsync(
+            pending,
+            Session(),
+            Approval());
+
+        Assert.AreEqual(ApprovalStatuses.Pending, pending.Status);
+        Assert.AreEqual(1, gateway.Patches.Count);
+        var title = gateway.Patches[0].Card.Content["header"]!["title"]![
+            "content"]!.GetValue<string>();
+        var json = gateway.Patches[0].Card.Content.ToJsonString();
+        StringAssert.Contains(title, "已转回 PC 审批");
+        Assert.IsFalse(json.Contains("approval_allow", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
     public async Task FailedPatchCanBeRetried()
     {
         var gateway = new RecordingFeishuGateway { FailPatchCount = 1 };

@@ -8,13 +8,18 @@ public sealed record NodeStoreSessionExtensionPatch(
     string SessionId,
     IReadOnlyDictionary<string, JsonElement> Values);
 
+public sealed record NodeStoreApprovalExtensionPatch(
+    string RequestId,
+    IReadOnlyDictionary<string, JsonElement> Values);
+
 public static class NodeStoreBusinessStateMerger
 {
     public static NodeStoreSnapshot Merge(
         NodeStoreSnapshot store,
         SessionDirectoryState sessions,
         ApprovalRegistryState approvals,
-        NodeStoreSessionExtensionPatch? sessionExtensionPatch = null)
+        NodeStoreSessionExtensionPatch? sessionExtensionPatch = null,
+        NodeStoreApprovalExtensionPatch? approvalExtensionPatch = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(sessions);
@@ -25,7 +30,10 @@ public static class NodeStoreBusinessStateMerger
                 store.Sessions,
                 sessions,
                 sessionExtensionPatch),
-            Approvals = MergeApprovals(store.Approvals, approvals),
+            Approvals = MergeApprovals(
+                store.Approvals,
+                approvals,
+                approvalExtensionPatch),
         };
     }
 
@@ -66,29 +74,45 @@ public static class NodeStoreBusinessStateMerger
         SessionStoreRecord? current,
         SessionState state,
         IReadOnlyDictionary<string, JsonElement>? extensionPatch) => new()
-    {
-        SessionId = state.SessionId,
-        ShortId = current?.ShortId ?? ShortSessionId(state.SessionId),
-        Cwd = state.Cwd,
-        ProjectName = current?.ProjectName ?? ProjectName(state.Cwd),
-        Status = state.Status,
-        Runtime = state.Runtime,
-        OpenedAt = Timestamp(current?.OpenedAt, state.OpenedAt),
-        LastSeenAt = Timestamp(current?.LastSeenAt, state.LastSeenAt),
-        EndedAt = OptionalTimestamp(current?.EndedAt, state.EndedAt),
-        LastError = state.LastError,
-        ExtensionData = MergeExtensions(current?.ExtensionData, extensionPatch),
-    };
+        {
+            SessionId = state.SessionId,
+            ShortId = current?.ShortId ?? ShortSessionId(state.SessionId),
+            Cwd = state.Cwd,
+            ProjectName = current?.ProjectName ?? ProjectName(state.Cwd),
+            Status = state.Status,
+            Runtime = state.Runtime,
+            OpenedAt = Timestamp(current?.OpenedAt, state.OpenedAt),
+            LastSeenAt = Timestamp(current?.LastSeenAt, state.LastSeenAt),
+            EndedAt = OptionalTimestamp(current?.EndedAt, state.EndedAt),
+            LastError = state.LastError,
+            ExtensionData = MergeExtensions(current?.ExtensionData, extensionPatch),
+        };
 
     private static ApprovalStoreDocument MergeApprovals(
         ApprovalStoreDocument document,
-        ApprovalRegistryState state)
+        ApprovalRegistryState state,
+        NodeStoreApprovalExtensionPatch? extensionPatch)
     {
+        if (extensionPatch is not null &&
+            (!state.Requests.ContainsKey(extensionPatch.RequestId) ||
+             extensionPatch.Values.Any(item =>
+                 string.IsNullOrWhiteSpace(item.Key) ||
+                 item.Value.ValueKind is JsonValueKind.Undefined)))
+        {
+            throw new InvalidDataException("审批扩展字段补丁无效。");
+        }
         var records = state.Requests.ToDictionary(
             item => item.Key,
             item => MergeApproval(
                 document.Requests.GetValueOrDefault(item.Key),
-                item.Value),
+                item.Value,
+                extensionPatch is { } patch &&
+                string.Equals(
+                    item.Key,
+                    patch.RequestId,
+                    StringComparison.Ordinal)
+                        ? patch.Values
+                        : null),
             StringComparer.Ordinal);
         return new ApprovalStoreDocument
         {
@@ -99,22 +123,23 @@ public static class NodeStoreBusinessStateMerger
 
     private static ApprovalStoreRecord MergeApproval(
         ApprovalStoreRecord? current,
-        ApprovalState state) => new()
-    {
-        RequestId = state.RequestId,
-        SessionId = state.SessionId,
-        TurnId = ValueOrExisting(state.TurnId, current?.TurnId),
-        Cwd = ValueOrExisting(state.Cwd, current?.Cwd),
-        ToolName = ValueOrExisting(state.ToolName, current?.ToolName),
-        ToolPreview = ValueOrExisting(state.ToolPreview, current?.ToolPreview),
-        CreatedAt = Timestamp(current?.CreatedAt, state.CreatedAt),
-        ExpiresAt = Timestamp(current?.ExpiresAt, state.ExpiresAt),
-        Status = state.Status,
-        MessageIds = state.MessageIds.Distinct(StringComparer.Ordinal).ToList(),
-        Resolution = state.Resolution,
-        ResolvedAt = OptionalTimestamp(current?.ResolvedAt, state.ResolvedAt),
-        ExtensionData = Clone(current?.ExtensionData),
-    };
+        ApprovalState state,
+        IReadOnlyDictionary<string, JsonElement>? extensionPatch) => new()
+        {
+            RequestId = state.RequestId,
+            SessionId = state.SessionId,
+            TurnId = ValueOrExisting(state.TurnId, current?.TurnId),
+            Cwd = ValueOrExisting(state.Cwd, current?.Cwd),
+            ToolName = ValueOrExisting(state.ToolName, current?.ToolName),
+            ToolPreview = ValueOrExisting(state.ToolPreview, current?.ToolPreview),
+            CreatedAt = Timestamp(current?.CreatedAt, state.CreatedAt),
+            ExpiresAt = Timestamp(current?.ExpiresAt, state.ExpiresAt),
+            Status = state.Status,
+            MessageIds = state.MessageIds.Distinct(StringComparer.Ordinal).ToList(),
+            Resolution = state.Resolution,
+            ResolvedAt = OptionalTimestamp(current?.ResolvedAt, state.ResolvedAt),
+            ExtensionData = MergeExtensions(current?.ExtensionData, extensionPatch),
+        };
 
     private static string ValueOrExisting(string value, string? existing) =>
         string.IsNullOrEmpty(value) ? existing ?? string.Empty : value;

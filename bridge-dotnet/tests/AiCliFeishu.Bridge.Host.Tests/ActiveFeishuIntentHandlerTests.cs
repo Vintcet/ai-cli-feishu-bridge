@@ -431,6 +431,14 @@ public sealed class ActiveFeishuIntentHandlerTests
                 business,
                 runtimeCommands,
                 gateway);
+            var renderer = new FeishuCardRenderer();
+            var approvals = new ActiveFeishuApprovalCoordinator(
+                new RejectingApprovalStateOwner(business.Snapshot),
+                runtimeCommands,
+                new FeishuInteractionCoordinator(
+                    gateway,
+                    renderer,
+                    new InMemoryFeishuCardPatchLedger()));
             return new(
                 new(
                     options,
@@ -439,8 +447,9 @@ public sealed class ActiveFeishuIntentHandlerTests
                     launches,
                     runtimeCommands,
                     gateway,
-                    new FeishuCardRenderer(),
-                    prompts),
+                    renderer,
+                    prompts,
+                    approvals),
                 store,
                 gateway,
                 runtimeCommands);
@@ -580,6 +589,36 @@ public sealed class ActiveFeishuIntentHandlerTests
         BridgeBusinessStateSnapshot snapshot) : IBridgePersistentBusinessStateOwner
     {
         public BridgeBusinessStateSnapshot Snapshot { get; } = snapshot;
+    }
+
+    private sealed class RejectingApprovalStateOwner(
+        BridgeBusinessStateSnapshot snapshot) : IBridgeActiveApprovalStateOwner
+    {
+        public BridgeBusinessStateSnapshot Snapshot { get; } = snapshot;
+
+        public ValueTask<BridgeApprovalClaim?> TryClaimApprovalAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default) =>
+            throw new AssertFailedException("意图处理器测试不应进入审批协调器。");
+
+        public ValueTask ReleaseApprovalClaimAsync(
+            string requestId,
+            CancellationToken cancellationToken = default) =>
+            throw new AssertFailedException("意图处理器测试不应进入审批协调器。");
+
+        public ValueTask<BridgeApprovalClaim?> ResolveClaimedApprovalAsync(
+            string requestId,
+            string sessionId,
+            string resolution,
+            CancellationToken cancellationToken = default) =>
+            throw new AssertFailedException("意图处理器测试不应进入审批协调器。");
+
+        public ValueTask<BridgeApprovalClaim?> DeferClaimedApprovalAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default) =>
+            throw new AssertFailedException("意图处理器测试不应进入审批协调器。");
     }
 
     private sealed class RecordingLaunchCoordinator : IBridgeManagedRuntimeLaunchCoordinator

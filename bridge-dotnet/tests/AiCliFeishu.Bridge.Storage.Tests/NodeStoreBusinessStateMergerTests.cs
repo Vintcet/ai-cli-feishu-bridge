@@ -110,6 +110,35 @@ public sealed class NodeStoreBusinessStateMergerTests
         Assert.IsFalse(extensions.ContainsKey("MANAGEDTERMINALID"));
     }
 
+    [TestMethod]
+    public void ApprovalExtensionPatchPreservesPendingStateAndUnknownFields()
+    {
+        var source = Store();
+        source.Approvals.Requests["approval-1"].ExtensionData![
+            "DESKTOPAPPROVALREQUESTED"] = JsonSerializer.SerializeToElement(false);
+        var core = NodeStoreCoreProjection.Project(source);
+        var patch = new NodeStoreApprovalExtensionPatch(
+            "approval-1",
+            new Dictionary<string, JsonElement>
+            {
+                ["desktopApprovalRequested"] = JsonSerializer.SerializeToElement(true),
+            });
+
+        var merged = NodeStoreBusinessStateMerger.Merge(
+            source,
+            core.Sessions,
+            core.Approvals,
+            approvalExtensionPatch: patch);
+
+        var approval = merged.Approvals.Requests["approval-1"];
+        Assert.AreEqual(ApprovalStatuses.Pending, approval.Status);
+        Assert.IsTrue(approval.ExtensionData!["desktopApprovalRequested"].GetBoolean());
+        Assert.AreEqual(
+            "keep-approval",
+            approval.ExtensionData["futureApproval"].GetString());
+        Assert.IsFalse(approval.ExtensionData.ContainsKey("DESKTOPAPPROVALREQUESTED"));
+    }
+
     private static NodeStoreSnapshot Store()
     {
         var store = EmptyStore();

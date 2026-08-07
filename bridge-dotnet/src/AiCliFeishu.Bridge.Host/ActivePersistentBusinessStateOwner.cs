@@ -10,6 +10,7 @@ internal sealed class ActivePersistentBusinessStateOwner(
     IBridgeProductionStoreOwner storeOwner,
     TimeProvider? timeProvider = null)
     : IBridgePersistentBusinessStateOwner,
+      IBridgeActiveApprovalStateOwner,
       IBridgeRuntimeEventHandler,
       IBridgeHostSubsystem,
       IBridgeHostSubsystemHealth
@@ -85,6 +86,173 @@ internal sealed class ActivePersistentBusinessStateOwner(
     {
         _ = cancellationToken;
         return Task.CompletedTask;
+    }
+
+    public async ValueTask<BridgeApprovalClaim?> TryClaimApprovalAsync(
+        string requestId,
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            var current = RequireInitialized();
+            if (!current.Approvals.Requests.TryGetValue(requestId, out var approval) ||
+                approval.Status != ApprovalStatuses.Pending ||
+                !string.Equals(approval.SessionId, sessionId, StringComparison.Ordinal) ||
+                !current.Sessions.Sessions.TryGetValue(sessionId, out var session))
+            {
+                return null;
+            }
+            var claim = ApprovalStateMachine.Claim(current.Approvals, requestId);
+            if (!claim.Value)
+            {
+                return null;
+            }
+            Volatile.Write(ref snapshot, current with { Approvals = claim.State });
+            return new(approval, session);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public async ValueTask ReleaseApprovalClaimAsync(
+        string requestId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            var current = RequireInitialized();
+            var approvals = ApprovalStateMachine.ReleaseClaim(
+                current.Approvals,
+                requestId);
+            if (!ReferenceEquals(approvals, current.Approvals))
+            {
+                Volatile.Write(ref snapshot, current with { Approvals = approvals });
+            }
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public async ValueTask<BridgeApprovalClaim?> ResolveClaimedApprovalAsync(
+        string requestId,
+        string sessionId,
+        string resolution,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        if (resolution is not ApprovalResolutions.Allow and not ApprovalResolutions.Deny)
+        {
+            throw new ArgumentOutOfRangeException(nameof(resolution));
+        }
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            var current = RequireInitialized();
+            if (!TryClaimedApproval(
+                    current,
+                    requestId,
+                    sessionId,
+                    out var approval,
+                    out var session))
+            {
+                return null;
+            }
+            var resolvedAt = Latest(
+                clock.GetUtcNow(),
+                approval.CreatedAt,
+                session.LastSeenAt);
+            var resolved = ApprovalStateMachine.ResolveClaimed(
+                current.Approvals,
+                requestId,
+                resolution,
+                resolvedAt);
+            if (!resolved.Value)
+            {
+                Volatile.Write(ref snapshot, current with { Approvals = resolved.State });
+                return null;
+            }
+            var sessions = SessionStateMachine.Transition(
+                current.Sessions,
+                sessionId,
+                resolution == ApprovalResolutions.Allow
+                    ? SessionStatuses.Running
+                    : SessionStatuses.Waiting,
+                resolvedAt);
+            var next = current with
+            {
+                Revision = current.Revision + 1,
+                Sessions = sessions,
+                Approvals = resolved.State,
+            };
+            await PersistAsync(next, cancellationToken);
+            Volatile.Write(ref snapshot, next);
+            return new(
+                next.Approvals.Requests[requestId],
+                next.Sessions.Sessions[sessionId]);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public async ValueTask<BridgeApprovalClaim?> DeferClaimedApprovalAsync(
+        string requestId,
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            var current = RequireInitialized();
+            if (!TryClaimedApproval(
+                    current,
+                    requestId,
+                    sessionId,
+                    out var approval,
+                    out var session))
+            {
+                return null;
+            }
+            var approvals = ApprovalStateMachine.ReleaseClaim(
+                current.Approvals,
+                requestId);
+            var next = current with
+            {
+                Revision = current.Revision + 1,
+                Approvals = approvals,
+            };
+            var patch = new NodeStoreApprovalExtensionPatch(
+                requestId,
+                new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                {
+                    ["desktopApprovalRequested"] =
+                        JsonSerializer.SerializeToElement(true),
+                });
+            await PersistAsync(
+                next,
+                cancellationToken,
+                approvalExtensionPatch: patch);
+            Volatile.Write(ref snapshot, next);
+            return new(approval, session);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
     }
 
     public async Task HandleAsync(
@@ -246,16 +414,41 @@ internal sealed class ActivePersistentBusinessStateOwner(
     private async Task PersistAsync(
         BridgeBusinessStateSnapshot business,
         CancellationToken cancellationToken,
-        NodeStoreSessionExtensionPatch? sessionExtensionPatch = null)
+        NodeStoreSessionExtensionPatch? sessionExtensionPatch = null,
+        NodeStoreApprovalExtensionPatch? approvalExtensionPatch = null)
     {
         await storeOwner.UpdateAsync(
             store => NodeStoreBusinessStateMerger.Merge(
                 store,
                 business.Sessions,
                 business.Approvals,
-                sessionExtensionPatch),
+                sessionExtensionPatch,
+                approvalExtensionPatch),
             cancellationToken);
     }
+
+    private static bool TryClaimedApproval(
+        BridgeBusinessStateSnapshot current,
+        string requestId,
+        string sessionId,
+        out ApprovalState approval,
+        out SessionState session)
+    {
+        if (current.Approvals.Claims.Contains(requestId) &&
+            current.Approvals.Requests.TryGetValue(requestId, out approval!) &&
+            approval.Status == ApprovalStatuses.Pending &&
+            string.Equals(approval.SessionId, sessionId, StringComparison.Ordinal) &&
+            current.Sessions.Sessions.TryGetValue(sessionId, out session!))
+        {
+            return true;
+        }
+        approval = null!;
+        session = null!;
+        return false;
+    }
+
+    private static DateTimeOffset Latest(params DateTimeOffset[] values) =>
+        values.Max();
 
     private static NodeStoreSessionExtensionPatch? SessionExtensionPatch(
         RuntimeEventEnvelope runtimeEvent)

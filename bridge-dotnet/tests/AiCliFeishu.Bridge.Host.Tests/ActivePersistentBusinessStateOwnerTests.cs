@@ -185,6 +185,99 @@ public sealed class ActivePersistentBusinessStateOwnerTests
     }
 
     [TestMethod]
+    public async Task ClaimedApprovalCommitsResolutionAndSessionInOneStoreUpdate()
+    {
+        await WriteStoreAsync(SessionStatuses.Waiting, approvalStatus: null);
+        await using var lease = new ActiveOwnerLeaseAcquirer(Options());
+        await lease.AcquireAsync();
+        var store = StoreOwner(lease);
+        await store.OpenAsync();
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+        await owner.HandleAsync(Event(
+            "approval-requested",
+            RuntimeEventTypes.ApprovalRequested,
+            Origin.AddMinutes(2),
+            new
+            {
+                requestId = "approval-new",
+                title = "shell_command",
+                description = "echo test",
+                expiresAt = Origin.AddMinutes(22).ToString("O"),
+            }));
+
+        Assert.IsNull(await owner.TryClaimApprovalAsync("approval-new", "other-session"));
+        Assert.IsNotNull(await owner.TryClaimApprovalAsync("approval-new", "session-1"));
+        Assert.IsNull(await owner.TryClaimApprovalAsync("approval-new", "session-1"));
+        var resolved = await owner.ResolveClaimedApprovalAsync(
+            "approval-new",
+            "session-1",
+            ApprovalResolutions.Allow);
+
+        Assert.IsNotNull(resolved);
+        Assert.AreEqual(ApprovalStatuses.Resolved, resolved.Approval.Status);
+        Assert.AreEqual(ApprovalResolutions.Allow, resolved.Approval.Resolution);
+        Assert.AreEqual(SessionStatuses.Running, resolved.Session.Status);
+        Assert.AreEqual(2, owner.Snapshot.Revision);
+        Assert.IsFalse(owner.Snapshot.Approvals.Claims.Contains("approval-new"));
+        var reloaded = await new NodeJsonStoreRepository(directory!).LoadAsync();
+        Assert.AreEqual(
+            ApprovalStatuses.Resolved,
+            reloaded.Approvals.Requests["approval-new"].Status);
+        Assert.AreEqual(
+            SessionStatuses.Running,
+            reloaded.Sessions.Sessions["session-1"].Status);
+
+        await store.CloseAsync();
+        await lease.ReleaseAsync();
+    }
+
+    [TestMethod]
+    public async Task DeferredApprovalStaysPendingAndPersistsDesktopRequestFlag()
+    {
+        await WriteStoreAsync(SessionStatuses.Waiting, approvalStatus: null);
+        await using var lease = new ActiveOwnerLeaseAcquirer(Options());
+        await lease.AcquireAsync();
+        var store = StoreOwner(lease);
+        await store.OpenAsync();
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+        await owner.HandleAsync(Event(
+            "approval-requested",
+            RuntimeEventTypes.ApprovalRequested,
+            Origin.AddMinutes(2),
+            new
+            {
+                requestId = "approval-new",
+                title = "shell_command",
+                description = "echo test",
+                expiresAt = Origin.AddMinutes(22).ToString("O"),
+            }));
+        Assert.IsNotNull(await owner.TryClaimApprovalAsync(
+            "approval-new",
+            "session-1"));
+
+        var deferred = await owner.DeferClaimedApprovalAsync(
+            "approval-new",
+            "session-1");
+
+        Assert.IsNotNull(deferred);
+        Assert.AreEqual(ApprovalStatuses.Pending, deferred.Approval.Status);
+        Assert.AreEqual(
+            SessionStatuses.PendingApproval,
+            owner.Snapshot.Sessions.Sessions["session-1"].Status);
+        Assert.IsFalse(owner.Snapshot.Approvals.Claims.Contains("approval-new"));
+        var reloaded = await new NodeJsonStoreRepository(directory!).LoadAsync();
+        var approval = reloaded.Approvals.Requests["approval-new"];
+        Assert.AreEqual(ApprovalStatuses.Pending, approval.Status);
+        Assert.IsTrue(
+            approval.ExtensionData!["desktopApprovalRequested"].GetBoolean());
+
+        await store.CloseAsync();
+        await lease.ReleaseAsync();
+    }
+
+    [TestMethod]
     public async Task FailedStoreCommitDoesNotPublishBusinessMutation()
     {
         await WriteStoreAsync(SessionStatuses.Waiting, approvalStatus: null);
