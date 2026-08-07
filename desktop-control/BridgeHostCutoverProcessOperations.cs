@@ -57,7 +57,7 @@ internal sealed record BridgeHostCutoverProcessOptions(
 }
 
 internal sealed class BridgeHostCutoverProcessOperations :
-    IBridgeHostRecoveryOperations,
+    IBridgeHostPersistentCutoverOperations,
     IDisposable
 {
     private const string ControlTokenHeader = "X-AI-CLI-Feishu-Control-Token";
@@ -126,6 +126,15 @@ internal sealed class BridgeHostCutoverProcessOperations :
         return ValueTask.FromResult(
             Start(options.CreateDotNetStartInfo(instanceName)));
     }
+
+    public ValueTask<int> StartDotNetActiveAndBindAsync(
+        string instanceName,
+        BridgeHostProcessStartedCallback processStarted,
+        CancellationToken cancellationToken) =>
+        StartAndBindAsync(
+            options.CreateDotNetStartInfo(instanceName),
+            processStarted,
+            cancellationToken);
 
     public ValueTask<BridgeCutoverHostIdentity> VerifyDotNetActiveAsync(
         int expectedProcessId,
@@ -198,6 +207,14 @@ internal sealed class BridgeHostCutoverProcessOperations :
         cancellationToken.ThrowIfCancellationRequested();
         return ValueTask.FromResult(Start(options.CreateNodeStartInfo()));
     }
+
+    public ValueTask<int> StartNodeActiveAndBindAsync(
+        BridgeHostProcessStartedCallback processStarted,
+        CancellationToken cancellationToken) =>
+        StartAndBindAsync(
+            options.CreateNodeStartInfo(),
+            processStarted,
+            cancellationToken);
 
     public ValueTask<BridgeCutoverHostIdentity> VerifyNodeActiveAsync(
         int expectedProcessId,
@@ -461,6 +478,18 @@ internal sealed class BridgeHostCutoverProcessOperations :
                 "Bridge Host 启动调用的结果无法确认。",
                 error);
         }
+    }
+
+    private async ValueTask<int> StartAndBindAsync(
+        ProcessStartInfo startInfo,
+        BridgeHostProcessStartedCallback processStarted,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(processStarted);
+        cancellationToken.ThrowIfCancellationRequested();
+        var processId = Start(startInfo);
+        await processStarted(processId, cancellationToken);
+        return processId;
     }
 
     private static bool IsProcessAlive(int processId)

@@ -234,6 +234,52 @@ public sealed class BridgeHostCutoverProcessOperationsTests
     }
 
     [TestMethod]
+    public async Task PersistentStartCallbackReceivesPidBeforeLaunchReturns()
+    {
+        var calls = new List<string>();
+        var options = Options(
+            new StubStoreHandoffInspector(),
+            startProcess: _ =>
+            {
+                calls.Add("process.start");
+                return Process.GetCurrentProcess();
+            });
+        using var operations = new BridgeHostCutoverProcessOperations(options);
+
+        var processId = await operations.StartDotNetActiveAndBindAsync(
+            DotNetInstanceName,
+            (startedProcessId, cancellationToken) =>
+            {
+                Assert.AreEqual(Environment.ProcessId, startedProcessId);
+                Assert.AreEqual(CancellationToken.None, cancellationToken);
+                calls.Add("checkpoint.bind");
+                return ValueTask.CompletedTask;
+            },
+            CancellationToken.None);
+        calls.Add("launch.return");
+
+        Assert.AreEqual(Environment.ProcessId, processId);
+        CollectionAssert.AreEqual(
+            new[] { "process.start", "checkpoint.bind", "launch.return" },
+            calls);
+    }
+
+    [TestMethod]
+    public async Task PersistentStartPropagatesBindingFailureAfterProcessCreation()
+    {
+        var options = Options(
+            new StubStoreHandoffInspector(),
+            startProcess: _ => Process.GetCurrentProcess());
+        using var operations = new BridgeHostCutoverProcessOperations(options);
+
+        await Assert.ThrowsExceptionAsync<InvalidDataException>(() =>
+            operations.StartNodeActiveAndBindAsync(
+                (_, _) => ValueTask.FromException(
+                    new InvalidDataException("test checkpoint failure")),
+                CancellationToken.None).AsTask());
+    }
+
+    [TestMethod]
     public async Task StartCallFailureMapsToOwnershipUncertain()
     {
         var options = Options(
