@@ -38,8 +38,11 @@ public sealed class ActiveOpenCodeEndpointDirectoryTests
             "session-alpha"));
 
         var endpoint = directory.FindBySession("session-alpha");
+        var target = directory.FindRegistrationBySession("session-alpha");
         Assert.IsNotNull(endpoint);
+        Assert.IsNotNull(target);
         Assert.IsTrue(endpoint.Ready);
+        Assert.IsTrue(directory.IsCurrent(target, "session-alpha"));
         Assert.AreEqual(Cwd, endpoint.Directory);
         Assert.AreEqual(1, directory.ListReady().Count);
         var snapshot = directory.Snapshot;
@@ -81,6 +84,7 @@ public sealed class ActiveOpenCodeEndpointDirectoryTests
 
         Assert.IsTrue(replacement.Generation > first.Generation);
         Assert.IsNull(directory.FindBySession("session-old"));
+        Assert.IsFalse(directory.IsCurrent(first, "session-old"));
         Assert.IsFalse(directory.SetReady(5_101, first.Generation, true));
         Assert.IsFalse(directory.RememberSession(
             5_101,
@@ -93,6 +97,13 @@ public sealed class ActiveOpenCodeEndpointDirectoryTests
             replacement.Generation,
             "session-new"));
         Assert.IsNotNull(directory.FindBySession("session-new"));
+        var current = directory.FindRegistrationBySession("session-new");
+        Assert.IsNotNull(current);
+        Assert.IsTrue(directory.IsCurrent(current, "session-new"));
+
+        Assert.IsTrue(directory.SetReady(5_101, replacement.Generation, false));
+        Assert.IsFalse(directory.IsCurrent(current, "session-new"));
+        Assert.IsTrue(directory.SetReady(5_101, replacement.Generation, true));
 
         Assert.IsTrue(directory.Unregister(5_101, replacement.Generation));
         Assert.IsNull(directory.FindBySession("session-new"));

@@ -155,6 +155,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveManagedHookResponseSink),
         typeof(ActiveOpenCodeEndpointDirectory),
         typeof(ActiveOpenCodeEventSource),
+        typeof(ActiveOpenCodeTransport),
     ];
 
     private static readonly (Type Contract, Type Implementation)[] passivePorts =

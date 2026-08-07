@@ -37,6 +37,13 @@ internal interface IBridgeOpenCodeEndpointRegistrationDirectory
 
     bool ForgetSession(int port, long generation, string sessionExternalId);
 
+    BridgeOpenCodeEndpointIdentity? FindRegistrationBySession(
+        string sessionExternalId);
+
+    bool IsCurrent(
+        BridgeOpenCodeEndpointIdentity identity,
+        string sessionExternalId);
+
     IReadOnlyList<BridgeOpenCodeEndpointIdentity> ListRegistrations();
 
     ValueTask<long> WaitForChangeAsync(
@@ -142,6 +149,12 @@ internal sealed class ActiveOpenCodeEndpointDirectory :
 
     public OpenCodeEndpoint? FindBySession(string sessionExternalId)
     {
+        return FindRegistrationBySession(sessionExternalId)?.Endpoint;
+    }
+
+    public BridgeOpenCodeEndpointIdentity? FindRegistrationBySession(
+        string sessionExternalId)
+    {
         if (!ValidSessionId(sessionExternalId))
         {
             return null;
@@ -155,7 +168,32 @@ internal sealed class ActiveOpenCodeEndpointDirectory :
             {
                 return null;
             }
-            return Identity(registration).Endpoint;
+            return Identity(registration);
+        }
+    }
+
+    public bool IsCurrent(
+        BridgeOpenCodeEndpointIdentity identity,
+        string sessionExternalId)
+    {
+        if (identity is null ||
+            !identity.Ready ||
+            identity.Port is <= 0 or > 65_535 ||
+            identity.Generation <= 0 ||
+            !ValidSessionId(sessionExternalId))
+        {
+            return false;
+        }
+        lock (sync)
+        {
+            EnsureInitializedLocked();
+            return sessions.TryGetValue(sessionExternalId, out var mapping) &&
+                mapping.Port == identity.Port &&
+                mapping.Generation == identity.Generation &&
+                registrations.TryGetValue(identity.Port, out var registration) &&
+                registration.Generation == identity.Generation &&
+                registration.Ready &&
+                string.Equals(registration.Cwd, identity.Cwd, StringComparison.Ordinal);
         }
     }
 

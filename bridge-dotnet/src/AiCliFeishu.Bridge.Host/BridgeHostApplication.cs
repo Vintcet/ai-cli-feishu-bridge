@@ -190,6 +190,8 @@ public static class BridgeHostApplication
         services.AddSingleton<IBridgeOpenCodeEndpointRegistrationDirectory>(services =>
             (IBridgeOpenCodeEndpointRegistrationDirectory)services
                 .GetRequiredService<IOpenCodeEndpointDirectory>());
+        services.AddSingleton<IOpenCodeTransport,
+            ActiveOpenCodeTransport>();
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             (IBridgeHostSubsystem)services
                 .GetRequiredService<IOpenCodeEndpointDirectory>());
@@ -239,6 +241,9 @@ public static class BridgeHostApplication
             new(
                 BridgeProductionCapability.OpenCodeEventStream,
                 typeof(ActiveOpenCodeEventSource)),
+            new(
+                BridgeProductionCapability.OpenCodeTransport,
+                typeof(ActiveOpenCodeTransport)),
         ]));
         // Production ports are registered only by their owning migration slices.
         // The incomplete manifest fails preflight and prevents Active mode from

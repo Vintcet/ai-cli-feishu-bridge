@@ -320,6 +320,18 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void PassivePreflightRejectsConcreteActiveOpenCodeTransport()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<ActiveOpenCodeTransport>()));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+    }
+
+    [TestMethod]
     public void PassivePreflightRejectsOpenCodeEventStreamOwnerBeforeResolvingIt()
     {
         var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
@@ -420,6 +432,12 @@ public sealed class BridgeProductionAssemblyTests
         Assert.IsFalse(error.Message.Contains(
             nameof(BridgeProductionCapability.OpenCodeEventStream),
             StringComparison.Ordinal));
+        Assert.IsFalse(error.Message.Contains(
+            nameof(BridgeProductionCapability.OpenCodeTransport),
+            StringComparison.Ordinal));
+        StringAssert.Contains(
+            error.Message,
+            nameof(BridgeProductionCapability.OpenCodeRuntimeLifecycle));
         Assert.IsFalse(services.Any(descriptor =>
             descriptor.ImplementationType?.Name.StartsWith("Passive", StringComparison.Ordinal) == true));
         Assert.IsFalse(services.Any(descriptor =>
@@ -448,7 +466,7 @@ public sealed class BridgeProductionAssemblyTests
         var manifest = (BridgeProductionAssemblyManifest)services.Single(descriptor =>
             descriptor.ServiceType == typeof(BridgeProductionAssemblyManifest))
             .ImplementationInstance!;
-        Assert.AreEqual(13, manifest.Owners.Count);
+        Assert.AreEqual(14, manifest.Owners.Count);
         Assert.AreEqual(
             BridgeProductionCapability.ActiveOwnerLease,
             manifest.Owners[0].Capability);
@@ -523,6 +541,12 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveOpenCodeEventSource),
             manifest.Owners[12].OwnerType);
+        Assert.AreEqual(
+            BridgeProductionCapability.OpenCodeTransport,
+            manifest.Owners[13].Capability);
+        Assert.AreEqual(
+            typeof(ActiveOpenCodeTransport),
+            manifest.Owners[13].OwnerType);
         var businessOwner = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgePersistentBusinessStateOwner));
         Assert.AreEqual(
@@ -585,6 +609,11 @@ public sealed class BridgeProductionAssemblyTests
         var openCodeEventOwner = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgeOpenCodeEventStreamOwner));
         Assert.IsNotNull(openCodeEventOwner.ImplementationFactory);
+        var openCodeTransport = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IOpenCodeTransport));
+        Assert.AreEqual(
+            typeof(ActiveOpenCodeTransport),
+            openCodeTransport.ImplementationType);
         var openCodeRegistrations = services.Single(descriptor =>
             descriptor.ServiceType ==
                 typeof(IBridgeOpenCodeEndpointRegistrationDirectory));
@@ -967,6 +996,11 @@ public sealed class BridgeProductionAssemblyTests
         public bool ForgetSession(
             int port,
             long generation,
+            string sessionExternalId) => false;
+        public BridgeOpenCodeEndpointIdentity? FindRegistrationBySession(
+            string sessionExternalId) => null;
+        public bool IsCurrent(
+            BridgeOpenCodeEndpointIdentity identity,
             string sessionExternalId) => false;
         public IReadOnlyList<BridgeOpenCodeEndpointIdentity> ListRegistrations() => [];
         public ValueTask<long> WaitForChangeAsync(
