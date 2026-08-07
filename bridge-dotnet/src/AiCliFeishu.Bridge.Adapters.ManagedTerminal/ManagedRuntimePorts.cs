@@ -58,6 +58,8 @@ public interface IManagedRuntimeLifecycle
 
 public interface IManagedHookResponseSink
 {
+    bool IsReady(string runtime, string sessionExternalId);
+
     Task ResolveApprovalAsync(
         RuntimeCommandContext context,
         string runtime,

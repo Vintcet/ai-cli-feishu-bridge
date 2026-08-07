@@ -34,6 +34,22 @@ public sealed class RuntimeAdapterContractTests
     }
 
     [DataTestMethod]
+    [DataRow(RuntimeNames.Codex)]
+    [DataRow(RuntimeNames.ClaudeCode)]
+    public void PendingHookMakesManagedAdapterReadyWithoutTerminal(string runtime)
+    {
+        var harness = RuntimeAdapterHarness.Create(runtime);
+        var ports = (FakeManagedRuntimePorts)harness.Recorder;
+        ports.Ready = false;
+        ports.HookReady = false;
+        Assert.IsFalse(harness.Adapter.IsReady(new RuntimeSession("session-1")));
+
+        ports.HookReady = true;
+
+        Assert.IsTrue(harness.Adapter.IsReady(new RuntimeSession("session-1")));
+    }
+
+    [DataTestMethod]
     [DynamicData(nameof(Runtimes))]
     public async Task StandardCommandsReachTheRuntimePortWithContext(string runtime)
     {

@@ -14,9 +14,27 @@ public sealed class ManagedRuntimeHookBridge(
         JsonSerializer.SerializeToElement(new { });
     private readonly object interactionLock = new();
     private readonly Dictionary<InteractionKey, PendingInteraction> pending = [];
-    private readonly Dictionary<InteractionKey, JsonElement> completed = [];
+    private readonly Dictionary<InteractionKey, CompletedInteraction> completed = [];
     private readonly Queue<InteractionKey> completedOrder = new();
     private readonly int capacity = Math.Max(1, completedInteractionCapacity);
+
+    public bool IsReady(string runtime, string sessionExternalId)
+    {
+        if (string.IsNullOrWhiteSpace(runtime) ||
+            string.IsNullOrWhiteSpace(sessionExternalId))
+        {
+            return false;
+        }
+        lock (interactionLock)
+        {
+            return pending.Keys.Any(key =>
+                string.Equals(key.Runtime, runtime, StringComparison.Ordinal) &&
+                string.Equals(
+                    key.SessionId,
+                    sessionExternalId,
+                    StringComparison.Ordinal));
+        }
+    }
 
     public async Task<JsonElement> HandleAsync(
         JsonElement hook,
@@ -48,7 +66,7 @@ public sealed class ManagedRuntimeHookBridge(
         {
             if (completed.TryGetValue(descriptor.Value.Key, out var response))
             {
-                return response.Clone();
+                return response.Response.Clone();
             }
             if (!pending.TryGetValue(descriptor.Value.Key, out interaction!))
             {
@@ -122,7 +140,8 @@ public sealed class ManagedRuntimeHookBridge(
         };
         Complete(
             new(InteractionKind.Approval, runtime, sessionExternalId, requestId),
-            response);
+            response,
+            $"approval:{decision}");
         return Task.CompletedTask;
     }
 
@@ -141,12 +160,21 @@ public sealed class ManagedRuntimeHookBridge(
             runtime,
             sessionExternalId,
             requestId);
+        var resolutionKey = InputResolutionKey(answers);
         PendingInteraction? interaction;
         lock (interactionLock)
         {
-            if (completed.ContainsKey(key))
+            if (completed.TryGetValue(key, out var completedInteraction))
             {
-                return Task.CompletedTask;
+                if (string.Equals(
+                    completedInteraction.ResolutionKey,
+                    resolutionKey,
+                    StringComparison.Ordinal))
+                {
+                    return Task.CompletedTask;
+                }
+                throw new InvalidOperationException(
+                    "托管终端交互已经使用不同响应完成。");
             }
             pending.TryGetValue(key, out interaction);
         }
@@ -154,8 +182,40 @@ public sealed class ManagedRuntimeHookBridge(
         {
             throw new InvalidOperationException("找不到对应的托管终端问题。");
         }
-        Complete(key, BuildInputResponse(runtime, interaction.Hook, answers));
+        Complete(
+            key,
+            BuildInputResponse(runtime, interaction.Hook, answers),
+            resolutionKey);
         return Task.CompletedTask;
+    }
+
+    public void ReleaseSession(string runtime, string sessionExternalId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runtime);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionExternalId);
+        List<PendingInteraction> released = [];
+        lock (interactionLock)
+        {
+            var keys = pending.Keys
+                .Where(key =>
+                    string.Equals(key.Runtime, runtime, StringComparison.Ordinal) &&
+                    string.Equals(
+                        key.SessionId,
+                        sessionExternalId,
+                        StringComparison.Ordinal))
+                .ToArray();
+            foreach (var key in keys)
+            {
+                var interaction = pending[key];
+                pending.Remove(key);
+                RememberCompleted(key, EmptyResponse, "local");
+                released.Add(interaction);
+            }
+        }
+        foreach (var interaction in released)
+        {
+            interaction.Completion.TrySetResult(EmptyResponse.Clone());
+        }
     }
 
     private static JsonElement BuildInputResponse(
@@ -291,20 +351,32 @@ public sealed class ManagedRuntimeHookBridge(
                 : new(kind.Value, new(kind.Value, runtime, sessionId, requestId));
     }
 
-    private void Complete(InteractionKey key, JsonElement response)
+    private void Complete(
+        InteractionKey key,
+        JsonElement response,
+        string resolutionKey)
     {
         PendingInteraction? interaction;
         lock (interactionLock)
         {
-            if (completed.ContainsKey(key))
+            if (completed.TryGetValue(key, out var completedResponse))
             {
-                return;
+                if (string.Equals(
+                        completedResponse.ResolutionKey,
+                        resolutionKey,
+                        StringComparison.Ordinal) &&
+                    ResponsesEqual(completedResponse.Response, response))
+                {
+                    return;
+                }
+                throw new InvalidOperationException(
+                    "托管终端交互已经使用不同响应完成。");
             }
             if (!pending.Remove(key, out interaction))
             {
                 throw new InvalidOperationException("找不到对应的托管终端交互请求。");
             }
-            RememberCompleted(key, response);
+            RememberCompleted(key, response, resolutionKey);
         }
         interaction.Completion.TrySetResult(response.Clone());
     }
@@ -338,14 +410,34 @@ public sealed class ManagedRuntimeHookBridge(
         }
     }
 
-    private void RememberCompleted(InteractionKey key, JsonElement response)
+    private void RememberCompleted(
+        InteractionKey key,
+        JsonElement response,
+        string resolutionKey)
     {
-        completed[key] = response.Clone();
+        completed[key] = new(response.Clone(), resolutionKey);
         completedOrder.Enqueue(key);
         while (completedOrder.Count > capacity)
         {
             completed.Remove(completedOrder.Dequeue());
         }
+    }
+
+    private static bool ResponsesEqual(JsonElement left, JsonElement right) =>
+        JsonNode.DeepEquals(
+            JsonNode.Parse(left.GetRawText()),
+            JsonNode.Parse(right.GetRawText()));
+
+    private static string InputResolutionKey(
+        IReadOnlyDictionary<string, IReadOnlyList<string>> answers)
+    {
+        var normalized = answers
+            .OrderBy(answer => answer.Key, StringComparer.Ordinal)
+            .ToDictionary(
+                answer => answer.Key,
+                answer => answer.Value.ToArray(),
+                StringComparer.Ordinal);
+        return $"input:{JsonSerializer.Serialize(normalized)}";
     }
 
     private static string? OptionalString(JsonElement value, string name) =>
@@ -378,4 +470,8 @@ public sealed class ManagedRuntimeHookBridge(
 
         public int WaiterCount { get; set; }
     }
+
+    private sealed record CompletedInteraction(
+        JsonElement Response,
+        string ResolutionKey);
 }

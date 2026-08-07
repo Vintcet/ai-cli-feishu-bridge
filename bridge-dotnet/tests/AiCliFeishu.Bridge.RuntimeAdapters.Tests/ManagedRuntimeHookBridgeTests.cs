@@ -32,6 +32,7 @@ public sealed class ManagedRuntimeHookBridgeTests
         var duplicate = bridge.HandleAsync(hook.RootElement, "trace-duplicate");
         Assert.IsFalse(first.IsCompleted);
         Assert.IsFalse(duplicate.IsCompleted);
+        Assert.IsTrue(bridge.IsReady(RuntimeNames.Codex, "session-1"));
         Assert.AreEqual(1, sink.Events.Count);
         Assert.AreEqual(RuntimeEventTypes.ApprovalRequested, sink.Events[0].EventType);
 
@@ -42,6 +43,7 @@ public sealed class ManagedRuntimeHookBridgeTests
             "tool-1",
             "allow_once");
         var responses = await Task.WhenAll(first, duplicate);
+        Assert.IsFalse(bridge.IsReady(RuntimeNames.Codex, "session-1"));
         Assert.IsTrue(responses.All(response => response
             .GetProperty("hookSpecificOutput")
             .GetProperty("decision")
@@ -53,6 +55,15 @@ public sealed class ManagedRuntimeHookBridgeTests
             .GetProperty("decision")
             .GetProperty("behavior").GetString());
         Assert.AreEqual(1, sink.Events.Count);
+
+        var conflict = await Assert.ThrowsExceptionAsync<InvalidOperationException>(() =>
+            bridge.ResolveApprovalAsync(
+                Context,
+                RuntimeNames.Codex,
+                "session-1",
+                "tool-1",
+                "deny"));
+        StringAssert.Contains(conflict.Message, "不同响应");
     }
 
     [TestMethod]
@@ -184,6 +195,57 @@ public sealed class ManagedRuntimeHookBridgeTests
             .GetProperty("decision")
             .GetProperty("behavior").GetString());
         Assert.AreEqual("trace-retry", sink.Events[1].TraceId);
+    }
+
+    [TestMethod]
+    public async Task SessionReleaseReturnsLocalResponseAndCachesItForHookRetries()
+    {
+        var sink = new RecordingRuntimeEventSink();
+        var bridge = Bridge(sink);
+        using var approvalHook = JsonDocument.Parse("""
+            {
+              "hook_event_name": "PermissionRequest",
+              "runtime": "claudecode",
+              "session_id": "session-ending",
+              "tool_use_id": "approval-ending",
+              "tool_name": "Bash",
+              "tool_input": { "command": "npm test" }
+            }
+            """);
+        using var inputHook = JsonDocument.Parse("""
+            {
+              "hook_event_name": "PreToolUse",
+              "runtime": "claudecode",
+              "session_id": "session-ending",
+              "tool_use_id": "input-ending",
+              "tool_name": "request_user_input",
+              "tool_input": {
+                "questions": [{
+                  "header": "确认",
+                  "id": "q1",
+                  "question": "继续吗？",
+                  "options": [{ "label": "继续" }],
+                  "multiple": false
+                }]
+              }
+            }
+            """);
+
+        var approval = bridge.HandleAsync(approvalHook.RootElement, "trace-approval");
+        var input = bridge.HandleAsync(inputHook.RootElement, "trace-input");
+        await WaitUntilAsync(() => sink.Events.Count == 2);
+
+        bridge.ReleaseSession(RuntimeNames.ClaudeCode, "session-ending");
+
+        Assert.IsFalse(bridge.IsReady(RuntimeNames.ClaudeCode, "session-ending"));
+        Assert.AreEqual(0, (await approval).EnumerateObject().Count());
+        Assert.AreEqual(0, (await input).EnumerateObject().Count());
+        Assert.AreEqual(
+            0,
+            (await bridge.HandleAsync(approvalHook.RootElement, "trace-retry"))
+                .EnumerateObject()
+                .Count());
+        Assert.AreEqual(2, sink.Events.Count);
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition)

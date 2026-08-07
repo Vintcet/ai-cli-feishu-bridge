@@ -50,7 +50,11 @@ public abstract class ManagedRuntimeAdapter : IRuntimeAdapter
     {
         var target = terminals.FindBySession(session.ExternalId);
         return target is { Ready: true } &&
-            string.Equals(target.SessionExternalId, session.ExternalId, StringComparison.Ordinal);
+                string.Equals(
+                    target.SessionExternalId,
+                    session.ExternalId,
+                    StringComparison.Ordinal) ||
+            hookResponses.IsReady(Runtime, session.ExternalId);
     }
 
     public async Task ExecuteAsync(

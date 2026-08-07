@@ -150,6 +150,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveManagedTerminalTransport),
         typeof(ActiveManagedRuntimeLifecycle),
         typeof(ActiveManagedHookIngress),
+        typeof(ActiveManagedHookResponseSink),
     ];
 
     private static readonly (Type Contract, Type Implementation)[] passivePorts =

@@ -105,6 +105,9 @@ internal sealed class ActiveManagedHookIngress(
                     managed_terminal_elevated = claimed.Elevated,
                 });
                 await hookBridge.HandleAsync(hook, traceId, cancellationToken);
+                hookBridge.ReleaseSession(
+                    claimed.Runtime,
+                    claimed.SessionExternalId);
             }
             terminals.Unregister(terminalId);
             return OkResponse.Clone();
@@ -199,6 +202,9 @@ internal sealed class ActiveManagedHookIngress(
                 canonical,
                 traceId,
                 cancellationToken);
+            hookBridge.ReleaseSession(
+                OptionalRuntime(canonical),
+                sessionId);
             terminals.Release(sessionId);
             return response;
         }

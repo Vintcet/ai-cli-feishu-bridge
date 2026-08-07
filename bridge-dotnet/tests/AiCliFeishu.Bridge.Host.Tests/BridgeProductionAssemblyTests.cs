@@ -266,6 +266,18 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void PassivePreflightRejectsConcreteActiveManagedHookResponseSink()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<ActiveManagedHookResponseSink>()));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+    }
+
+    [TestMethod]
     public void PassivePreflightRejectsUnknownHostedLifecycle()
     {
         var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
@@ -336,6 +348,12 @@ public sealed class BridgeProductionAssemblyTests
         Assert.IsFalse(error.Message.Contains(
             nameof(BridgeProductionCapability.ManagedRuntimeLifecycle),
             StringComparison.Ordinal));
+        Assert.IsFalse(error.Message.Contains(
+            nameof(BridgeProductionCapability.ManagedHookIngress),
+            StringComparison.Ordinal));
+        Assert.IsFalse(error.Message.Contains(
+            nameof(BridgeProductionCapability.ManagedHookResponses),
+            StringComparison.Ordinal));
         Assert.IsFalse(services.Any(descriptor =>
             descriptor.ImplementationType?.Name.StartsWith("Passive", StringComparison.Ordinal) == true));
         Assert.IsFalse(services.Any(descriptor =>
@@ -364,7 +382,7 @@ public sealed class BridgeProductionAssemblyTests
         var manifest = (BridgeProductionAssemblyManifest)services.Single(descriptor =>
             descriptor.ServiceType == typeof(BridgeProductionAssemblyManifest))
             .ImplementationInstance!;
-        Assert.AreEqual(10, manifest.Owners.Count);
+        Assert.AreEqual(11, manifest.Owners.Count);
         Assert.AreEqual(
             BridgeProductionCapability.ActiveOwnerLease,
             manifest.Owners[0].Capability);
@@ -421,6 +439,12 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveManagedHookIngress),
             manifest.Owners[9].OwnerType);
+        Assert.AreEqual(
+            BridgeProductionCapability.ManagedHookResponses,
+            manifest.Owners[10].Capability);
+        Assert.AreEqual(
+            typeof(ActiveManagedHookResponseSink),
+            manifest.Owners[10].OwnerType);
         var businessOwner = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgePersistentBusinessStateOwner));
         Assert.AreEqual(
@@ -465,8 +489,11 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(typeof(ActiveManagedHookIngress), hookIngress.ImplementationType);
         Assert.IsTrue(services.Any(descriptor =>
             descriptor.ServiceType == typeof(ManagedRuntimeHookBridge)));
-        Assert.IsFalse(services.Any(descriptor =>
-            descriptor.ServiceType == typeof(IManagedHookResponseSink)));
+        var hookResponses = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IManagedHookResponseSink));
+        Assert.AreEqual(
+            typeof(ActiveManagedHookResponseSink),
+            hookResponses.ImplementationType);
         var lifecycleOwner = new RecordingManagedRuntimeLifecycle();
         var lifecycleServices = new ServiceCollection();
         lifecycleServices.AddSingleton<IManagedRuntimeLifecycle>(lifecycleOwner);
@@ -794,6 +821,7 @@ public sealed class BridgeProductionAssemblyTests
 
     private sealed class RecordingManagedHookResponseSink : IManagedHookResponseSink
     {
+        public bool IsReady(string runtime, string sessionExternalId) => false;
         public Task ResolveApprovalAsync(RuntimeCommandContext context, string runtime, string sessionExternalId, string requestId, string decision, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task ResolveInputAsync(RuntimeCommandContext context, string runtime, string sessionExternalId, string requestId, IReadOnlyDictionary<string, IReadOnlyList<string>> answers, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }

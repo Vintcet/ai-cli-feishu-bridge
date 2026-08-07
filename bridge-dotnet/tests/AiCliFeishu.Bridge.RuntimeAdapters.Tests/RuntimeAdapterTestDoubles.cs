@@ -70,6 +70,9 @@ internal sealed class FakeManagedRuntimePorts : CallRecorder,
     IManagedHookResponseSink
 {
     public bool Ready { get; set; } = true;
+    public bool HookReady { get; set; }
+
+    public bool IsReady(string runtime, string sessionExternalId) => HookReady;
 
     public ManagedTerminalTarget? FindBySession(string sessionExternalId) =>
         new("terminal_12345678", sessionExternalId, Ready);

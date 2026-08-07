@@ -63,6 +63,8 @@ public sealed class PassiveManagedRuntimeLifecycle : IManagedRuntimeLifecycle
 
 public sealed class PassiveManagedHookResponseSink : IManagedHookResponseSink
 {
+    public bool IsReady(string runtime, string sessionExternalId) => false;
+
     public Task ResolveApprovalAsync(
         RuntimeCommandContext context,
         string runtime,

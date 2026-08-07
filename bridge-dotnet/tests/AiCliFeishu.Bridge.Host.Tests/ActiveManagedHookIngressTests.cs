@@ -152,6 +152,41 @@ public sealed class ActiveManagedHookIngressTests
     }
 
     [TestMethod]
+    public async Task SessionEndReleasesPendingInteractionOnlyAfterDurableEvent()
+    {
+        var fixture = await Fixture.CreateAsync();
+        await fixture.RegisterAsync("terminal-pending", elevated: false);
+        await fixture.Ingress.HandleAsync(
+            BridgeManagedIngressKind.SessionStart,
+            SessionStart("session-pending", "terminal-pending", elevated: false),
+            "trace-start-pending");
+        var pending = fixture.Ingress.HandleAsync(
+            BridgeManagedIngressKind.Permission,
+            Permission("session-pending", "terminal-pending", elevated: false),
+            "trace-permission-pending");
+        await WaitUntilAsync(() => fixture.Sink.Events.Count == 2);
+        fixture.Sink.NextError = new IOException("simulated end store failure");
+
+        await Assert.ThrowsExceptionAsync<IOException>(() =>
+            fixture.Ingress.HandleAsync(
+                BridgeManagedIngressKind.SessionEnd,
+                SessionEnd("session-pending", "terminal-pending", elevated: false),
+                "trace-end-failed"));
+
+        Assert.IsFalse(pending.IsCompleted);
+        Assert.IsNotNull(fixture.Directory.FindClaimBySession("session-pending"));
+
+        await fixture.Ingress.HandleAsync(
+            BridgeManagedIngressKind.SessionEnd,
+            SessionEnd("session-pending", "terminal-pending", elevated: false),
+            "trace-end-retry");
+
+        Assert.AreEqual(0, (await pending).EnumerateObject().Count());
+        Assert.IsNull(fixture.Directory.FindClaimBySession("session-pending"));
+        Assert.AreEqual(RuntimeEventTypes.SessionEnded, fixture.Sink.Events.Last().EventType);
+    }
+
+    [TestMethod]
     public async Task InteractiveHookCancellationReleasesHttpWaiter()
     {
         var fixture = await Fixture.CreateAsync();
@@ -264,6 +299,37 @@ public sealed class ActiveManagedHookIngressTests
             values["managed_terminal_elevated"] = elevated;
         }
         return JsonSerializer.SerializeToElement(values);
+    }
+
+    private static JsonElement Permission(
+        string sessionId,
+        string terminalId,
+        bool elevated) => JsonSerializer.SerializeToElement(new
+        {
+            hook_event_name = "PermissionRequest",
+            session_id = sessionId,
+            turn_id = "turn-pending",
+            tool_use_id = "tool-pending",
+            cwd = Cwd,
+            model = "gpt-5",
+            tool_name = "shell_command",
+            tool_input = new { command = "git status" },
+            runtime = RuntimeNames.Codex,
+            managed_terminal_id = terminalId,
+            managed_terminal_elevated = elevated,
+        });
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        var timeoutAt = DateTime.UtcNow.AddSeconds(2);
+        while (!condition())
+        {
+            if (DateTime.UtcNow >= timeoutAt)
+            {
+                throw new AssertFailedException("等待测试条件超时。");
+            }
+            await Task.Delay(10);
+        }
     }
 
     private sealed class Fixture(
