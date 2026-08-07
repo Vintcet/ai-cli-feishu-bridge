@@ -190,6 +190,87 @@ internal sealed class BridgeHostCutoverCheckpointWriter : IDisposable
         }
     }
 
+    internal async ValueTask<BridgeHostCutoverCheckpointWriteResult>
+        TryConvergeRecoveryToNodeAsync(
+            BridgeCutoverHostIdentity recoveredNode,
+            string expectedFileVersion,
+            CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(recoveredNode);
+        if (string.IsNullOrWhiteSpace(expectedFileVersion))
+        {
+            throw new ArgumentException(
+                "恢复收敛的检查点文件版本不能为空。",
+                nameof(expectedFileVersion));
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var current = await store.ReadAsync(cancellationToken);
+        if (current.State is not BridgeHostCutoverCheckpointReadState.Present ||
+            current.Checkpoint is null ||
+            !BridgeHostCutoverCheckpointValidator.IsValid(current.Checkpoint))
+        {
+            return current.State switch
+            {
+                BridgeHostCutoverCheckpointReadState.Invalid => new(
+                    BridgeHostCutoverCheckpointWriteState.InvalidCurrentCheckpoint,
+                    current.State),
+                BridgeHostCutoverCheckpointReadState.Unavailable => new(
+                    BridgeHostCutoverCheckpointWriteState.Unavailable,
+                    current.State),
+                _ => Conflict(current.State),
+            };
+        }
+
+        var existing = current.Checkpoint;
+        if (!string.Equals(
+                current.FileVersion,
+                expectedFileVersion,
+                StringComparison.Ordinal))
+        {
+            return new(
+                BridgeHostCutoverCheckpointWriteState.VersionConflict,
+                current.State);
+        }
+        if (!string.Equals(existing.OperationId, operationId, StringComparison.Ordinal) ||
+            !recoveredNode.IsNodeActive(
+                BridgeHostCutoverTransaction.CurrentManagementApiVersion) ||
+            !string.Equals(
+                recoveredNode.InstanceName,
+                existing.ExpectedNode.InstanceName,
+                StringComparison.Ordinal) ||
+            existing.Stage is BridgeHostCutoverStage.Completed)
+        {
+            return Conflict(current.State);
+        }
+
+        if (existing.Stage is BridgeHostCutoverStage.RolledBack)
+        {
+            return existing.NodeRollbackProcessId == recoveredNode.ProcessId
+                ? new(
+                    BridgeHostCutoverCheckpointWriteState.Unchanged,
+                    current.State)
+                : Conflict(current.State);
+        }
+
+        var checkpoint = existing with
+        {
+            UpdatedAt = existing.UpdatedAt.AddTicks(1),
+            Stage = BridgeHostCutoverStage.RolledBack,
+            RequiresRollback = false,
+            FailureReason = existing.FailureReason is BridgeCutoverFailureReason.None
+                ? BridgeCutoverFailureReason.OwnershipUncertain
+                : existing.FailureReason,
+            NodeRollbackProcessId = recoveredNode.ProcessId,
+        };
+        checkpoint.Validate();
+        return await WriteIfCurrentVersionAsync(
+            checkpoint,
+            current,
+            cancellationToken);
+    }
+
     public void Dispose()
     {
         if (disposed)

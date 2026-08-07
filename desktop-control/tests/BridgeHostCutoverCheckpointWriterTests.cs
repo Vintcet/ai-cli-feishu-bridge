@@ -447,6 +447,93 @@ public sealed class BridgeHostCutoverCheckpointWriterTests
         Assert.AreEqual(0, new FileInfo(lockPath).Length);
     }
 
+    [TestMethod]
+    public async Task RecoveryCanConvergeAnInterruptedOperationToRolledBack()
+    {
+        var store = Store();
+        await store.WriteAsync(Checkpoint(
+            BridgeHostCutoverStage.DotNetStartRequested,
+            "operation-a",
+            seconds: 1,
+            dotNetProcessId: 84005));
+        var version = (await store.ReadAsync()).FileVersion!;
+        var acquired = await Acquire("operation-a");
+        using var writer = acquired.Writer!;
+
+        var result = await writer.TryConvergeRecoveryToNodeAsync(
+            Node(84006),
+            version);
+
+        Assert.AreEqual(BridgeHostCutoverCheckpointWriteState.Written, result.State);
+        var persisted = (await store.ReadAsync()).Checkpoint!;
+        Assert.AreEqual(BridgeHostCutoverStage.RolledBack, persisted.Stage);
+        Assert.IsFalse(persisted.RequiresRollback);
+        Assert.AreEqual(
+            BridgeCutoverFailureReason.OwnershipUncertain,
+            persisted.FailureReason);
+        Assert.AreEqual(84005, persisted.DotNetProcessId);
+        Assert.AreEqual(84006, persisted.NodeRollbackProcessId);
+    }
+
+    [TestMethod]
+    public async Task RecoveryConvergenceRefusesCommittedOrMismatchedNode()
+    {
+        var store = Store();
+        await store.WriteAsync(Checkpoint(
+            BridgeHostCutoverStage.Completed,
+            "operation-a",
+            seconds: 1,
+            dotNetProcessId: 84005));
+        var version = (await store.ReadAsync()).FileVersion!;
+        var acquired = await Acquire("operation-a");
+        using var writer = acquired.Writer!;
+
+        var committed = await writer.TryConvergeRecoveryToNodeAsync(
+            Node(84006),
+            version);
+        var wrongInstance = await writer.TryConvergeRecoveryToNodeAsync(
+            Node(84006) with { InstanceName = "other-node" },
+            version);
+
+        Assert.AreEqual(
+            BridgeHostCutoverCheckpointWriteState.OperationConflict,
+            committed.State);
+        Assert.AreEqual(
+            BridgeHostCutoverCheckpointWriteState.OperationConflict,
+            wrongInstance.State);
+        Assert.AreEqual(
+            BridgeHostCutoverStage.Completed,
+            (await store.ReadAsync()).Checkpoint!.Stage);
+    }
+    [TestMethod]
+    public async Task RecoveryConvergenceRequiresTheObservedCheckpointFileVersion()
+    {
+        var store = Store();
+        var checkpoint = Checkpoint(
+            BridgeHostCutoverStage.DotNetStartRequested,
+            "operation-a",
+            seconds: 1,
+            dotNetProcessId: 84005);
+        await store.WriteAsync(checkpoint);
+        var observedVersion = (await store.ReadAsync()).FileVersion!;
+        await File.WriteAllTextAsync(
+            store.CheckpointPath,
+            BridgeHostCutoverCheckpointJson.Serialize(checkpoint) + " ");
+        var acquired = await Acquire("operation-a");
+        using var writer = acquired.Writer!;
+
+        var result = await writer.TryConvergeRecoveryToNodeAsync(
+            Node(84006),
+            observedVersion);
+
+        Assert.AreEqual(
+            BridgeHostCutoverCheckpointWriteState.VersionConflict,
+            result.State);
+        Assert.AreEqual(
+            BridgeHostCutoverStage.DotNetStartRequested,
+            (await store.ReadAsync()).Checkpoint!.Stage);
+    }
+
     private async ValueTask<BridgeHostCutoverCheckpointWriterAcquireResult> Acquire(
         string operationId) =>
         await BridgeHostCutoverCheckpointWriter.TryAcquireAsync(

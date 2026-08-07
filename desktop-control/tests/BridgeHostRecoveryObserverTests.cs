@@ -388,6 +388,36 @@ public sealed class BridgeHostRecoveryObserverTests
             await probe.InspectAsync(cancellation.Token));
     }
 
+    [TestMethod]
+    public async Task AutomaticInspectionCarriesOnlyTheStableCheckpointVersion()
+    {
+        var checkpoint = Checkpoint(BridgeHostCutoverStage.Planned);
+        var endpoint = BridgeHostRecoveryEndpointObservation.Offline();
+        var lease = MissingLease();
+        using var observer = Observer(
+            [
+                new(
+                    BridgeHostCutoverCheckpointReadState.Present,
+                    checkpoint,
+                    "version-a"),
+                new(
+                    BridgeHostCutoverCheckpointReadState.Present,
+                    checkpoint,
+                    "version-a"),
+            ],
+            [endpoint, endpoint],
+            [lease, lease]);
+
+        var result = await observer.InspectAsync();
+
+        Assert.AreEqual("version-a", result.CheckpointFileVersion);
+        CollectionAssert.AreEquivalent(
+            new[] { "CheckpointFileVersion", "CheckpointState", "Plan" },
+            typeof(BridgeHostRecoveryInspection)
+                .GetProperties()
+                .Select(property => property.Name)
+                .ToArray());
+    }
     private BridgeHostRecoveryObserver Observer(
         IEnumerable<BridgeHostCutoverCheckpointReadResult> checkpoints,
         IEnumerable<BridgeHostRecoveryEndpointObservation> endpoints,

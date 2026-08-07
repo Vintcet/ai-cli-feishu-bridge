@@ -156,6 +156,42 @@ public sealed class BridgeHostCutoverProcessOperationsTests
     }
 
     [TestMethod]
+    public async Task RecoveryDotNetStopRequiresTheFullExpectedIdentity()
+    {
+        var expected = DotNet(DotNetProcessId);
+        var handler = new QueueHttpMessageHandler();
+        handler.EnqueueIdentity(expected);
+        handler.Enqueue(HttpStatusCode.Accepted);
+        using var operations = Operations(handler);
+
+        await operations.RequestExpectedDotNetStopAsync(expected, default);
+
+        Assert.AreEqual(2, handler.Requests.Count);
+        Assert.AreEqual(HttpMethod.Post, handler.Requests[1].Method);
+        Assert.AreEqual("/control/shutdown", handler.Requests[1].Path);
+    }
+
+    [TestMethod]
+    public async Task RecoveryDotNetStopRefusesAnInstanceMismatchBeforeShutdown()
+    {
+        var handler = new QueueHttpMessageHandler();
+        handler.EnqueueIdentity(DotNet(DotNetProcessId) with
+        {
+            InstanceName = "replacement-dotnet",
+        });
+        using var operations = Operations(handler);
+
+        var error = await Assert.ThrowsExceptionAsync<BridgeHostCutoverOperationException>(
+            () => operations.RequestExpectedDotNetStopAsync(
+                DotNet(DotNetProcessId),
+                default).AsTask());
+
+        Assert.AreEqual(BridgeCutoverFailureReason.OwnershipUncertain, error.Reason);
+        Assert.AreEqual(1, handler.Requests.Count);
+        Assert.AreEqual(HttpMethod.Get, handler.Requests[0].Method);
+    }
+
+    [TestMethod]
     public async Task StoreHandoffEvidenceIsPassedThroughWithoutHttpCalls()
     {
         var evidence = new BridgeStoreHandoffEvidence(

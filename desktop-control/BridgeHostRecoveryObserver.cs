@@ -6,7 +6,8 @@ namespace AiCliFeishuControl;
 
 internal sealed record BridgeHostRecoveryInspection(
     BridgeHostCutoverCheckpointReadState CheckpointState,
-    BridgeHostRecoveryPlan Plan);
+    BridgeHostRecoveryPlan Plan,
+    string? CheckpointFileVersion = null);
 
 internal sealed class BridgeHostRecoveryEndpointProbe : IDisposable
 {
@@ -318,7 +319,10 @@ internal sealed class BridgeHostRecoveryObserver : IDisposable
         var plan = planner.Plan(
             checkpoint.ToSnapshot(),
             new BridgeHostRecoveryObservation(endpointAfter, leaseAfter));
-        return new(BridgeHostCutoverCheckpointReadState.Present, plan);
+        return new(
+            BridgeHostCutoverCheckpointReadState.Present,
+            plan,
+            checkpointAfter.FileVersion);
     }
 
     public void Dispose() => ownedResource?.Dispose();

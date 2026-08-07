@@ -57,7 +57,7 @@ internal sealed record BridgeHostCutoverProcessOptions(
 }
 
 internal sealed class BridgeHostCutoverProcessOperations :
-    IBridgeHostCutoverOperations,
+    IBridgeHostRecoveryOperations,
     IDisposable
 {
     private const string ControlTokenHeader = "X-AI-CLI-Feishu-Control-Token";
@@ -162,6 +162,26 @@ internal sealed class BridgeHostCutoverProcessOperations :
                 "C# Active Host 身份已变化，拒绝停止未知进程。");
         }
         await RequestStopAsync(actual, cancellationToken);
+    }
+
+    public async ValueTask RequestExpectedDotNetStopAsync(
+        BridgeCutoverHostIdentity expectedDotNet,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(expectedDotNet);
+        if (!expectedDotNet.IsDotNetActive(
+                BridgeHostCutoverTransaction.CurrentManagementApiVersion))
+        {
+            throw new ArgumentException(
+                "恢复停止目标必须是完整的 .NET Active Owner 身份。",
+                nameof(expectedDotNet));
+        }
+
+        await VerifyExpectedIdentityAsync(
+            expectedDotNet,
+            BridgeCutoverFailureReason.OwnershipUncertain,
+            cancellationToken);
+        await RequestStopAsync(expectedDotNet, cancellationToken);
     }
 
     public ValueTask VerifyDotNetOfflineAsync(

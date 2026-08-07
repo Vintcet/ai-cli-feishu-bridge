@@ -35,6 +35,7 @@ internal enum BridgeHostRecoveryReason
     LeaseIdentityMismatch,
     UnexpectedEndpointIdentity,
     UnexpectedCommittedOwner,
+    RecoveryTargetUnbound,
 }
 
 internal enum BridgeHostRecoveryStep
