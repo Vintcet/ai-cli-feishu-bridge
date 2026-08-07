@@ -71,7 +71,11 @@ public static class NodeStoreCoreProjection
                 TimestampOrOldest(item.Value.ExpiresAt),
                 item.Value.MessageIds.ToArray(),
                 item.Value.Resolution,
-                OptionalTimestampOrOldest(item.Value.ResolvedAt)),
+                OptionalTimestampOrOldest(item.Value.ResolvedAt),
+                item.Value.TurnId,
+                item.Value.Cwd,
+                item.Value.ToolName,
+                item.Value.ToolPreview),
             StringComparer.Ordinal);
         return new ApprovalRegistryState(
             approvals,

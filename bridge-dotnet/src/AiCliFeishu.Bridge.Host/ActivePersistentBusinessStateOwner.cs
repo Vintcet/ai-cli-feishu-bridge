@@ -1,0 +1,562 @@
+using System.Text.Json;
+using AiCliFeishu.Bridge.Adapters.Storage;
+using AiCliFeishu.Bridge.Core;
+using AiCliFeishu.Bridge.Protocol;
+
+namespace AiCliFeishu.Bridge.Host;
+
+internal sealed class ActivePersistentBusinessStateOwner(
+    BridgeHostOptions options,
+    IBridgeProductionStoreOwner storeOwner,
+    TimeProvider? timeProvider = null)
+    : IBridgePersistentBusinessStateOwner,
+      IBridgeRuntimeEventHandler,
+      IBridgeHostSubsystem,
+      IBridgeHostSubsystemHealth
+{
+    private readonly SemaphoreSlim writeGate = new(1, 1);
+    private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
+    private BridgeBusinessStateSnapshot snapshot =
+        BridgeBusinessStateSnapshot.NotInitialized;
+
+    public string Name => "persistent-business-state-owner";
+
+    public BridgeBusinessStateSnapshot Snapshot => Volatile.Read(ref snapshot);
+
+    public BridgeComponentHealth ComponentHealth
+    {
+        get
+        {
+            var current = Snapshot;
+            return current.Initialized
+                ? new(
+                    Name,
+                    "ready",
+                    $"persistent sessions={current.Sessions.Sessions.Count} " +
+                    $"approvals={current.Approvals.Requests.Count} " +
+                    $"inputs={current.Inputs.Requests.Count}")
+                : new(Name, "failed", $"source={current.SourceStatus}");
+        }
+    }
+
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        EnsureActive();
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (Snapshot.Initialized)
+            {
+                return;
+            }
+            var store = await storeOwner.ReadAsync(cancellationToken);
+            var core = NodeStoreCoreProjection.Project(store);
+            var observedAt = clock.GetUtcNow();
+            var recovered = ApprovalStateMachine.RecoverPending(
+                core.Approvals,
+                observedAt);
+            var sessions = RecoverApprovalSessions(
+                core.Sessions,
+                core.Approvals,
+                observedAt);
+            var initialized = new BridgeBusinessStateSnapshot(
+                true,
+                "production",
+                0,
+                0,
+                sessions,
+                recovered.State,
+                InputRegistryState.Empty);
+
+            var sessionsChanged = !ReferenceEquals(sessions, core.Sessions);
+            if (recovered.Value > 0 || sessionsChanged)
+            {
+                await PersistAsync(initialized, cancellationToken);
+            }
+            Volatile.Write(ref snapshot, initialized);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken)
+    {
+        _ = cancellationToken;
+        return Task.CompletedTask;
+    }
+
+    public async Task HandleAsync(
+        RuntimeEventEnvelope runtimeEvent,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ArgumentNullException.ThrowIfNull(runtimeEvent);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            var current = RequireInitialized();
+            var occurredAt = DateTimeOffset.Parse(runtimeEvent.OccurredAt);
+            var sessions = current.Sessions;
+            var approvals = current.Approvals;
+            var inputs = current.Inputs;
+            var sessionId = runtimeEvent.Session!.ExternalId;
+
+            switch (runtimeEvent.EventType)
+            {
+                case RuntimeEventTypes.SessionStarted:
+                    sessions = StartSession(sessions, runtimeEvent, occurredAt);
+                    break;
+                case RuntimeEventTypes.SessionEnded:
+                case RuntimeEventTypes.RuntimeDisconnected:
+                    sessions = TransitionSession(
+                        sessions,
+                        runtimeEvent,
+                        SessionStatuses.Ended,
+                        occurredAt);
+                    approvals = ResolveSessionApprovals(approvals, sessionId, occurredAt);
+                    inputs = ResolveSessionInputs(inputs, sessionId, occurredAt);
+                    break;
+                case RuntimeEventTypes.RuntimeConnected:
+                    sessions = TransitionSession(
+                        sessions,
+                        runtimeEvent,
+                        SessionStatuses.Ready,
+                        occurredAt,
+                        allowCreate: true);
+                    break;
+                case RuntimeEventTypes.TurnStarted:
+                case RuntimeEventTypes.TurnActivity:
+                    sessions = TransitionSession(
+                        sessions,
+                        runtimeEvent,
+                        SessionStatuses.Running,
+                        occurredAt);
+                    break;
+                case RuntimeEventTypes.TurnCompleted:
+                    sessions = TransitionSession(
+                        sessions,
+                        runtimeEvent,
+                        SessionStatuses.Waiting,
+                        occurredAt);
+                    break;
+                case RuntimeEventTypes.TurnFailed:
+                    sessions = TransitionSession(
+                        sessions,
+                        runtimeEvent,
+                        SessionStatuses.Error,
+                        occurredAt,
+                        PayloadString(runtimeEvent.Payload, "error"));
+                    break;
+                case RuntimeEventTypes.ApprovalRequested:
+                    EnsureSession(sessions, runtimeEvent);
+                    approvals = CreateApproval(
+                        approvals,
+                        sessions,
+                        runtimeEvent,
+                        occurredAt);
+                    sessions = TransitionSession(
+                        sessions,
+                        runtimeEvent,
+                        SessionStatuses.PendingApproval,
+                        occurredAt);
+                    break;
+                case RuntimeEventTypes.ApprovalResolvedExternally:
+                    {
+                        EnsureSession(sessions, runtimeEvent);
+                        var requestId = PayloadString(runtimeEvent.Payload, "requestId");
+                        EnsureApprovalSession(approvals, requestId, sessionId);
+                        var transition = ApprovalStateMachine.ResolveExternally(
+                            approvals,
+                            requestId,
+                            ApprovalResolution(runtimeEvent.Payload),
+                            occurredAt);
+                        if (!transition.Value)
+                        {
+                            break;
+                        }
+                        approvals = transition.State;
+                        sessions = TransitionSession(
+                            sessions,
+                            runtimeEvent,
+                            ExternalApprovalSessionStatus(runtimeEvent.Payload),
+                            occurredAt);
+                        break;
+                    }
+                case RuntimeEventTypes.InputRequested:
+                    EnsureSession(sessions, runtimeEvent);
+                    inputs = CreateInput(inputs, runtimeEvent, occurredAt);
+                    sessions = TransitionSession(
+                        sessions,
+                        runtimeEvent,
+                        SessionStatuses.PendingInput,
+                        occurredAt);
+                    break;
+                case RuntimeEventTypes.InputResolvedExternally:
+                    {
+                        EnsureSession(sessions, runtimeEvent);
+                        var requestId = PayloadString(runtimeEvent.Payload, "requestId");
+                        EnsureInputSession(inputs, requestId, sessionId);
+                        var transition = InputStateMachine.ResolveExternally(
+                            inputs,
+                            requestId,
+                            occurredAt);
+                        if (!transition.Value)
+                        {
+                            break;
+                        }
+                        inputs = transition.State;
+                        sessions = TransitionSession(
+                            sessions,
+                            runtimeEvent,
+                            SessionStatuses.Running,
+                            occurredAt);
+                        break;
+                    }
+                default:
+                    throw new InvalidDataException(
+                        $"状态所有者不支持 Runtime 事件 {runtimeEvent.EventType}。");
+            }
+
+            if (ReferenceEquals(sessions, current.Sessions) &&
+                ReferenceEquals(approvals, current.Approvals) &&
+                ReferenceEquals(inputs, current.Inputs))
+            {
+                return;
+            }
+            var next = current with
+            {
+                Revision = current.Revision + 1,
+                Sessions = sessions,
+                Approvals = approvals,
+                Inputs = inputs,
+            };
+            await PersistAsync(next, cancellationToken);
+            Volatile.Write(ref snapshot, next);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    private async Task PersistAsync(
+        BridgeBusinessStateSnapshot business,
+        CancellationToken cancellationToken)
+    {
+        await storeOwner.UpdateAsync(
+            store => NodeStoreBusinessStateMerger.Merge(
+                store,
+                business.Sessions,
+                business.Approvals),
+            cancellationToken);
+    }
+
+    private void EnsureActive()
+    {
+        if (options.OwnershipMode is not BridgeOwnershipMode.Active)
+        {
+            throw new InvalidOperationException(
+                "持久化业务状态 Owner 只能用于 Active Host。");
+        }
+    }
+
+    private static SessionDirectoryState RecoverApprovalSessions(
+        SessionDirectoryState sessions,
+        ApprovalRegistryState loadedApprovals,
+        DateTimeOffset observedAt)
+    {
+        foreach (var loaded in loadedApprovals.Requests.Values.Where(item =>
+                     item.Status == ApprovalStatuses.Pending))
+        {
+            if (!sessions.Sessions.TryGetValue(loaded.SessionId, out var session) ||
+                session.Status != SessionStatuses.PendingApproval)
+            {
+                continue;
+            }
+            var occurredAt = observedAt >= session.LastSeenAt
+                ? observedAt
+                : session.LastSeenAt;
+            sessions = SessionStateMachine.Transition(
+                sessions,
+                session.SessionId,
+                SessionStatuses.LocalApproval,
+                occurredAt);
+        }
+        return sessions;
+    }
+
+    private BridgeBusinessStateSnapshot RequireInitialized() =>
+        Snapshot.Initialized
+            ? Snapshot
+            : throw new InvalidOperationException(
+                $"业务状态所有者尚未从生产 Store 初始化：{Snapshot.SourceStatus}。");
+
+    private static SessionDirectoryState StartSession(
+        SessionDirectoryState state,
+        RuntimeEventEnvelope runtimeEvent,
+        DateTimeOffset occurredAt)
+    {
+        var sessionId = runtimeEvent.Session!.ExternalId;
+        if (!state.Sessions.TryGetValue(sessionId, out var current))
+        {
+            var cwd = RequireCwd(runtimeEvent);
+            var registered = SessionStateMachine.Register(
+                state,
+                new SessionState(
+                    sessionId,
+                    runtimeEvent.Runtime,
+                    cwd,
+                    SessionStatuses.Starting,
+                    occurredAt,
+                    occurredAt));
+            return SessionStateMachine.Transition(
+                registered,
+                sessionId,
+                SessionStatuses.Ready,
+                occurredAt);
+        }
+        EnsureRuntime(current, runtimeEvent.Runtime);
+        var started = current.Status == SessionStatuses.Ended
+            ? SessionStateMachine.Transition(
+                state,
+                sessionId,
+                SessionStatuses.Starting,
+                occurredAt)
+            : state;
+        return SessionStateMachine.Transition(
+            started,
+            sessionId,
+            SessionStatuses.Ready,
+            occurredAt);
+    }
+
+    private static SessionDirectoryState TransitionSession(
+        SessionDirectoryState state,
+        RuntimeEventEnvelope runtimeEvent,
+        string status,
+        DateTimeOffset occurredAt,
+        string? error = null,
+        bool allowCreate = false)
+    {
+        var sessionId = runtimeEvent.Session!.ExternalId;
+        if (!state.Sessions.TryGetValue(sessionId, out var current))
+        {
+            if (!allowCreate)
+            {
+                throw new KeyNotFoundException($"会话 {sessionId} 尚未登记。 ");
+            }
+            state = SessionStateMachine.Register(
+                state,
+                new SessionState(
+                    sessionId,
+                    runtimeEvent.Runtime,
+                    RequireCwd(runtimeEvent),
+                    SessionStatuses.Starting,
+                    occurredAt,
+                    occurredAt));
+        }
+        else
+        {
+            EnsureRuntime(current, runtimeEvent.Runtime);
+            if (allowCreate && current.Status == SessionStatuses.Ended)
+            {
+                state = SessionStateMachine.Transition(
+                    state,
+                    sessionId,
+                    SessionStatuses.Starting,
+                    occurredAt);
+            }
+        }
+        return SessionStateMachine.Transition(state, sessionId, status, occurredAt, error);
+    }
+
+    private static void EnsureSession(
+        SessionDirectoryState state,
+        RuntimeEventEnvelope runtimeEvent)
+    {
+        if (!state.Sessions.TryGetValue(runtimeEvent.Session!.ExternalId, out var current))
+        {
+            throw new KeyNotFoundException(
+                $"会话 {runtimeEvent.Session.ExternalId} 尚未登记。 ");
+        }
+        EnsureRuntime(current, runtimeEvent.Runtime);
+    }
+
+    private static void EnsureRuntime(SessionState session, string runtime)
+    {
+        if (!string.Equals(session.Runtime, runtime, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"会话 {session.SessionId} 已属于 {session.Runtime}，不能接收 {runtime} 事件。 ");
+        }
+    }
+
+    private static string RequireCwd(RuntimeEventEnvelope runtimeEvent) =>
+        runtimeEvent.Session!.Cwd is { Length: > 0 } cwd
+            ? cwd
+            : throw new InvalidDataException(
+                $"新会话 {runtimeEvent.Session.ExternalId} 缺少工作目录。");
+
+    private static ApprovalRegistryState CreateApproval(
+        ApprovalRegistryState state,
+        SessionDirectoryState sessions,
+        RuntimeEventEnvelope runtimeEvent,
+        DateTimeOffset occurredAt)
+    {
+        var requestId = PayloadString(runtimeEvent.Payload, "requestId");
+        if (state.Requests.TryGetValue(requestId, out var existing))
+        {
+            if (existing.SessionId == runtimeEvent.Session!.ExternalId &&
+                existing.Status == ApprovalStatuses.Pending)
+            {
+                return state;
+            }
+            throw new InvalidOperationException($"审批 {requestId} 已存在且语义冲突。 ");
+        }
+        return ApprovalStateMachine.Create(
+            state,
+            new ApprovalState(
+                requestId,
+                runtimeEvent.Session!.ExternalId,
+                ApprovalStatuses.Pending,
+                occurredAt,
+                PayloadTimestamp(runtimeEvent.Payload, "expiresAt"),
+                [],
+                TurnId: runtimeEvent.CorrelationId ?? requestId,
+                Cwd: sessions.Sessions[runtimeEvent.Session.ExternalId].Cwd,
+                ToolName: PayloadString(runtimeEvent.Payload, "title"),
+                ToolPreview: OptionalPayloadString(
+                    runtimeEvent.Payload,
+                    "description") ?? string.Empty));
+    }
+
+    private static InputRegistryState CreateInput(
+        InputRegistryState state,
+        RuntimeEventEnvelope runtimeEvent,
+        DateTimeOffset occurredAt)
+    {
+        var requestId = PayloadString(runtimeEvent.Payload, "requestId");
+        if (state.Requests.TryGetValue(requestId, out var existing))
+        {
+            if (existing.SessionId == runtimeEvent.Session!.ExternalId &&
+                existing.Status == InputRequestStatuses.Pending)
+            {
+                return state;
+            }
+            throw new InvalidOperationException($"补充问题 {requestId} 已存在且语义冲突。 ");
+        }
+        var questions = runtimeEvent.Payload.GetProperty("questions")
+            .EnumerateArray()
+            .Select(question => new InputQuestionState(
+                PayloadString(question, "id"),
+                question.TryGetProperty("multiple", out var multiple) && multiple.GetBoolean(),
+                !question.TryGetProperty("allowsCustom", out var custom) || custom.GetBoolean(),
+                question.TryGetProperty("options", out var options)
+                    ? options.EnumerateArray().Select(item => item.GetString()!).ToArray()
+                    : []))
+            .ToArray();
+        return InputStateMachine.Create(
+            state,
+            new InputRequestState(
+                requestId,
+                runtimeEvent.Session!.ExternalId,
+                InputRequestStatuses.Pending,
+                occurredAt,
+                PayloadTimestamp(runtimeEvent.Payload, "expiresAt"),
+                questions,
+                new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)));
+    }
+
+    private static ApprovalRegistryState ResolveSessionApprovals(
+        ApprovalRegistryState state,
+        string sessionId,
+        DateTimeOffset occurredAt)
+    {
+        foreach (var approval in state.Requests.Values.Where(item =>
+                     item.SessionId == sessionId && item.Status == ApprovalStatuses.Pending).ToArray())
+        {
+            state = ApprovalStateMachine.ResolveExternally(
+                state,
+                approval.RequestId,
+                ApprovalResolutions.Local,
+                occurredAt).State;
+        }
+        return state;
+    }
+
+    private static InputRegistryState ResolveSessionInputs(
+        InputRegistryState state,
+        string sessionId,
+        DateTimeOffset occurredAt)
+    {
+        foreach (var input in state.Requests.Values.Where(item =>
+                     item.SessionId == sessionId && item.Status == InputRequestStatuses.Pending).ToArray())
+        {
+            state = InputStateMachine.ResolveExternally(
+                state,
+                input.RequestId,
+                occurredAt).State;
+        }
+        return state;
+    }
+
+    private static void EnsureApprovalSession(
+        ApprovalRegistryState state,
+        string requestId,
+        string sessionId)
+    {
+        if (!state.Requests.TryGetValue(requestId, out var approval))
+        {
+            throw new KeyNotFoundException($"审批 {requestId} 尚未登记。 ");
+        }
+        if (!string.Equals(approval.SessionId, sessionId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"审批 {requestId} 不属于会话 {sessionId}。 ");
+        }
+    }
+
+    private static void EnsureInputSession(
+        InputRegistryState state,
+        string requestId,
+        string sessionId)
+    {
+        if (!state.Requests.TryGetValue(requestId, out var input))
+        {
+            throw new KeyNotFoundException($"补充问题 {requestId} 尚未登记。 ");
+        }
+        if (!string.Equals(input.SessionId, sessionId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"补充问题 {requestId} 不属于会话 {sessionId}。 ");
+        }
+    }
+
+    private static string ApprovalResolution(JsonElement payload) =>
+        PayloadString(payload, "outcome") switch
+        {
+            "allowed" => ApprovalResolutions.Allow,
+            "denied" => ApprovalResolutions.Deny,
+            "cancelled" => ApprovalResolutions.Local,
+            var value => throw new InvalidDataException($"不支持的外部审批结果 {value}。"),
+        };
+
+    private static string ExternalApprovalSessionStatus(JsonElement payload) =>
+        PayloadString(payload, "outcome") == "allowed"
+            ? SessionStatuses.Running
+            : SessionStatuses.Waiting;
+
+    private static string? OptionalPayloadString(JsonElement payload, string name) =>
+        payload.TryGetProperty(name, out var value) &&
+        value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static string PayloadString(JsonElement payload, string name) =>
+        payload.GetProperty(name).GetString()!;
+
+    private static DateTimeOffset PayloadTimestamp(JsonElement payload, string name) =>
+        DateTimeOffset.Parse(PayloadString(payload, name));
+}

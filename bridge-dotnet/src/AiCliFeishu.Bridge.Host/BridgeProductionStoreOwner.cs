@@ -21,7 +21,14 @@ internal interface IBridgeProductionStoreOwner
 
     ValueTask OpenAsync(CancellationToken cancellationToken = default);
 
+    ValueTask<NodeStoreSnapshot> ReadAsync(
+        CancellationToken cancellationToken = default);
+
     ValueTask FlushAsync(CancellationToken cancellationToken = default);
+
+    ValueTask UpdateAsync(
+        Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
+        CancellationToken cancellationToken = default);
 
     ValueTask CloseAsync(CancellationToken cancellationToken = default);
 }
@@ -155,6 +162,65 @@ internal sealed class ActiveProductionStoreOwner :
             Volatile.Write(
                 ref snapshot,
                 current with { StoreFiles = ExistingStoreFiles(options.DataDirectory) });
+        }
+        finally
+        {
+            lifecycleLock.Release();
+        }
+    }
+
+    public async ValueTask<NodeStoreSnapshot> ReadAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await lifecycleLock.WaitAsync(cancellationToken);
+        try
+        {
+            await RequireOwnerLeaseAsync(cancellationToken);
+            var store = RequireOpenStore().Store!;
+            await RequireOwnerLeaseAsync(cancellationToken);
+            return store;
+        }
+        finally
+        {
+            lifecycleLock.Release();
+        }
+    }
+
+    public async ValueTask UpdateAsync(
+        Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(update);
+        await lifecycleLock.WaitAsync(cancellationToken);
+        try
+        {
+            var current = RequireOpenStore();
+            await RequireOwnerLeaseAsync(cancellationToken);
+            var store = update(current.Store!) ??
+                throw new InvalidOperationException(
+                    "生产 Store 更新函数不能返回 null。");
+            try
+            {
+                await repository.WriteAsync(store, cancellationToken);
+                await RequireOwnerLeaseAsync(cancellationToken);
+            }
+            catch
+            {
+                Volatile.Write(
+                    ref snapshot,
+                    new BridgeProductionStoreSnapshot(
+                        BridgeProductionStoreState.Failed,
+                        null,
+                        ExistingStoreFiles(options.DataDirectory)));
+                throw;
+            }
+            Volatile.Write(
+                ref snapshot,
+                current with
+                {
+                    Store = store,
+                    StoreFiles = ExistingStoreFiles(options.DataDirectory),
+                });
         }
         finally
         {

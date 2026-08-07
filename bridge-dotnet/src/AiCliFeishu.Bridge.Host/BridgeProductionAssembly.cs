@@ -18,7 +18,10 @@ internal interface IBridgeActiveOwnerLeaseLifecycle : IAsyncDisposable
     ValueTask ReleaseAsync(CancellationToken cancellationToken = default);
 }
 
-internal interface IBridgePersistentBusinessStateOwner;
+internal interface IBridgePersistentBusinessStateOwner
+{
+    BridgeBusinessStateSnapshot Snapshot { get; }
+}
 
 internal interface IBridgeFeishuCredentialSource;
 
@@ -126,6 +129,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveOwnerLeaseAcquirer),
         typeof(ActiveOwnerLeaseHostedService),
         typeof(ActiveProductionStoreOwner),
+        typeof(ActivePersistentBusinessStateOwner),
     ];
 
     private static readonly (Type Contract, Type Implementation)[] passivePorts =

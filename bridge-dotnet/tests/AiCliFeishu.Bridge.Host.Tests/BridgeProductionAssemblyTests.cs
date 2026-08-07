@@ -5,6 +5,7 @@ using Microsoft.Extensions.Hosting;
 using AiCliFeishu.Bridge.Adapters.Feishu;
 using AiCliFeishu.Bridge.Adapters.ManagedTerminal;
 using AiCliFeishu.Bridge.Adapters.OpenCode;
+using AiCliFeishu.Bridge.Adapters.Storage;
 using AiCliFeishu.Bridge.Core;
 
 namespace AiCliFeishu.Bridge.Host.Tests;
@@ -93,6 +94,36 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void PassivePreflightRejectsPersistentStateOwnerBeforeResolvingIt()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+        var constructed = false;
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<IBridgePersistentBusinessStateOwner>(_ =>
+                {
+                    constructed = true;
+                    return new RecordingPersistentBusinessStateOwner();
+                })));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+        Assert.IsFalse(constructed);
+    }
+
+    [TestMethod]
+    public void PassivePreflightRejectsConcreteActivePersistentStateOwner()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<ActivePersistentBusinessStateOwner>()));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+    }
+
+    [TestMethod]
     public void PassivePreflightRejectsUnknownHostedLifecycle()
     {
         var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
@@ -142,7 +173,9 @@ public sealed class BridgeProductionAssemblyTests
         Assert.IsFalse(error.Message.Contains(
             nameof(BridgeProductionCapability.ProductionStoreOwner),
             StringComparison.Ordinal));
-        StringAssert.Contains(error.Message, nameof(BridgeProductionCapability.PersistentBusinessState));
+        Assert.IsFalse(error.Message.Contains(
+            nameof(BridgeProductionCapability.PersistentBusinessState),
+            StringComparison.Ordinal));
         Assert.IsFalse(services.Any(descriptor =>
             descriptor.ImplementationType?.Name.StartsWith("Passive", StringComparison.Ordinal) == true));
         Assert.IsFalse(services.Any(descriptor =>
@@ -150,9 +183,11 @@ public sealed class BridgeProductionAssemblyTests
         var storeOwner = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgeProductionStoreOwner));
         Assert.AreEqual(typeof(ActiveProductionStoreOwner), storeOwner.ImplementationType);
-        var subsystem = services.Single(descriptor =>
-            descriptor.ServiceType == typeof(IBridgeHostSubsystem));
-        Assert.IsNotNull(subsystem.ImplementationFactory);
+        var subsystems = services.Where(descriptor =>
+            descriptor.ServiceType == typeof(IBridgeHostSubsystem)).ToArray();
+        Assert.AreEqual(2, subsystems.Length);
+        Assert.IsTrue(subsystems.All(descriptor =>
+            descriptor.ImplementationFactory is not null));
         var hostedServices = services.Where(descriptor =>
             descriptor.ServiceType == typeof(IHostedService)).ToArray();
         CollectionAssert.AreEqual(
@@ -169,7 +204,7 @@ public sealed class BridgeProductionAssemblyTests
         var manifest = (BridgeProductionAssemblyManifest)services.Single(descriptor =>
             descriptor.ServiceType == typeof(BridgeProductionAssemblyManifest))
             .ImplementationInstance!;
-        Assert.AreEqual(2, manifest.Owners.Count);
+        Assert.AreEqual(3, manifest.Owners.Count);
         Assert.AreEqual(
             BridgeProductionCapability.ActiveOwnerLease,
             manifest.Owners[0].Capability);
@@ -178,6 +213,22 @@ public sealed class BridgeProductionAssemblyTests
             BridgeProductionCapability.ProductionStoreOwner,
             manifest.Owners[1].Capability);
         Assert.AreEqual(typeof(ActiveProductionStoreOwner), manifest.Owners[1].OwnerType);
+        Assert.AreEqual(
+            BridgeProductionCapability.PersistentBusinessState,
+            manifest.Owners[2].Capability);
+        Assert.AreEqual(
+            typeof(ActivePersistentBusinessStateOwner),
+            manifest.Owners[2].OwnerType);
+        var businessOwner = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IBridgePersistentBusinessStateOwner));
+        Assert.AreEqual(
+            typeof(ActivePersistentBusinessStateOwner),
+            businessOwner.ImplementationType);
+        Assert.IsTrue(services.Any(descriptor =>
+            descriptor.ServiceType == typeof(IBridgeRuntimeEventHandler) &&
+            descriptor.ImplementationFactory is not null));
+        Assert.IsFalse(services.Any(descriptor =>
+            descriptor.ServiceType == typeof(IBridgeFeishuIntentHandler)));
         Assert.IsFalse(Directory.Exists(options.DataDirectory));
     }
 
@@ -365,13 +416,27 @@ public sealed class BridgeProductionAssemblyTests
         public ValueTask OpenAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 
+        public ValueTask<NodeStoreSnapshot> ReadAsync(
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
         public ValueTask FlushAsync(CancellationToken cancellationToken = default) =>
+            ValueTask.CompletedTask;
+
+        public ValueTask UpdateAsync(
+            Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
+            CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 
         public ValueTask CloseAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
     }
-    private sealed class RecordingPersistentBusinessStateOwner : IBridgePersistentBusinessStateOwner;
+    private sealed class RecordingPersistentBusinessStateOwner
+        : IBridgePersistentBusinessStateOwner
+    {
+        public BridgeBusinessStateSnapshot Snapshot { get; } =
+            BridgeBusinessStateSnapshot.NotInitialized;
+    }
     private sealed class RecordingFeishuCredentialSource : IBridgeFeishuCredentialSource;
     private sealed class RecordingManagedHookIngress : IBridgeManagedHookIngress;
 

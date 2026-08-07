@@ -27,7 +27,11 @@ public sealed record ApprovalState(
     DateTimeOffset ExpiresAt,
     IReadOnlyList<string> MessageIds,
     string? Resolution = null,
-    DateTimeOffset? ResolvedAt = null);
+    DateTimeOffset? ResolvedAt = null,
+    string TurnId = "",
+    string Cwd = "",
+    string ToolName = "",
+    string ToolPreview = "");
 
 public sealed record ApprovalRegistryState(
     IReadOnlyDictionary<string, ApprovalState> Requests,
@@ -138,6 +142,40 @@ public static class ApprovalStateMachine
             return new(state, false);
         }
         return Resolve(state, approval, resolution, resolvedAt);
+    }
+
+    public static StateTransition<ApprovalRegistryState, int> RecoverPending(
+        ApprovalRegistryState state,
+        DateTimeOffset observedAt)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        var pending = state.Requests.Values
+            .Where(approval => approval.Status == ApprovalStatuses.Pending)
+            .ToArray();
+        if (pending.Length == 0)
+        {
+            return new(state, 0);
+        }
+
+        var requests = CopyRequests(state.Requests);
+        foreach (var approval in pending)
+        {
+            requests[approval.RequestId] = approval with
+            {
+                Status = ApprovalStatuses.Orphaned,
+                Resolution = ApprovalResolutions.Local,
+                ResolvedAt = observedAt < approval.CreatedAt
+                    ? approval.CreatedAt
+                    : observedAt,
+            };
+        }
+        return new(
+            state with
+            {
+                Requests = requests,
+                Claims = new HashSet<string>(StringComparer.Ordinal),
+            },
+            pending.Length);
     }
 
     private static StateTransition<ApprovalRegistryState, bool> Resolve(

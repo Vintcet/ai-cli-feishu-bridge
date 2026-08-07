@@ -57,6 +57,74 @@ public sealed class StateMachineTests
     }
 
     [TestMethod]
+    public void ApprovalRecoveryReturnsOriginalStateWhenNothingIsPending()
+    {
+        var pending = ApprovalStateMachine.Create(
+            ApprovalRegistryState.Empty,
+            new ApprovalState(
+                "approval-1", "session-1", ApprovalStatuses.Pending,
+                Origin, Origin.AddMinutes(10), []));
+        var resolved = ApprovalStateMachine.ResolveExternally(
+            pending,
+            "approval-1",
+            ApprovalResolutions.Allow,
+            Origin.AddMinutes(1)).State;
+
+        var recovered = ApprovalStateMachine.RecoverPending(
+            resolved,
+            Origin.AddMinutes(2));
+
+        Assert.AreSame(resolved, recovered.State);
+        Assert.AreEqual(0, recovered.Value);
+    }
+
+    [TestMethod]
+    public void ApprovalRecoveryOrphansEveryPendingRequestAndClearsClaims()
+    {
+        var first = ApprovalStateMachine.Create(
+            ApprovalRegistryState.Empty,
+            new ApprovalState(
+                "approval-1", "session-1", ApprovalStatuses.Pending,
+                Origin, Origin.AddMinutes(10), []));
+        var state = ApprovalStateMachine.Create(
+            first,
+            new ApprovalState(
+                "approval-2", "session-2", ApprovalStatuses.Pending,
+                Origin.AddMinutes(1), Origin.AddMinutes(10), []));
+        state = ApprovalStateMachine.Claim(state, "approval-1").State;
+
+        var recovered = ApprovalStateMachine.RecoverPending(
+            state,
+            Origin.AddMinutes(2));
+
+        Assert.AreEqual(2, recovered.Value);
+        Assert.AreEqual(0, recovered.State.Claims.Count);
+        foreach (var approval in recovered.State.Requests.Values)
+        {
+            Assert.AreEqual(ApprovalStatuses.Orphaned, approval.Status);
+            Assert.AreEqual(ApprovalResolutions.Local, approval.Resolution);
+            Assert.AreEqual(Origin.AddMinutes(2), approval.ResolvedAt);
+        }
+        Assert.AreEqual(ApprovalStatuses.Pending, state.Requests["approval-1"].Status);
+        Assert.IsTrue(state.Claims.Contains("approval-1"));
+    }
+
+    [TestMethod]
+    public void ApprovalRecoveryNeverResolvesBeforeCreationTime()
+    {
+        var createdAt = Origin.AddMinutes(5);
+        var state = ApprovalStateMachine.Create(
+            ApprovalRegistryState.Empty,
+            new ApprovalState(
+                "approval-1", "session-1", ApprovalStatuses.Pending,
+                createdAt, createdAt.AddMinutes(10), []));
+
+        var recovered = ApprovalStateMachine.RecoverPending(state, Origin);
+
+        Assert.AreEqual(createdAt, recovered.State.Requests["approval-1"].ResolvedAt);
+    }
+
+    [TestMethod]
     public void InputAnswersMustCoverAllQuestionsAndCannotResolveTwice()
     {
         var state = InputStateMachine.Create(
