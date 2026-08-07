@@ -134,6 +134,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveProductionStoreOwner),
         typeof(ActivePersistentBusinessStateOwner),
         typeof(ActiveFeishuCredentialSource),
+        typeof(ActiveFeishuEventSource),
     ];
 
     private static readonly (Type Contract, Type Implementation)[] passivePorts =

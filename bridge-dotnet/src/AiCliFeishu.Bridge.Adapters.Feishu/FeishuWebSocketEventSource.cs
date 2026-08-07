@@ -11,7 +11,11 @@ public sealed record FeishuWebSocketOptions(
     string AppSecret,
     Uri BaseUri,
     TimeSpan? ReconnectDelay = null,
-    TimeSpan? DefaultPingInterval = null);
+    TimeSpan? DefaultPingInterval = null)
+{
+    public override string ToString() =>
+        "Feishu WebSocket options (credentials redacted)";
+}
 
 public sealed record FeishuWebSocketEndpoint(
     Uri Url,

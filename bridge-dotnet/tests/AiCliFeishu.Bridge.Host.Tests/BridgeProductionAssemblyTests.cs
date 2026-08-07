@@ -154,6 +154,39 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void PassivePreflightRejectsActiveFeishuEventSourceBeforeResolvingIt()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+        var constructed = false;
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+            {
+                services.RemoveAll<IFeishuEventSource>();
+                services.AddSingleton<IFeishuEventSource>(_ =>
+                {
+                    constructed = true;
+                    return new RecordingFeishuEventSource();
+                });
+            }));
+
+        StringAssert.Contains(error.Message, nameof(IFeishuEventSource));
+        Assert.IsFalse(constructed);
+    }
+
+    [TestMethod]
+    public void PassivePreflightRejectsConcreteActiveFeishuEventSource()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<ActiveFeishuEventSource>()));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+    }
+
+    [TestMethod]
     public void PassivePreflightRejectsUnknownHostedLifecycle()
     {
         var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
@@ -209,6 +242,9 @@ public sealed class BridgeProductionAssemblyTests
         Assert.IsFalse(error.Message.Contains(
             nameof(BridgeProductionCapability.FeishuCredentials),
             StringComparison.Ordinal));
+        Assert.IsFalse(error.Message.Contains(
+            nameof(BridgeProductionCapability.FeishuEventStream),
+            StringComparison.Ordinal));
         Assert.IsFalse(services.Any(descriptor =>
             descriptor.ImplementationType?.Name.StartsWith("Passive", StringComparison.Ordinal) == true));
         Assert.IsFalse(services.Any(descriptor =>
@@ -237,7 +273,7 @@ public sealed class BridgeProductionAssemblyTests
         var manifest = (BridgeProductionAssemblyManifest)services.Single(descriptor =>
             descriptor.ServiceType == typeof(BridgeProductionAssemblyManifest))
             .ImplementationInstance!;
-        Assert.AreEqual(4, manifest.Owners.Count);
+        Assert.AreEqual(5, manifest.Owners.Count);
         Assert.AreEqual(
             BridgeProductionCapability.ActiveOwnerLease,
             manifest.Owners[0].Capability);
@@ -258,6 +294,12 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveFeishuCredentialSource),
             manifest.Owners[3].OwnerType);
+        Assert.AreEqual(
+            BridgeProductionCapability.FeishuEventStream,
+            manifest.Owners[4].Capability);
+        Assert.AreEqual(
+            typeof(ActiveFeishuEventSource),
+            manifest.Owners[4].OwnerType);
         var businessOwner = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgePersistentBusinessStateOwner));
         Assert.AreEqual(
@@ -268,6 +310,11 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveFeishuCredentialSource),
             credentials.ImplementationType);
+        var eventSource = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IFeishuEventSource));
+        Assert.AreEqual(
+            typeof(ActiveFeishuEventSource),
+            eventSource.ImplementationType);
         Assert.IsTrue(services.Any(descriptor =>
             descriptor.ServiceType == typeof(IBridgeRuntimeEventHandler) &&
             descriptor.ImplementationFactory is not null));
