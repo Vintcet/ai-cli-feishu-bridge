@@ -23,7 +23,10 @@ internal interface IBridgePersistentBusinessStateOwner
     BridgeBusinessStateSnapshot Snapshot { get; }
 }
 
-internal interface IBridgeFeishuCredentialSource;
+internal interface IBridgeFeishuCredentialSource
+{
+    BridgeFeishuCredentials Credentials { get; }
+}
 
 internal interface IBridgeManagedHookIngress;
 
@@ -130,6 +133,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveOwnerLeaseHostedService),
         typeof(ActiveProductionStoreOwner),
         typeof(ActivePersistentBusinessStateOwner),
+        typeof(ActiveFeishuCredentialSource),
     ];
 
     private static readonly (Type Contract, Type Implementation)[] passivePorts =
