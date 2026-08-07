@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Encodings.Web;
 using AiCliFeishu.Bridge.Adapters.Feishu;
+using AiCliFeishu.Bridge.Adapters.ManagedTerminal;
 using AiCliFeishu.Bridge.Adapters.Storage;
 using AiCliFeishu.Bridge.Core;
 using AiCliFeishu.Bridge.Protocol;
@@ -432,13 +433,21 @@ public sealed class ActiveFeishuIntentHandlerTests
                 runtimeCommands,
                 gateway);
             var renderer = new FeishuCardRenderer();
+            var interactions = new FeishuInteractionCoordinator(
+                gateway,
+                renderer,
+                new InMemoryFeishuCardPatchLedger());
             var approvals = new ActiveFeishuApprovalCoordinator(
                 new RejectingApprovalStateOwner(business.Snapshot),
                 runtimeCommands,
-                new FeishuInteractionCoordinator(
-                    gateway,
-                    renderer,
-                    new InMemoryFeishuCardPatchLedger()));
+                interactions);
+            var inputs = new ActiveFeishuInputCoordinator(
+                new RejectingInputStateOwner(business.Snapshot),
+                runtimeCommands,
+                interactions,
+                renderer,
+                gateway,
+                new RejectingManagedHookResponseSink());
             return new(
                 new(
                     options,
@@ -449,7 +458,8 @@ public sealed class ActiveFeishuIntentHandlerTests
                     gateway,
                     renderer,
                     prompts,
-                    approvals),
+                    approvals,
+                    inputs),
                 store,
                 gateway,
                 runtimeCommands);
@@ -621,6 +631,51 @@ public sealed class ActiveFeishuIntentHandlerTests
             throw new AssertFailedException("意图处理器测试不应进入审批协调器。");
     }
 
+    private sealed class RejectingInputStateOwner(
+        BridgeBusinessStateSnapshot snapshot) : IBridgeActiveInputStateOwner
+    {
+        public BridgeBusinessStateSnapshot Snapshot { get; } = snapshot;
+
+        public ValueTask<BridgeInputAnswerProgress?> TryRecordInputAnswerAsync(
+            string requestId,
+            string sessionId,
+            string questionId,
+            IReadOnlyList<string> answers,
+            CancellationToken cancellationToken = default) => Unexpected<BridgeInputAnswerProgress?>();
+
+        public ValueTask<BridgeInputClaim?> TryClaimInputAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default) => Unexpected<BridgeInputClaim?>();
+
+        public ValueTask<BridgeInputClaim?> ResolveClaimedInputAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default) => Unexpected<BridgeInputClaim?>();
+
+        public ValueTask<BridgeInputClaim?> DeferClaimedInputAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default) => Unexpected<BridgeInputClaim?>();
+
+        public ValueTask ReleaseInputClaimAsync(
+            string requestId,
+            CancellationToken cancellationToken = default) => Unexpected();
+
+        public ValueTask<BridgeInputClaim?> ResetClaimedInputAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default) => Unexpected<BridgeInputClaim?>();
+
+        private static ValueTask Unexpected() =>
+            ValueTask.FromException(new AssertFailedException(
+                "意图处理器测试不应进入问答协调器。"));
+
+        private static ValueTask<T> Unexpected<T>() =>
+            ValueTask.FromException<T>(new AssertFailedException(
+                "意图处理器测试不应进入问答协调器。"));
+    }
+
     private sealed class RecordingLaunchCoordinator : IBridgeManagedRuntimeLaunchCoordinator
     {
         public BridgeManagedRuntimeLifecycleSnapshot Snapshot { get; } =
@@ -635,6 +690,37 @@ public sealed class ActiveFeishuIntentHandlerTests
         public Task DrainAsync(
             string sessionExternalId,
             CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class RejectingManagedHookResponseSink : IManagedHookResponseSink
+    {
+        public bool IsReady(string runtime, string sessionExternalId) => false;
+
+        public Task ResolveApprovalAsync(
+            RuntimeCommandContext context,
+            string runtime,
+            string sessionExternalId,
+            string requestId,
+            string decision,
+            CancellationToken cancellationToken = default) => Unexpected();
+
+        public Task ResolveInputAsync(
+            RuntimeCommandContext context,
+            string runtime,
+            string sessionExternalId,
+            string requestId,
+            IReadOnlyDictionary<string, IReadOnlyList<string>> answers,
+            CancellationToken cancellationToken = default) => Unexpected();
+
+        public Task DeferInputToLocalAsync(
+            string runtime,
+            string sessionExternalId,
+            string requestId,
+            CancellationToken cancellationToken = default) => Unexpected();
+
+        private static Task Unexpected() =>
+            Task.FromException(new AssertFailedException(
+                "意图处理器测试不应回写 Managed Hook。"));
     }
 
     private sealed class RecordingRuntimeCommandGateway : IBridgeRuntimeCommandGateway

@@ -158,6 +158,12 @@ internal sealed class FakeManagedRuntimePorts : CallRecorder,
             requestId,
             answers,
         });
+
+    public Task DeferInputToLocalAsync(
+        string runtime,
+        string sessionExternalId,
+        string requestId,
+        CancellationToken cancellationToken = default) => Task.CompletedTask;
 }
 
 internal sealed class FakeOpenCodeTransport : CallRecorder, IOpenCodeTransport

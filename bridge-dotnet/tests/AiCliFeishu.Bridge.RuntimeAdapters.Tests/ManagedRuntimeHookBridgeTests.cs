@@ -157,6 +157,54 @@ public sealed class ManagedRuntimeHookBridgeTests
     }
 
     [TestMethod]
+    public async Task DeferredInputReturnsEmptyResponseAndCachesLocalFallback()
+    {
+        var sink = new RecordingRuntimeEventSink();
+        var bridge = Bridge(sink);
+        using var hook = JsonDocument.Parse("""
+            {
+              "hook_event_name": "PreToolUse",
+              "runtime": "codex",
+              "session_id": "session-1",
+              "tool_use_id": "tool-1",
+              "tool_name": "request_user_input",
+              "tool_input": {
+                "questions": [{
+                  "header": "环境",
+                  "id": "q1",
+                  "question": "使用哪个环境？",
+                  "options": [{ "label": "本机" }],
+                  "multiple": false
+                }]
+              }
+            }
+            """);
+
+        var handling = bridge.HandleAsync(hook.RootElement, "trace-local");
+        await sink.FirstPublished;
+        await bridge.DeferInputToLocalAsync(
+            RuntimeNames.Codex,
+            "session-1",
+            "tool-1");
+        var response = await handling;
+        var replay = await bridge.HandleAsync(hook.RootElement, "trace-local-replay");
+
+        Assert.AreEqual(0, response.EnumerateObject().Count());
+        Assert.AreEqual(0, replay.EnumerateObject().Count());
+        Assert.AreEqual(1, sink.Events.Count);
+        await Assert.ThrowsExceptionAsync<InvalidOperationException>(() =>
+            bridge.ResolveInputAsync(
+                Context,
+                RuntimeNames.Codex,
+                "session-1",
+                "tool-1",
+                new Dictionary<string, IReadOnlyList<string>>
+                {
+                    ["q1"] = ["本机"],
+                }));
+    }
+
+    [TestMethod]
     public async Task AbandonedInteractiveHookCanBePublishedAgainOnRetry()
     {
         var sink = new RecordingRuntimeEventSink();

@@ -209,10 +209,12 @@ public sealed class OpenCodeEventNormalizer(
             normalizedQuestions.Add(new
             {
                 id = $"opencode_question_{index}",
+                header = OptionalString(question, "header") ?? $"问题 {index}",
                 prompt,
                 options,
                 multiple = OptionalBoolean(question, "multiple"),
                 allowsCustom = OptionalBooleanValue(question, "custom") ?? true,
+                isSecret = false,
             });
         }
         if (normalizedQuestions.Count == 0)

@@ -162,6 +162,50 @@ public sealed class StateMachineTests
     }
 
     [TestMethod]
+    public void InputAnswersCanBeRecordedIncrementallyAndResetBeforeResolution()
+    {
+        var state = InputStateMachine.Create(
+            InputRegistryState.Empty,
+            new InputRequestState(
+                "input-1", "session-1", InputRequestStatuses.Pending,
+                Origin, Origin.AddMinutes(10),
+                [
+                    new("mode", false, false, ["safe", "fast"]),
+                    new("scope", true, false, ["code", "docs"]),
+                ],
+                new Dictionary<string, IReadOnlyList<string>>()));
+
+        var first = InputStateMachine.RecordAnswer(
+            state,
+            "input-1",
+            "mode",
+            ["safe"]);
+        var duplicate = InputStateMachine.RecordAnswer(
+            first.State,
+            "input-1",
+            "mode",
+            ["fast"]);
+        var complete = InputStateMachine.RecordAnswer(
+            first.State,
+            "input-1",
+            "scope",
+            ["code", "docs"]);
+        var reset = InputStateMachine.ClearAnswers(complete.State, "input-1");
+
+        Assert.IsTrue(first.Value);
+        Assert.IsFalse(duplicate.Value);
+        Assert.IsFalse(InputStateMachine.HasCompleteAnswers(first.State.Requests["input-1"]));
+        Assert.IsTrue(InputStateMachine.HasCompleteAnswers(complete.State.Requests["input-1"]));
+        Assert.IsTrue(reset.Value);
+        Assert.AreEqual(0, reset.State.Requests["input-1"].Answers.Count);
+        Assert.ThrowsException<ArgumentException>(() => InputStateMachine.RecordAnswer(
+            state,
+            "input-1",
+            "scope",
+            ["other"]));
+    }
+
+    [TestMethod]
     public void MessageClaimsAreIdempotentAndRetentionKeepsNewestEntries()
     {
         var state = MessageRouteRegistryState.Empty;

@@ -189,6 +189,23 @@ public sealed class ManagedRuntimeHookBridge(
         return Task.CompletedTask;
     }
 
+    public Task DeferInputToLocalAsync(
+        string runtime,
+        string sessionExternalId,
+        string requestId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runtime);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionExternalId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        cancellationToken.ThrowIfCancellationRequested();
+        Complete(
+            new(InteractionKind.Input, runtime, sessionExternalId, requestId),
+            EmptyResponse,
+            "input:local");
+        return Task.CompletedTask;
+    }
+
     public void ReleaseSession(string runtime, string sessionExternalId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(runtime);

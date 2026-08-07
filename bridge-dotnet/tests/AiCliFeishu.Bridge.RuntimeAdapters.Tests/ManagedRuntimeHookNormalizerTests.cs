@@ -84,9 +84,17 @@ public sealed class ManagedRuntimeHookNormalizerTests
             .GetProperty("questions")[0]
             .GetProperty("prompt")
             .GetString());
+        Assert.AreEqual("环境", runtimeEvent.Payload
+            .GetProperty("questions")[0]
+            .GetProperty("header")
+            .GetString());
         Assert.IsTrue(runtimeEvent.Payload
             .GetProperty("questions")[0]
             .GetProperty("allowsCustom")
+            .GetBoolean());
+        Assert.IsFalse(runtimeEvent.Payload
+            .GetProperty("questions")[0]
+            .GetProperty("isSecret")
             .GetBoolean());
         Assert.AreEqual(
             FixedTime.AddMinutes(20),

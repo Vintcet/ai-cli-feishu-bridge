@@ -550,6 +550,9 @@ public sealed class BridgeProductionAssemblyTests
         Assert.IsNotNull(services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgeActiveApprovalStateOwner))
             .ImplementationFactory);
+        Assert.IsNotNull(services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IBridgeActiveInputStateOwner))
+            .ImplementationFactory);
         var credentials = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgeFeishuCredentialSource));
         Assert.AreEqual(
@@ -692,6 +695,11 @@ public sealed class BridgeProductionAssemblyTests
                 descriptor.ServiceType == typeof(ActiveFeishuApprovalCoordinator))
                 .ImplementationType);
         Assert.AreEqual(
+            typeof(ActiveFeishuInputCoordinator),
+            services.Single(descriptor =>
+                descriptor.ServiceType == typeof(ActiveFeishuInputCoordinator))
+                .ImplementationType);
+        Assert.AreEqual(
             typeof(BridgeFeishuAdapterAssembly),
             services.Single(descriptor =>
                 descriptor.ServiceType == typeof(IBridgeFeishuAdapterAssembly))
@@ -810,6 +818,19 @@ public sealed class BridgeProductionAssemblyTests
             BridgeProductionAssemblyPreflight.Validate(options, services));
 
         StringAssert.Contains(error.Message, nameof(ActiveFeishuApprovalCoordinator));
+    }
+
+    [TestMethod]
+    public void ActivePreflightRejectsMissingInputCoordinator()
+    {
+        var options = ActiveOptions();
+        var services = CompleteActiveServices();
+        services.RemoveAll<ActiveFeishuInputCoordinator>();
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeProductionAssemblyPreflight.Validate(options, services));
+
+        StringAssert.Contains(error.Message, nameof(ActiveFeishuInputCoordinator));
     }
 
     [TestMethod]
@@ -960,8 +981,12 @@ public sealed class BridgeProductionAssemblyTests
         services.AddSingleton<IBridgeActiveApprovalStateOwner>(provider =>
             (IBridgeActiveApprovalStateOwner)provider
                 .GetRequiredService<IBridgePersistentBusinessStateOwner>());
+        services.AddSingleton<IBridgeActiveInputStateOwner>(provider =>
+            (IBridgeActiveInputStateOwner)provider
+                .GetRequiredService<IBridgePersistentBusinessStateOwner>());
         services.AddSingleton<ActiveFeishuPromptCoordinator>();
         services.AddSingleton<ActiveFeishuApprovalCoordinator>();
+        services.AddSingleton<ActiveFeishuInputCoordinator>();
         services.AddSingleton<ActiveFeishuIntentHandler>();
         services.AddSingleton<IBridgeFeishuIntentHandler>(provider =>
             provider.GetRequiredService<ActiveFeishuIntentHandler>());
@@ -1057,6 +1082,7 @@ public sealed class BridgeProductionAssemblyTests
     private sealed class RecordingPersistentBusinessStateOwner
         : IBridgePersistentBusinessStateOwner,
           IBridgeActiveApprovalStateOwner,
+          IBridgeActiveInputStateOwner,
           IBridgeRuntimeEventHandler
     {
         public BridgeBusinessStateSnapshot Snapshot { get; } =
@@ -1089,6 +1115,43 @@ public sealed class BridgeProductionAssemblyTests
             string sessionId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult<BridgeApprovalClaim?>(null);
+
+        public ValueTask<BridgeInputAnswerProgress?> TryRecordInputAnswerAsync(
+            string requestId,
+            string sessionId,
+            string questionId,
+            IReadOnlyList<string> answers,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<BridgeInputAnswerProgress?>(null);
+
+        public ValueTask<BridgeInputClaim?> TryClaimInputAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<BridgeInputClaim?>(null);
+
+        public ValueTask<BridgeInputClaim?> ResolveClaimedInputAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<BridgeInputClaim?>(null);
+
+        public ValueTask<BridgeInputClaim?> DeferClaimedInputAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<BridgeInputClaim?>(null);
+
+        public ValueTask ReleaseInputClaimAsync(
+            string requestId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.CompletedTask;
+
+        public ValueTask<BridgeInputClaim?> ResetClaimedInputAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<BridgeInputClaim?>(null);
     }
     private sealed class RecordingFeishuCredentialSource : IBridgeFeishuCredentialSource
     {
@@ -1185,6 +1248,7 @@ public sealed class BridgeProductionAssemblyTests
         public bool IsReady(string runtime, string sessionExternalId) => false;
         public Task ResolveApprovalAsync(RuntimeCommandContext context, string runtime, string sessionExternalId, string requestId, string decision, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task ResolveInputAsync(RuntimeCommandContext context, string runtime, string sessionExternalId, string requestId, IReadOnlyDictionary<string, IReadOnlyList<string>> answers, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task DeferInputToLocalAsync(string runtime, string sessionExternalId, string requestId, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
     private sealed class RecordingOpenCodeEndpointDirectory : IOpenCodeEndpointDirectory

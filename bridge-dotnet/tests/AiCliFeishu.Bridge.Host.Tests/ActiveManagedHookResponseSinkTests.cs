@@ -116,6 +116,89 @@ public sealed class ActiveManagedHookResponseSinkTests
     }
 
     [TestMethod]
+    public async Task DeferredInputCompletesOnlyMatchingWaiterAndFailsClosedOnRuntimeMismatch()
+    {
+        var events = new RecordingRuntimeEventSink();
+        var bridge = Bridge(events);
+        var directory = new RecordingTerminalDirectory
+        {
+            Identity = Identity(RuntimeNames.Codex),
+        };
+        var owner = new ActiveManagedHookResponseSink(
+            ActiveOptions(),
+            directory,
+            bridge);
+        using var firstHook = JsonDocument.Parse("""
+            {
+              "hook_event_name": "PreToolUse",
+              "runtime": "codex",
+              "session_id": "session-1",
+              "tool_use_id": "input-1",
+              "tool_name": "request_user_input",
+              "tool_input": {
+                "questions": [{
+                  "header": "环境",
+                  "id": "q1",
+                  "question": "使用哪个环境？",
+                  "options": [{ "label": "本机" }],
+                  "multiple": false
+                }]
+              }
+            }
+            """);
+        using var secondHook = JsonDocument.Parse("""
+            {
+              "hook_event_name": "PreToolUse",
+              "runtime": "codex",
+              "session_id": "session-1",
+              "tool_use_id": "input-2",
+              "tool_name": "request_user_input",
+              "tool_input": {
+                "questions": [{
+                  "header": "模式",
+                  "id": "q2",
+                  "question": "使用哪个模式？",
+                  "options": [{ "label": "安全" }],
+                  "multiple": false
+                }]
+              }
+            }
+            """);
+
+        var first = bridge.HandleAsync(firstHook.RootElement, "trace-input-1");
+        var second = bridge.HandleAsync(secondHook.RootElement, "trace-input-2");
+        await events.WaitForCountAsync(2);
+
+        await owner.DeferInputToLocalAsync(
+            RuntimeNames.Codex,
+            "session-1",
+            "input-1");
+        Assert.AreEqual(0, (await first).EnumerateObject().Count());
+        Assert.IsFalse(second.IsCompleted);
+        await owner.DeferInputToLocalAsync(
+            RuntimeNames.Codex,
+            "session-1",
+            "input-1");
+
+        directory.Identity = Identity(RuntimeNames.ClaudeCode);
+        var mismatch = await Assert.ThrowsExceptionAsync<InvalidOperationException>(() =>
+            owner.DeferInputToLocalAsync(
+                RuntimeNames.Codex,
+                "session-1",
+                "input-2"));
+        StringAssert.Contains(mismatch.Message, "运行时身份不一致");
+        Assert.IsFalse(second.IsCompleted);
+
+        directory.Identity = Identity(RuntimeNames.Codex);
+        await owner.DeferInputToLocalAsync(
+            RuntimeNames.Codex,
+            "session-1",
+            "input-2");
+        Assert.AreEqual(0, (await second).EnumerateObject().Count());
+        Assert.AreEqual(2, events.Events.Count);
+    }
+
+    [TestMethod]
     public async Task ClaimedSessionRuntimeMustMatchBeforeResponseIsReleased()
     {
         var events = new RecordingRuntimeEventSink();

@@ -82,6 +82,27 @@ internal sealed class ActiveManagedHookResponseSink(
             cancellationToken);
     }
 
+    public Task DeferInputToLocalAsync(
+        string runtime,
+        string sessionExternalId,
+        string requestId,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureActive();
+        cancellationToken.ThrowIfCancellationRequested();
+        runtime = RequireRuntime(runtime);
+        sessionExternalId = RequireIdentifier(
+            sessionExternalId,
+            nameof(sessionExternalId));
+        requestId = RequireIdentifier(requestId, nameof(requestId));
+        EnsureBoundRuntime(runtime, sessionExternalId);
+        return hookBridge.DeferInputToLocalAsync(
+            runtime,
+            sessionExternalId,
+            requestId,
+            cancellationToken);
+    }
+
     private void EnsureBoundRuntime(string runtime, string sessionExternalId)
     {
         var identity = terminals.FindClaimBySession(sessionExternalId);

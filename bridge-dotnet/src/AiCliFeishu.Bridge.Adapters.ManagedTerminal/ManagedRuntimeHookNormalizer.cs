@@ -226,10 +226,12 @@ public sealed class ManagedRuntimeHookNormalizer(
             normalizedQuestions.Add(new
             {
                 id,
+                header = OptionalString(question, "header") ?? id,
                 prompt,
                 options,
                 multiple = OptionalBoolean(question, "multiple"),
                 allowsCustom = OptionalBooleanValue(question, "custom") ?? true,
+                isSecret = OptionalBoolean(question, "isSecret"),
             });
         }
         if (normalizedQuestions.Count == 0)

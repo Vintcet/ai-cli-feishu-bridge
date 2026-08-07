@@ -157,7 +157,8 @@ public sealed record FeishuInputQuestionView(
 public sealed record FeishuInputCardTarget(
     string MessageId,
     string QuestionId,
-    int QuestionIndex);
+    int QuestionIndex,
+    string? SelectionKey = null);
 
 public sealed record FeishuCallbackResult(
     string ToastType,

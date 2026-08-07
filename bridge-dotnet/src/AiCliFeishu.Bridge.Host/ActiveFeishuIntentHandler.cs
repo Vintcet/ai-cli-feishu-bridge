@@ -16,7 +16,8 @@ internal sealed class ActiveFeishuIntentHandler(
     IFeishuGateway gateway,
     IFeishuCardRenderer renderer,
     ActiveFeishuPromptCoordinator prompts,
-    ActiveFeishuApprovalCoordinator approvals) : IBridgeFeishuIntentHandler
+    ActiveFeishuApprovalCoordinator approvals,
+    ActiveFeishuInputCoordinator inputs) : IBridgeFeishuIntentHandler
 {
     private const int MaximumListedSessions = 50;
     private const int MaximumRememberedNewFlows = 500;
@@ -40,6 +41,10 @@ internal sealed class ActiveFeishuIntentHandler(
             FeishuIntentTypes.MessagePrompt,
             FeishuIntentTypes.ApprovalResolve,
             FeishuIntentTypes.ApprovalDeferToLocal,
+            FeishuIntentTypes.InputAnswer,
+            FeishuIntentTypes.InputToggle,
+            FeishuIntentTypes.InputSubmit,
+            FeishuIntentTypes.InputDeferToLocal,
         ],
         StringComparer.Ordinal);
 
@@ -64,12 +69,24 @@ internal sealed class ActiveFeishuIntentHandler(
 
         return intent.IntentType switch
         {
-            FeishuIntentTypes.MessagePrompt => await prompts.HandleAsync(
+            FeishuIntentTypes.MessagePrompt => await inputs.TryHandleQuotedReplyAsync(
+                    intent,
+                    store,
+                    cancellationToken)
+                ? null
+                : await prompts.HandleAsync(
+                    intent,
+                    store,
+                    cancellationToken),
+            FeishuIntentTypes.ApprovalResolve or
+            FeishuIntentTypes.ApprovalDeferToLocal => await approvals.HandleAsync(
                 intent,
                 store,
                 cancellationToken),
-            FeishuIntentTypes.ApprovalResolve or
-            FeishuIntentTypes.ApprovalDeferToLocal => await approvals.HandleAsync(
+            FeishuIntentTypes.InputAnswer or
+            FeishuIntentTypes.InputToggle or
+            FeishuIntentTypes.InputSubmit or
+            FeishuIntentTypes.InputDeferToLocal => await inputs.HandleAsync(
                 intent,
                 store,
                 cancellationToken),

@@ -344,6 +344,177 @@ public sealed class ActivePersistentBusinessStateOwnerTests
     }
 
     [TestMethod]
+    public async Task InputAnswersClaimOnceAndCommitSessionOnlyAfterCompleteResolution()
+    {
+        await WriteStoreAsync(SessionStatuses.Waiting, approvalStatus: null);
+        await using var lease = new ActiveOwnerLeaseAcquirer(Options());
+        await lease.AcquireAsync();
+        var store = StoreOwner(lease);
+        await store.OpenAsync();
+        var owner = Owner(store, Origin.AddMinutes(3));
+        await owner.StartAsync(CancellationToken.None);
+        await owner.HandleAsync(Event(
+            "input-requested",
+            RuntimeEventTypes.InputRequested,
+            Origin.AddMinutes(2),
+            new
+            {
+                requestId = "input-1",
+                expiresAt = Origin.AddMinutes(22).ToString("O"),
+                questions = new object[]
+                {
+                    new
+                    {
+                        id = "mode",
+                        header = "模式",
+                        prompt = "请选择模式",
+                        multiple = false,
+                        allowsCustom = false,
+                        options = new[] { "safe", "fast" },
+                        isSecret = false,
+                    },
+                    new
+                    {
+                        id = "scope",
+                        header = "范围",
+                        prompt = "请选择范围",
+                        multiple = true,
+                        allowsCustom = false,
+                        options = new[] { "code", "docs" },
+                        isSecret = false,
+                    },
+                },
+            }));
+
+        var first = await owner.TryRecordInputAnswerAsync(
+            "input-1",
+            "session-1",
+            "mode",
+            ["safe"]);
+        var second = await owner.TryRecordInputAnswerAsync(
+            "input-1",
+            "session-1",
+            "scope",
+            ["code", "docs"]);
+        var duplicate = await owner.TryClaimInputAsync("input-1", "session-1");
+        var resolved = await owner.ResolveClaimedInputAsync("input-1", "session-1");
+
+        Assert.IsNotNull(first);
+        Assert.IsFalse(first.Complete);
+        Assert.IsNotNull(second);
+        Assert.IsTrue(second.Complete);
+        Assert.IsNull(duplicate);
+        Assert.IsNotNull(resolved);
+        Assert.AreEqual(InputRequestStatuses.Resolved, resolved.Input.Status);
+        Assert.AreEqual(SessionStatuses.Running, resolved.Session.Status);
+        Assert.AreEqual("模式", resolved.Input.Questions[0].Header);
+        Assert.AreEqual("请选择模式", resolved.Input.Questions[0].Prompt);
+        var reloaded = await new NodeJsonStoreRepository(directory!).LoadAsync();
+        Assert.AreEqual(SessionStatuses.Running, reloaded.Sessions.Sessions["session-1"].Status);
+
+        await store.CloseAsync();
+        await lease.ReleaseAsync();
+    }
+
+    [TestMethod]
+    public async Task ExternalInputCompletionUsesAnswersHeldByActiveClaim()
+    {
+        await WriteStoreAsync(SessionStatuses.Waiting, approvalStatus: null);
+        await using var lease = new ActiveOwnerLeaseAcquirer(Options());
+        await lease.AcquireAsync();
+        var store = StoreOwner(lease);
+        await store.OpenAsync();
+        var owner = Owner(store, Origin.AddMinutes(3));
+        await owner.StartAsync(CancellationToken.None);
+        await owner.HandleAsync(Event(
+            "input-requested",
+            RuntimeEventTypes.InputRequested,
+            Origin.AddMinutes(2),
+            new
+            {
+                requestId = "input-1",
+                expiresAt = Origin.AddMinutes(22).ToString("O"),
+                questions = new[]
+                {
+                    new
+                    {
+                        id = "mode",
+                        prompt = "请选择模式",
+                        multiple = false,
+                        allowsCustom = false,
+                        options = new[] { "safe", "fast" },
+                    },
+                },
+            }));
+        var progress = await owner.TryRecordInputAnswerAsync(
+            "input-1",
+            "session-1",
+            "mode",
+            ["safe"]);
+
+        await owner.HandleAsync(Event(
+            "input-resolved",
+            RuntimeEventTypes.InputResolvedExternally,
+            Origin.AddMinutes(4),
+            new { requestId = "input-1" }));
+        var observed = await owner.ResolveClaimedInputAsync("input-1", "session-1");
+
+        Assert.IsNotNull(progress);
+        Assert.IsTrue(progress.Complete);
+        Assert.IsNotNull(observed);
+        Assert.AreEqual(InputRequestStatuses.Resolved, observed.Input.Status);
+        CollectionAssert.AreEqual(new[] { "safe" }, observed.Input.Answers["mode"].ToArray());
+
+        await store.CloseAsync();
+        await lease.ReleaseAsync();
+    }
+
+    [TestMethod]
+    public async Task DeferredManagedInputReturnsSessionToWaitingWithoutPersistingAnswers()
+    {
+        await WriteStoreAsync(SessionStatuses.Waiting, approvalStatus: null);
+        await using var lease = new ActiveOwnerLeaseAcquirer(Options());
+        await lease.AcquireAsync();
+        var store = StoreOwner(lease);
+        await store.OpenAsync();
+        var owner = Owner(store, Origin.AddMinutes(3));
+        await owner.StartAsync(CancellationToken.None);
+        await owner.HandleAsync(Event(
+            "input-requested",
+            RuntimeEventTypes.InputRequested,
+            Origin.AddMinutes(2),
+            new
+            {
+                requestId = "input-1",
+                expiresAt = Origin.AddMinutes(22).ToString("O"),
+                questions = new[]
+                {
+                    new
+                    {
+                        id = "mode",
+                        prompt = "请选择模式",
+                        multiple = false,
+                        allowsCustom = false,
+                        options = new[] { "safe", "fast" },
+                    },
+                },
+            }));
+        Assert.IsNotNull(await owner.TryClaimInputAsync("input-1", "session-1"));
+
+        var deferred = await owner.DeferClaimedInputAsync("input-1", "session-1");
+
+        Assert.IsNotNull(deferred);
+        Assert.AreEqual(InputRequestStatuses.Local, deferred.Input.Status);
+        Assert.AreEqual(SessionStatuses.Waiting, deferred.Session.Status);
+        Assert.AreEqual(0, deferred.Input.Answers.Count);
+        var reloaded = await new NodeJsonStoreRepository(directory!).LoadAsync();
+        Assert.AreEqual(SessionStatuses.Waiting, reloaded.Sessions.Sessions["session-1"].Status);
+
+        await store.CloseAsync();
+        await lease.ReleaseAsync();
+    }
+
+    [TestMethod]
     public async Task RejectsPassiveOptionsAndRequiresAnOpenProductionStore()
     {
         var closedStore = new RecordingStoreOwner(SnapshotFromMemory());

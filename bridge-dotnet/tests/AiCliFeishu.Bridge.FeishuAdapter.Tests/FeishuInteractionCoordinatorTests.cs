@@ -221,6 +221,72 @@ public sealed class FeishuInteractionCoordinatorTests
     }
 
     [TestMethod]
+    public async Task RecordedAndResetInputCardsPreserveQuestionAndSelectionScope()
+    {
+        var gateway = new RecordingFeishuGateway();
+        var coordinator = Coordinator(gateway);
+        var questions = Questions();
+        var request = new InputRequestState(
+            "input-1",
+            "session-1",
+            InputRequestStatuses.Pending,
+            Origin,
+            Origin.AddMinutes(10),
+            questions.Select(item => new InputQuestionState(
+                item.Id,
+                item.Multiple,
+                item.AllowsCustom,
+                item.Options)).ToArray(),
+            new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+            {
+                ["q1"] = ["Codex"],
+            });
+        var targets = new[]
+        {
+            new FeishuInputCardTarget("card-q1", "q1", 0, "chat-1"),
+            new FeishuInputCardTarget("card-q2", "q2", 1, "chat-1"),
+        };
+
+        await coordinator.SynchronizeRecordedInputAsync(
+            request,
+            Session(),
+            questions,
+            targets,
+            "q1",
+            "event-1");
+        await coordinator.SynchronizePendingInputAsync(
+            request with
+            {
+                Answers = new Dictionary<string, IReadOnlyList<string>>(
+                    StringComparer.Ordinal),
+            },
+            Session(),
+            questions,
+            targets,
+            new Dictionary<string, IReadOnlyDictionary<string, IReadOnlyList<string>>>(
+                StringComparer.Ordinal)
+            {
+                ["chat-1"] = new Dictionary<string, IReadOnlyList<string>>(
+                    StringComparer.Ordinal)
+                {
+                    ["q2"] = ["快速"],
+                },
+            },
+            "event-2");
+
+        Assert.AreEqual(3, gateway.Patches.Count);
+        StringAssert.Contains(CardText(gateway.Patches[0].Card), "还剩 1 个问题");
+        var reset = gateway.Patches.Single(item => item.MessageId == "card-q2").Card;
+        StringAssert.Contains(CardText(reset), "✓ 快速");
+        var values = ActionRows(reset)
+            .SelectMany(row => row["actions"]!.AsArray())
+            .Select(button => ActionValue(button!))
+            .ToArray();
+        Assert.IsTrue(values.All(value =>
+            value["selectionKey"]!.GetValue<string>() == "chat-1"));
+    }
+
+    [TestMethod]
     public void RendererUsesAtMostThreeButtonsPerActionRow()
     {
         var renderer = new FeishuCardRenderer();

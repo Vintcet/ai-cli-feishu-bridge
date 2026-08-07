@@ -231,7 +231,8 @@ public sealed class FeishuCardRenderer : IFeishuCardRenderer
         FeishuInputQuestionView question,
         int questionIndex,
         int questionCount,
-        IReadOnlyList<string>? selectedAnswers = null)
+        IReadOnlyList<string>? selectedAnswers = null,
+        string? selectionKey = null)
     {
         ValidateQuestionPosition(questionIndex, questionCount);
         var runtime = RuntimeName(session.Runtime);
@@ -257,6 +258,7 @@ public sealed class FeishuCardRenderer : IFeishuCardRenderer
                     ["questionId"] = question.Id,
                     ["answer"] = option,
                 }));
+            AddSelectionKey(actions[^1], selectionKey);
         }
         if (question.Multiple)
         {
@@ -267,13 +269,16 @@ public sealed class FeishuCardRenderer : IFeishuCardRenderer
                 ["sessionId"] = session.SessionId,
                 ["questionId"] = question.Id,
             }));
+            AddSelectionKey(actions[^1], selectionKey);
         }
         actions.Add(Button("default", "转回本机回答", new()
         {
             ["action"] = FeishuCardActions.InputLocal,
             ["requestId"] = requestId,
             ["sessionId"] = session.SessionId,
+            ["questionId"] = question.Id,
         }));
+        AddSelectionKey(actions[^1], selectionKey);
         foreach (var row in actions.Chunk(3))
         {
             elements.Add(ActionRow(row.ToArray()));
@@ -287,6 +292,33 @@ public sealed class FeishuCardRenderer : IFeishuCardRenderer
             "orange",
             $"{runtime} 等待你回答（{questionIndex + 1}/{questionCount}）",
             elements);
+    }
+
+    public FeishuCardView RecordedInput(
+        FeishuSessionView session,
+        FeishuInputQuestionView question,
+        IReadOnlyList<string> answers,
+        int remainingQuestions,
+        int questionIndex,
+        int questionCount)
+    {
+        ValidateQuestionPosition(questionIndex, questionCount);
+        ArgumentNullException.ThrowIfNull(answers);
+        if (remainingQuestions < 1 || remainingQuestions >= questionCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(remainingQuestions));
+        }
+        var runtime = RuntimeName(session.Runtime);
+        var result = question.IsSecret
+            ? "已提供（已隐藏）"
+            : Truncate(string.Join("、", answers), 500);
+        return Card(
+            "blue",
+            $"{runtime} 已记录回答（{questionIndex + 1}/{questionCount}）",
+            [Markdown(
+                $"**会话：** {session.Label}\n**{Truncate(question.Header, 80)}**\n" +
+                $"{Truncate(question.Question, 800)}\n\n**已记录：** {result}\n" +
+                $"还剩 {remainingQuestions} 个问题。")]);
     }
 
     public FeishuCardView ResolvedInput(
@@ -406,6 +438,19 @@ public sealed class FeishuCardRenderer : IFeishuCardRenderer
             button["name"] = name;
         }
         return button;
+    }
+
+    private static void AddSelectionKey(JsonObject button, string? selectionKey)
+    {
+        if (string.IsNullOrWhiteSpace(selectionKey) ||
+            button["behaviors"] is not JsonArray behaviors ||
+            behaviors.Count != 1 ||
+            behaviors[0] is not JsonObject behavior ||
+            behavior["value"] is not JsonObject value)
+        {
+            return;
+        }
+        value["selectionKey"] = selectionKey;
     }
 
     private static JsonObject CommandValue(string action) => new()

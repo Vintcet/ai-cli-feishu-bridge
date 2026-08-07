@@ -82,6 +82,14 @@ public sealed class OpenCodeSseAndNormalizerTests
             .GetProperty("questions")[0]
             .GetProperty("allowsCustom")
             .GetBoolean());
+        Assert.AreEqual("确认", input.Payload
+            .GetProperty("questions")[0]
+            .GetProperty("header")
+            .GetString());
+        Assert.IsFalse(input.Payload
+            .GetProperty("questions")[0]
+            .GetProperty("isSecret")
+            .GetBoolean());
         Assert.IsFalse(input.Payload.GetRawText().Contains("private", StringComparison.Ordinal));
         Assert.IsTrue(BridgeProtocolValidator.Validate(approval).IsValid);
         Assert.IsTrue(BridgeProtocolValidator.Validate(input).IsValid);

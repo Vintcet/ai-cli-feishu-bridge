@@ -137,6 +137,102 @@ public sealed class FeishuInteractionCoordinator(
         }
     }
 
+    public async Task SynchronizeRecordedInputAsync(
+        InputRequestState request,
+        FeishuSessionView session,
+        IReadOnlyList<FeishuInputQuestionView> questions,
+        IReadOnlyList<FeishuInputCardTarget> targets,
+        string questionId,
+        string revisionToken,
+        CancellationToken cancellationToken = default)
+    {
+        if (request.Status != InputRequestStatuses.Pending ||
+            !request.Answers.TryGetValue(questionId, out var answers))
+        {
+            return;
+        }
+        var questionIndex = questions
+            .Select((question, index) => (question, index))
+            .SingleOrDefault(item => string.Equals(
+                item.question.Id,
+                questionId,
+                StringComparison.Ordinal));
+        if (questionIndex.question is null)
+        {
+            return;
+        }
+        var remaining = questions.Count - request.Answers.Count;
+        if (remaining < 1)
+        {
+            return;
+        }
+        var card = renderer.RecordedInput(
+            session,
+            questionIndex.question,
+            answers,
+            remaining,
+            questionIndex.index,
+            questions.Count);
+        foreach (var target in targets.Where(target => string.Equals(
+                     target.QuestionId,
+                     questionId,
+                     StringComparison.Ordinal)))
+        {
+            await PatchInputCardAsync(
+                target.MessageId,
+                $"input:{request.RequestId}:{questionId}:recorded:{revisionToken}",
+                card,
+                cancellationToken);
+        }
+    }
+
+    public async Task SynchronizePendingInputAsync(
+        InputRequestState request,
+        FeishuSessionView session,
+        IReadOnlyList<FeishuInputQuestionView> questions,
+        IReadOnlyList<FeishuInputCardTarget> targets,
+        IReadOnlyDictionary<
+            string,
+            IReadOnlyDictionary<string, IReadOnlyList<string>>> selections,
+        string revisionToken,
+        CancellationToken cancellationToken = default)
+    {
+        if (request.Status != InputRequestStatuses.Pending)
+        {
+            return;
+        }
+        var views = questions
+            .Select((question, index) => (question, index))
+            .ToDictionary(item => item.question.Id, StringComparer.Ordinal);
+        foreach (var target in targets)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!views.TryGetValue(target.QuestionId, out var view))
+            {
+                continue;
+            }
+            IReadOnlyList<string>? selected = null;
+            if (target.SelectionKey is not null &&
+                selections.TryGetValue(target.SelectionKey, out var scoped))
+            {
+                scoped.TryGetValue(target.QuestionId, out selected);
+            }
+            var card = renderer.PendingInput(
+                session,
+                request.RequestId,
+                view.question,
+                view.index,
+                questions.Count,
+                selected,
+                target.SelectionKey);
+            await PatchInputCardAsync(
+                target.MessageId,
+                $"input:{request.RequestId}:{target.QuestionId}:pending:{revisionToken}",
+                card,
+                cancellationToken);
+        }
+    }
+
     private async Task PatchAllAsync(
         IReadOnlyList<string> messageIds,
         string revision,
@@ -159,6 +255,27 @@ public sealed class FeishuInteractionCoordinator(
                 patchLedger.Release(messageId, revision);
                 throw;
             }
+        }
+    }
+
+    private async Task PatchInputCardAsync(
+        string messageId,
+        string revision,
+        FeishuCardView card,
+        CancellationToken cancellationToken)
+    {
+        if (!patchLedger.TryClaim(messageId, revision))
+        {
+            return;
+        }
+        try
+        {
+            await gateway.PatchCardAsync(messageId, card, cancellationToken);
+        }
+        catch
+        {
+            patchLedger.Release(messageId, revision);
+            throw;
         }
     }
 }

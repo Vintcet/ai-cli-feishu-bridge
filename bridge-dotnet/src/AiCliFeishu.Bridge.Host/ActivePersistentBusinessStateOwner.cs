@@ -11,11 +11,13 @@ internal sealed class ActivePersistentBusinessStateOwner(
     TimeProvider? timeProvider = null)
     : IBridgePersistentBusinessStateOwner,
       IBridgeActiveApprovalStateOwner,
+      IBridgeActiveInputStateOwner,
       IBridgeRuntimeEventHandler,
       IBridgeHostSubsystem,
       IBridgeHostSubsystemHealth
 {
     private readonly SemaphoreSlim writeGate = new(1, 1);
+    private readonly HashSet<string> inputClaims = new(StringComparer.Ordinal);
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
     private BridgeBusinessStateSnapshot snapshot =
         BridgeBusinessStateSnapshot.NotInitialized;
@@ -255,6 +257,272 @@ internal sealed class ActivePersistentBusinessStateOwner(
         }
     }
 
+    public async ValueTask<BridgeInputAnswerProgress?> TryRecordInputAnswerAsync(
+        string requestId,
+        string sessionId,
+        string questionId,
+        IReadOnlyList<string> answers,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(questionId);
+        ArgumentNullException.ThrowIfNull(answers);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            var current = RequireInitialized();
+            if (inputClaims.Contains(requestId) ||
+                !TryPendingInput(
+                    current,
+                    requestId,
+                    sessionId,
+                    out _,
+                    out var session))
+            {
+                return null;
+            }
+            var recorded = InputStateMachine.RecordAnswer(
+                current.Inputs,
+                requestId,
+                questionId,
+                answers);
+            if (!recorded.Value)
+            {
+                return null;
+            }
+            var input = recorded.State.Requests[requestId];
+            var complete = InputStateMachine.HasCompleteAnswers(input);
+            if (complete && !inputClaims.Add(requestId))
+            {
+                return null;
+            }
+            Volatile.Write(ref snapshot, current with
+            {
+                Revision = current.Revision + 1,
+                Inputs = recorded.State,
+            });
+            return new(input, session, complete);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public async ValueTask<BridgeInputClaim?> TryClaimInputAsync(
+        string requestId,
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            var current = RequireInitialized();
+            if (!TryPendingInput(
+                    current,
+                    requestId,
+                    sessionId,
+                    out var input,
+                    out var session) ||
+                !inputClaims.Add(requestId))
+            {
+                return null;
+            }
+            return new(input, session);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public async ValueTask<BridgeInputClaim?> ResolveClaimedInputAsync(
+        string requestId,
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            var current = RequireInitialized();
+            if (TryCompletedInput(current, requestId, sessionId, out var completed))
+            {
+                inputClaims.Remove(requestId);
+                return completed;
+            }
+            if (!TryClaimedInput(
+                    current,
+                    requestId,
+                    sessionId,
+                    out var input,
+                    out var session) ||
+                !InputStateMachine.HasCompleteAnswers(input))
+            {
+                return null;
+            }
+            var resolvedAt = Latest(
+                clock.GetUtcNow(),
+                input.CreatedAt,
+                session.LastSeenAt);
+            var resolved = InputStateMachine.Answer(
+                current.Inputs,
+                requestId,
+                input.Answers,
+                resolvedAt);
+            if (!resolved.Value)
+            {
+                return null;
+            }
+            var sessions = SessionStateMachine.Transition(
+                current.Sessions,
+                sessionId,
+                SessionStatuses.Running,
+                resolvedAt);
+            var next = current with
+            {
+                Revision = current.Revision + 1,
+                Sessions = sessions,
+                Inputs = resolved.State,
+            };
+            await PersistAsync(next, cancellationToken);
+            Volatile.Write(ref snapshot, next);
+            inputClaims.Remove(requestId);
+            return new(
+                next.Inputs.Requests[requestId],
+                next.Sessions.Sessions[sessionId]);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public async ValueTask<BridgeInputClaim?> DeferClaimedInputAsync(
+        string requestId,
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            var current = RequireInitialized();
+            if (!TryClaimedInput(
+                    current,
+                    requestId,
+                    sessionId,
+                    out var input,
+                    out var session))
+            {
+                return null;
+            }
+            var resolvedAt = Latest(
+                clock.GetUtcNow(),
+                input.CreatedAt,
+                session.LastSeenAt);
+            var cleared = InputStateMachine.ClearAnswers(
+                current.Inputs,
+                requestId);
+            var resolved = InputStateMachine.ResolveExternally(
+                cleared.State,
+                requestId,
+                resolvedAt);
+            if (!resolved.Value)
+            {
+                return null;
+            }
+            var sessions = SessionStateMachine.Transition(
+                current.Sessions,
+                sessionId,
+                session.Runtime == RuntimeNames.OpenCode
+                    ? SessionStatuses.PendingInput
+                    : SessionStatuses.Waiting,
+                resolvedAt);
+            var next = current with
+            {
+                Revision = current.Revision + 1,
+                Sessions = sessions,
+                Inputs = resolved.State,
+            };
+            await PersistAsync(next, cancellationToken);
+            Volatile.Write(ref snapshot, next);
+            inputClaims.Remove(requestId);
+            return new(
+                next.Inputs.Requests[requestId],
+                next.Sessions.Sessions[sessionId]);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public async ValueTask<BridgeInputClaim?> ResetClaimedInputAsync(
+        string requestId,
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            var current = RequireInitialized();
+            if (TryCompletedInput(current, requestId, sessionId, out var completed))
+            {
+                inputClaims.Remove(requestId);
+                return completed;
+            }
+            if (!TryClaimedInput(
+                    current,
+                    requestId,
+                    sessionId,
+                    out var input,
+                    out var session))
+            {
+                return null;
+            }
+            var reset = InputStateMachine.ClearAnswers(current.Inputs, requestId);
+            inputClaims.Remove(requestId);
+            if (reset.Value)
+            {
+                Volatile.Write(ref snapshot, current with
+                {
+                    Revision = current.Revision + 1,
+                    Inputs = reset.State,
+                });
+                input = reset.State.Requests[requestId];
+            }
+            return new(input, session);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public async ValueTask ReleaseInputClaimAsync(
+        string requestId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            inputClaims.Remove(requestId);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
     public async Task HandleAsync(
         RuntimeEventEnvelope runtimeEvent,
         CancellationToken cancellationToken = default)
@@ -366,10 +634,18 @@ internal sealed class ActivePersistentBusinessStateOwner(
                         EnsureSession(sessions, runtimeEvent);
                         var requestId = PayloadString(runtimeEvent.Payload, "requestId");
                         EnsureInputSession(inputs, requestId, sessionId);
-                        var transition = InputStateMachine.ResolveExternally(
-                            inputs,
-                            requestId,
-                            occurredAt);
+                        var pending = inputs.Requests[requestId];
+                        var transition = inputClaims.Contains(requestId) &&
+                            InputStateMachine.HasCompleteAnswers(pending)
+                                ? InputStateMachine.Answer(
+                                    inputs,
+                                    requestId,
+                                    pending.Answers,
+                                    occurredAt)
+                                : InputStateMachine.ResolveExternally(
+                                    inputs,
+                                    requestId,
+                                    occurredAt);
                         if (!transition.Value)
                         {
                             break;
@@ -404,6 +680,9 @@ internal sealed class ActivePersistentBusinessStateOwner(
             };
             await PersistAsync(next, cancellationToken, sessionExtensionPatch);
             Volatile.Write(ref snapshot, next);
+            inputClaims.RemoveWhere(requestId =>
+                !next.Inputs.Requests.TryGetValue(requestId, out var input) ||
+                input.Status != InputRequestStatuses.Pending);
         }
         finally
         {
@@ -444,6 +723,60 @@ internal sealed class ActivePersistentBusinessStateOwner(
         }
         approval = null!;
         session = null!;
+        return false;
+    }
+
+    private bool TryClaimedInput(
+        BridgeBusinessStateSnapshot current,
+        string requestId,
+        string sessionId,
+        out InputRequestState input,
+        out SessionState session)
+    {
+        if (inputClaims.Contains(requestId) &&
+            TryPendingInput(current, requestId, sessionId, out input, out session))
+        {
+            return true;
+        }
+        input = null!;
+        session = null!;
+        return false;
+    }
+
+    private static bool TryPendingInput(
+        BridgeBusinessStateSnapshot current,
+        string requestId,
+        string sessionId,
+        out InputRequestState input,
+        out SessionState session)
+    {
+        if (current.Inputs.Requests.TryGetValue(requestId, out input!) &&
+            input.Status == InputRequestStatuses.Pending &&
+            string.Equals(input.SessionId, sessionId, StringComparison.Ordinal) &&
+            current.Sessions.Sessions.TryGetValue(sessionId, out session!))
+        {
+            return true;
+        }
+        input = null!;
+        session = null!;
+        return false;
+    }
+
+    private static bool TryCompletedInput(
+        BridgeBusinessStateSnapshot current,
+        string requestId,
+        string sessionId,
+        out BridgeInputClaim? completed)
+    {
+        if (current.Inputs.Requests.TryGetValue(requestId, out var input) &&
+            input.Status == InputRequestStatuses.Resolved &&
+            string.Equals(input.SessionId, sessionId, StringComparison.Ordinal) &&
+            current.Sessions.Sessions.TryGetValue(sessionId, out var session))
+        {
+            completed = new(input, session);
+            return true;
+        }
+        completed = null;
         return false;
     }
 
@@ -695,7 +1028,10 @@ internal sealed class ActivePersistentBusinessStateOwner(
                 !question.TryGetProperty("allowsCustom", out var custom) || custom.GetBoolean(),
                 question.TryGetProperty("options", out var options)
                     ? options.EnumerateArray().Select(item => item.GetString()!).ToArray()
-                    : []))
+                    : [],
+                OptionalPayloadString(question, "header"),
+                OptionalPayloadString(question, "prompt") ?? PayloadString(question, "id"),
+                question.TryGetProperty("isSecret", out var secret) && secret.GetBoolean()))
             .ToArray();
         return InputStateMachine.Create(
             state,

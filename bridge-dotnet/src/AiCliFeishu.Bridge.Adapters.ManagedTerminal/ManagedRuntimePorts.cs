@@ -75,4 +75,10 @@ public interface IManagedHookResponseSink
         string requestId,
         IReadOnlyDictionary<string, IReadOnlyList<string>> answers,
         CancellationToken cancellationToken = default);
+
+    Task DeferInputToLocalAsync(
+        string runtime,
+        string sessionExternalId,
+        string requestId,
+        CancellationToken cancellationToken = default);
 }

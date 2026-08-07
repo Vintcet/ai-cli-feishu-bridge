@@ -104,7 +104,16 @@ public interface IFeishuCardRenderer
         FeishuInputQuestionView question,
         int questionIndex,
         int questionCount,
-        IReadOnlyList<string>? selectedAnswers = null);
+        IReadOnlyList<string>? selectedAnswers = null,
+        string? selectionKey = null);
+
+    FeishuCardView RecordedInput(
+        FeishuSessionView session,
+        FeishuInputQuestionView question,
+        IReadOnlyList<string> answers,
+        int remainingQuestions,
+        int questionIndex,
+        int questionCount);
 
     FeishuCardView ResolvedInput(
         FeishuSessionView session,

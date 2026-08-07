@@ -12,7 +12,10 @@ public sealed record InputQuestionState(
     string Id,
     bool Multiple,
     bool AllowsCustom,
-    IReadOnlyList<string> Options);
+    IReadOnlyList<string> Options,
+    string? Header = null,
+    string? Prompt = null,
+    bool IsSecret = false);
 
 public sealed record InputRequestState(
     string RequestId,
@@ -77,6 +80,64 @@ public static class InputStateMachine
         }
         ValidateAnswers(request, answers);
         return Resolve(state, request, InputRequestStatuses.Resolved, answers, resolvedAt);
+    }
+
+    public static StateTransition<InputRegistryState, bool> RecordAnswer(
+        InputRegistryState state,
+        string requestId,
+        string questionId,
+        IReadOnlyList<string> answers)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(questionId);
+        ArgumentNullException.ThrowIfNull(answers);
+        if (!state.Requests.TryGetValue(requestId, out var request) ||
+            request.Status != InputRequestStatuses.Pending ||
+            request.Answers.ContainsKey(questionId))
+        {
+            return new(state, false);
+        }
+        var question = request.Questions.SingleOrDefault(item =>
+            string.Equals(item.Id, questionId, StringComparison.Ordinal));
+        if (question is null)
+        {
+            return new(state, false);
+        }
+        ValidateQuestionAnswer(question, answers);
+        var recorded = CloneAnswers(request.Answers);
+        recorded.Add(questionId, answers.ToArray());
+        var requests = Copy(state.Requests);
+        requests[requestId] = request with { Answers = recorded };
+        return new(state with { Requests = requests }, true);
+    }
+
+    public static StateTransition<InputRegistryState, bool> ClearAnswers(
+        InputRegistryState state,
+        string requestId)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        if (!state.Requests.TryGetValue(requestId, out var request) ||
+            request.Status != InputRequestStatuses.Pending ||
+            request.Answers.Count == 0)
+        {
+            return new(state, false);
+        }
+        var requests = Copy(state.Requests);
+        requests[requestId] = request with
+        {
+            Answers = new Dictionary<string, IReadOnlyList<string>>(
+                StringComparer.Ordinal),
+        };
+        return new(state with { Requests = requests }, true);
+    }
+
+    public static bool HasCompleteAnswers(InputRequestState request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return request.Questions.Count > 0 &&
+            request.Questions.All(question => request.Answers.ContainsKey(question.Id));
     }
 
     public static StateTransition<InputRegistryState, bool> ResolveExternally(
@@ -148,16 +209,26 @@ public static class InputStateMachine
         }
         foreach (var question in request.Questions)
         {
-            var values = answers[question.Id];
-            if (values.Count == 0 || (!question.Multiple && values.Count != 1))
-            {
-                throw new ArgumentException($"问题 {question.Id} 的答案数量不正确。", nameof(answers));
-            }
-            if (!question.AllowsCustom && values.Any(value =>
-                    !question.Options.Contains(value, StringComparer.Ordinal)))
-            {
-                throw new ArgumentException($"问题 {question.Id} 不接受自定义答案。", nameof(answers));
-            }
+            ValidateQuestionAnswer(question, answers[question.Id]);
+        }
+    }
+
+    private static void ValidateQuestionAnswer(
+        InputQuestionState question,
+        IReadOnlyList<string> answers)
+    {
+        if (answers.Count == 0 || (!question.Multiple && answers.Count != 1))
+        {
+            throw new ArgumentException($"问题 {question.Id} 的答案数量不正确。", nameof(answers));
+        }
+        if (answers.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException($"问题 {question.Id} 的答案不能为空。", nameof(answers));
+        }
+        if (!question.AllowsCustom && answers.Any(value =>
+                !question.Options.Contains(value, StringComparer.Ordinal)))
+        {
+            throw new ArgumentException($"问题 {question.Id} 不接受自定义答案。", nameof(answers));
         }
     }
 

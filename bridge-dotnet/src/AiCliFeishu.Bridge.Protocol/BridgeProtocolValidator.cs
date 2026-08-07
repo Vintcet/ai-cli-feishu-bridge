@@ -211,6 +211,12 @@ public static class BridgeProtocolValidator
             }
             RequiredString(question, "id", errors, $"{prefix}.id");
             RequiredString(question, "prompt", errors, $"{prefix}.prompt");
+            OptionalKind(
+                question,
+                "header",
+                JsonValueKind.String,
+                errors,
+                path: $"{prefix}.header");
             OptionalStringArray(question, "options", errors, $"{prefix}.options");
             OptionalKind(
                 question,
@@ -226,6 +232,13 @@ public static class BridgeProtocolValidator
                 errors,
                 JsonValueKind.False,
                 $"{prefix}.allowsCustom");
+            OptionalKind(
+                question,
+                "isSecret",
+                JsonValueKind.True,
+                errors,
+                JsonValueKind.False,
+                $"{prefix}.isSecret");
             index++;
         }
     }

@@ -83,6 +83,13 @@ public sealed class PassiveManagedHookResponseSink : IManagedHookResponseSink
         CancellationToken cancellationToken = default) =>
         throw Unavailable();
 
+    public Task DeferInputToLocalAsync(
+        string runtime,
+        string sessionExternalId,
+        string requestId,
+        CancellationToken cancellationToken = default) =>
+        throw Unavailable();
+
     private static InvalidOperationException Unavailable() =>
         new("Passive Host 不回写 Managed Terminal Hook。");
 }
