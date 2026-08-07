@@ -385,6 +385,39 @@ public sealed class BridgeControlApiTests
     }
 
     [TestMethod]
+    public async Task RuntimeLaunchEndpointsAuthenticateAndRemainBlockedInPassiveHost()
+    {
+        using var missingToken = await client!.PostAsJsonAsync(
+            "/runtime-launches/claim",
+            new { });
+        Assert.AreEqual(HttpStatusCode.Unauthorized, missingToken.StatusCode);
+
+        using var claim = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/runtime-launches/claim")
+        {
+            Content = JsonContent.Create(new { }),
+        };
+        claim.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var claimResponse = await client!.SendAsync(claim);
+        Assert.AreEqual(HttpStatusCode.ServiceUnavailable, claimResponse.StatusCode);
+
+        using var complete = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/runtime-launches/complete")
+        {
+            Content = JsonContent.Create(new
+            {
+                requestId = "request-passive",
+                success = true,
+            }),
+        };
+        complete.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var completeResponse = await client.SendAsync(complete);
+        Assert.AreEqual(HttpStatusCode.ServiceUnavailable, completeResponse.StatusCode);
+    }
+
+    [TestMethod]
     public async Task StandardIngressReturnsUnavailableWhenStoreProjectionIsIncompatible()
     {
         await File.WriteAllTextAsync(Path.Combine(directory!, "sessions.json"), "{invalid");

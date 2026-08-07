@@ -115,22 +115,27 @@ public sealed class BridgeRuntimeCommandIngress : IBridgeRuntimeCommandGateway, 
                 return;
             }
 
-            var session = new RuntimeSession(command.Session!.ExternalId, command.Session.Cwd);
-            bool ready;
-            try
+            if (RequiresReadySession(command.CommandType))
             {
-                ready = gateway.IsReady(command.Runtime, session);
-            }
-            catch (KeyNotFoundException error)
-            {
-                throw new BridgeRuntimeCommandUnavailableException(
-                    $"运行时 {command.Runtime} 尚未注册 Adapter。",
-                    error);
-            }
-            if (!ready)
-            {
-                throw new BridgeRuntimeCommandUnavailableException(
-                    $"运行时 {command.Runtime} 的目标会话尚未就绪。");
+                var session = new RuntimeSession(
+                    command.Session!.ExternalId,
+                    command.Session.Cwd);
+                bool ready;
+                try
+                {
+                    ready = gateway.IsReady(command.Runtime, session);
+                }
+                catch (KeyNotFoundException error)
+                {
+                    throw new BridgeRuntimeCommandUnavailableException(
+                        $"运行时 {command.Runtime} 尚未注册 Adapter。",
+                        error);
+                }
+                if (!ready)
+                {
+                    throw new BridgeRuntimeCommandUnavailableException(
+                        $"运行时 {command.Runtime} 的目标会话尚未就绪。");
+                }
             }
 
             try
@@ -160,6 +165,11 @@ public sealed class BridgeRuntimeCommandIngress : IBridgeRuntimeCommandGateway, 
     }
 
     public void Dispose() => dispatchGate.Dispose();
+
+    private static bool RequiresReadySession(string commandType) => commandType is
+        RuntimeCommandTypes.PromptSend or
+        RuntimeCommandTypes.ApprovalResolve or
+        RuntimeCommandTypes.InputResolve;
 }
 
 public sealed class BridgeRuntimeEventIngress(

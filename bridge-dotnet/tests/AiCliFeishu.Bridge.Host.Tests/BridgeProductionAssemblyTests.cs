@@ -241,6 +241,18 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void PassivePreflightRejectsConcreteActiveManagedRuntimeLifecycle()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<ActiveManagedRuntimeLifecycle>()));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+    }
+
+    [TestMethod]
     public void PassivePreflightRejectsUnknownHostedLifecycle()
     {
         var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
@@ -308,6 +320,9 @@ public sealed class BridgeProductionAssemblyTests
         Assert.IsFalse(error.Message.Contains(
             nameof(BridgeProductionCapability.ManagedTerminalTransport),
             StringComparison.Ordinal));
+        Assert.IsFalse(error.Message.Contains(
+            nameof(BridgeProductionCapability.ManagedRuntimeLifecycle),
+            StringComparison.Ordinal));
         Assert.IsFalse(services.Any(descriptor =>
             descriptor.ImplementationType?.Name.StartsWith("Passive", StringComparison.Ordinal) == true));
         Assert.IsFalse(services.Any(descriptor =>
@@ -336,7 +351,7 @@ public sealed class BridgeProductionAssemblyTests
         var manifest = (BridgeProductionAssemblyManifest)services.Single(descriptor =>
             descriptor.ServiceType == typeof(BridgeProductionAssemblyManifest))
             .ImplementationInstance!;
-        Assert.AreEqual(8, manifest.Owners.Count);
+        Assert.AreEqual(9, manifest.Owners.Count);
         Assert.AreEqual(
             BridgeProductionCapability.ActiveOwnerLease,
             manifest.Owners[0].Capability);
@@ -381,6 +396,12 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveManagedTerminalTransport),
             manifest.Owners[7].OwnerType);
+        Assert.AreEqual(
+            BridgeProductionCapability.ManagedRuntimeLifecycle,
+            manifest.Owners[8].Capability);
+        Assert.AreEqual(
+            typeof(ActiveManagedRuntimeLifecycle),
+            manifest.Owners[8].OwnerType);
         var businessOwner = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgePersistentBusinessStateOwner));
         Assert.AreEqual(
@@ -411,6 +432,24 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveManagedTerminalTransport),
             terminalTransport.ImplementationType);
+        var runtimeLifecycle = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IManagedRuntimeLifecycle));
+        Assert.AreEqual(
+            typeof(ActiveManagedRuntimeLifecycle),
+            runtimeLifecycle.ImplementationType);
+        var launchCoordinator = services.Single(descriptor =>
+            descriptor.ServiceType ==
+                typeof(IBridgeManagedRuntimeLaunchCoordinator));
+        Assert.IsNotNull(launchCoordinator.ImplementationFactory);
+        var lifecycleOwner = new RecordingManagedRuntimeLifecycle();
+        var lifecycleServices = new ServiceCollection();
+        lifecycleServices.AddSingleton<IManagedRuntimeLifecycle>(lifecycleOwner);
+        using (var provider = lifecycleServices.BuildServiceProvider())
+        {
+            Assert.AreSame(
+                lifecycleOwner,
+                launchCoordinator.ImplementationFactory(provider));
+        }
         var registrationDirectory = services.Single(descriptor =>
             descriptor.ServiceType ==
                 typeof(IBridgeManagedTerminalRegistrationDirectory));
@@ -701,8 +740,14 @@ public sealed class BridgeProductionAssemblyTests
         public Task SendAsync(RuntimeCommandContext context, ManagedTerminalTarget target, string prompt, ManagedTerminalSubmitMode submitMode, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
-    private sealed class RecordingManagedRuntimeLifecycle : IManagedRuntimeLifecycle
+    private sealed class RecordingManagedRuntimeLifecycle :
+        IManagedRuntimeLifecycle,
+        IBridgeManagedRuntimeLaunchCoordinator
     {
+        public BridgeManagedRuntimeLifecycleSnapshot Snapshot { get; } = new(0, 0, 0, 0);
+        public BridgeManagedRuntimeLaunchRequest? Claim() => null;
+        public BridgeManagedRuntimeLaunchCompletionResult Complete(BridgeManagedRuntimeLaunchCompletion completion) => new(true);
+        public Task DrainAsync(string sessionExternalId, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task LaunchAsync(RuntimeCommandContext context, string runtime, string sessionExternalId, string cwd, string? prompt, bool elevated, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task ResumeAsync(RuntimeCommandContext context, string runtime, string sessionExternalId, string? cwd, string? prompt, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task StopAsync(RuntimeCommandContext context, string runtime, string sessionExternalId, string? reason, CancellationToken cancellationToken = default) => Task.CompletedTask;

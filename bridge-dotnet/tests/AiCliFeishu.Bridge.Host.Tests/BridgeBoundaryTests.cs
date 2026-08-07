@@ -126,6 +126,31 @@ public sealed class BridgeBoundaryTests
     }
 
     [TestMethod]
+    public async Task ActiveCommandGatewayDispatchesLifecycleBeforeSessionIsReady()
+    {
+        var adapter = new RecordingLifecycleRuntimeAdapter();
+        var registry = new RuntimeAdapterRegistry();
+        registry.Register(adapter);
+        using var gateway = new BridgeRuntimeCommandIngress(
+            new BridgeRuntimeCommandGateway(new RuntimeCommandDispatcher(registry)),
+            new BridgeHostOptions(
+                Path.Combine(Path.GetTempPath(), "bridge-active-command-test"),
+                System.Net.IPAddress.Loopback,
+                0,
+                BridgeOwnershipMode.Active,
+                "active-command-test"));
+
+        await gateway.DispatchAsync(LifecycleCommand());
+
+        Assert.AreEqual(RuntimeCommandTypes.SessionLaunch, adapter.LastCommand!.CommandType);
+        await Assert.ThrowsExceptionAsync<BridgeRuntimeCommandUnavailableException>(() =>
+            gateway.DispatchAsync(Command(RuntimeNames.Codex) with
+            {
+                CommandId = "prompt-not-ready",
+            }));
+    }
+
+    [TestMethod]
     public void PassiveHostRuntimeAdaptersAreRegisteredButNeverReady()
     {
         var options = BridgeHostOptions.Passive(
@@ -339,6 +364,22 @@ public sealed class BridgeBoundaryTests
         Payload = JsonSerializer.SerializeToElement(new { prompt = "继续", mode = "steer" }),
     };
 
+    private static RuntimeCommandEnvelope LifecycleCommand() => new()
+    {
+        ProtocolVersion = BridgeProtocolVersion.Current,
+        Runtime = RuntimeNames.Codex,
+        Session = new RuntimeSessionReference
+        {
+            ExternalId = "session-lifecycle",
+            Cwd = "C:/repo",
+        },
+        TraceId = "trace-lifecycle",
+        CommandId = "command-session-launch",
+        CommandType = RuntimeCommandTypes.SessionLaunch,
+        CreatedAt = "2026-08-06T10:00:00.000Z",
+        Payload = JsonSerializer.SerializeToElement(new { cwd = "C:/repo" }),
+    };
+
     private static FeishuIntent Intent() => new(
         "feishu-event-1",
         FeishuIntentTypes.CommandMenu,
@@ -410,6 +451,32 @@ public sealed class BridgeBoundaryTests
         public RuntimeCommandEnvelope? LastCommand { get; private set; }
 
         public bool IsReady(RuntimeSession session) => true;
+
+        public Task ExecuteAsync(
+            RuntimeCommandEnvelope command,
+            CancellationToken cancellationToken = default)
+        {
+            LastCommand = command;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingLifecycleRuntimeAdapter : IRuntimeAdapter
+    {
+        public string Runtime => RuntimeNames.Codex;
+
+        public IReadOnlySet<RuntimeCapability> Capabilities { get; } =
+            new HashSet<RuntimeCapability>
+            {
+                RuntimeCapability.PromptSend,
+                RuntimeCapability.SessionLaunch,
+                RuntimeCapability.SessionResume,
+                RuntimeCapability.SessionStop,
+            };
+
+        public RuntimeCommandEnvelope? LastCommand { get; private set; }
+
+        public bool IsReady(RuntimeSession session) => false;
 
         public Task ExecuteAsync(
             RuntimeCommandEnvelope command,
