@@ -13,6 +13,9 @@ public sealed record FeishuGatewayOptions(
     TimeSpan? TokenRefreshSkew = null)
 {
     public static Uri DefaultBaseUri { get; } = new("https://open.feishu.cn/");
+
+    public override string ToString() =>
+        "Feishu Gateway options (credentials redacted)";
 }
 
 public sealed class HttpFeishuGateway : IFeishuGateway

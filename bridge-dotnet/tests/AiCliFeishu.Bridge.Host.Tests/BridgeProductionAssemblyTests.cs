@@ -187,6 +187,18 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void PassivePreflightRejectsConcreteActiveFeishuGateway()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<ActiveFeishuGateway>()));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+    }
+
+    [TestMethod]
     public void PassivePreflightRejectsUnknownHostedLifecycle()
     {
         var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
@@ -245,6 +257,9 @@ public sealed class BridgeProductionAssemblyTests
         Assert.IsFalse(error.Message.Contains(
             nameof(BridgeProductionCapability.FeishuEventStream),
             StringComparison.Ordinal));
+        Assert.IsFalse(error.Message.Contains(
+            nameof(BridgeProductionCapability.FeishuOutboundMessaging),
+            StringComparison.Ordinal));
         Assert.IsFalse(services.Any(descriptor =>
             descriptor.ImplementationType?.Name.StartsWith("Passive", StringComparison.Ordinal) == true));
         Assert.IsFalse(services.Any(descriptor =>
@@ -273,7 +288,7 @@ public sealed class BridgeProductionAssemblyTests
         var manifest = (BridgeProductionAssemblyManifest)services.Single(descriptor =>
             descriptor.ServiceType == typeof(BridgeProductionAssemblyManifest))
             .ImplementationInstance!;
-        Assert.AreEqual(5, manifest.Owners.Count);
+        Assert.AreEqual(6, manifest.Owners.Count);
         Assert.AreEqual(
             BridgeProductionCapability.ActiveOwnerLease,
             manifest.Owners[0].Capability);
@@ -300,6 +315,12 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveFeishuEventSource),
             manifest.Owners[4].OwnerType);
+        Assert.AreEqual(
+            BridgeProductionCapability.FeishuOutboundMessaging,
+            manifest.Owners[5].Capability);
+        Assert.AreEqual(
+            typeof(ActiveFeishuGateway),
+            manifest.Owners[5].OwnerType);
         var businessOwner = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgePersistentBusinessStateOwner));
         Assert.AreEqual(
@@ -315,6 +336,11 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveFeishuEventSource),
             eventSource.ImplementationType);
+        var gateway = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IFeishuGateway));
+        Assert.AreEqual(
+            typeof(ActiveFeishuGateway),
+            gateway.ImplementationType);
         Assert.IsTrue(services.Any(descriptor =>
             descriptor.ServiceType == typeof(IBridgeRuntimeEventHandler) &&
             descriptor.ImplementationFactory is not null));
