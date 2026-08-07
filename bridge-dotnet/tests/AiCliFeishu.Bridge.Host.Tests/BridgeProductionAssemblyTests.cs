@@ -278,6 +278,36 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void PassivePreflightRejectsConcreteActiveOpenCodeEndpointDirectory()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<ActiveOpenCodeEndpointDirectory>()));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+    }
+
+    [TestMethod]
+    public void PassivePreflightRejectsOpenCodeRegistrationDirectoryBeforeResolvingIt()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+        var constructed = false;
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<IBridgeOpenCodeEndpointRegistrationDirectory>(_ =>
+                {
+                    constructed = true;
+                    return new RecordingOpenCodeRegistrationDirectory();
+                })));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+        Assert.IsFalse(constructed);
+    }
+
+    [TestMethod]
     public void PassivePreflightRejectsUnknownHostedLifecycle()
     {
         var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
@@ -354,6 +384,9 @@ public sealed class BridgeProductionAssemblyTests
         Assert.IsFalse(error.Message.Contains(
             nameof(BridgeProductionCapability.ManagedHookResponses),
             StringComparison.Ordinal));
+        Assert.IsFalse(error.Message.Contains(
+            nameof(BridgeProductionCapability.OpenCodeEndpointDirectory),
+            StringComparison.Ordinal));
         Assert.IsFalse(services.Any(descriptor =>
             descriptor.ImplementationType?.Name.StartsWith("Passive", StringComparison.Ordinal) == true));
         Assert.IsFalse(services.Any(descriptor =>
@@ -363,7 +396,7 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(typeof(ActiveProductionStoreOwner), storeOwner.ImplementationType);
         var subsystems = services.Where(descriptor =>
             descriptor.ServiceType == typeof(IBridgeHostSubsystem)).ToArray();
-        Assert.AreEqual(4, subsystems.Length);
+        Assert.AreEqual(5, subsystems.Length);
         Assert.IsTrue(subsystems.All(descriptor =>
             descriptor.ImplementationFactory is not null));
         var hostedServices = services.Where(descriptor =>
@@ -382,7 +415,7 @@ public sealed class BridgeProductionAssemblyTests
         var manifest = (BridgeProductionAssemblyManifest)services.Single(descriptor =>
             descriptor.ServiceType == typeof(BridgeProductionAssemblyManifest))
             .ImplementationInstance!;
-        Assert.AreEqual(11, manifest.Owners.Count);
+        Assert.AreEqual(12, manifest.Owners.Count);
         Assert.AreEqual(
             BridgeProductionCapability.ActiveOwnerLease,
             manifest.Owners[0].Capability);
@@ -445,6 +478,12 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveManagedHookResponseSink),
             manifest.Owners[10].OwnerType);
+        Assert.AreEqual(
+            BridgeProductionCapability.OpenCodeEndpointDirectory,
+            manifest.Owners[11].Capability);
+        Assert.AreEqual(
+            typeof(ActiveOpenCodeEndpointDirectory),
+            manifest.Owners[11].OwnerType);
         var businessOwner = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgePersistentBusinessStateOwner));
         Assert.AreEqual(
@@ -494,6 +533,25 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveManagedHookResponseSink),
             hookResponses.ImplementationType);
+        var openCodeDirectory = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IOpenCodeEndpointDirectory));
+        Assert.AreEqual(
+            typeof(ActiveOpenCodeEndpointDirectory),
+            openCodeDirectory.ImplementationType);
+        var openCodeRegistrations = services.Single(descriptor =>
+            descriptor.ServiceType ==
+                typeof(IBridgeOpenCodeEndpointRegistrationDirectory));
+        Assert.IsNotNull(openCodeRegistrations.ImplementationFactory);
+        var openCodeDirectoryOwner = new RecordingOpenCodeRegistrationDirectory();
+        var openCodeServices = new ServiceCollection();
+        openCodeServices.AddSingleton<IOpenCodeEndpointDirectory>(
+            openCodeDirectoryOwner);
+        using (var provider = openCodeServices.BuildServiceProvider())
+        {
+            Assert.AreSame(
+                openCodeDirectoryOwner,
+                openCodeRegistrations.ImplementationFactory(provider));
+        }
         var lifecycleOwner = new RecordingManagedRuntimeLifecycle();
         var lifecycleServices = new ServiceCollection();
         lifecycleServices.AddSingleton<IManagedRuntimeLifecycle>(lifecycleOwner);
@@ -830,6 +888,35 @@ public sealed class BridgeProductionAssemblyTests
     {
         public OpenCodeEndpoint? FindBySession(string sessionExternalId) => null;
         public IReadOnlyList<OpenCodeEndpoint> ListReady() => [];
+    }
+
+    private sealed class RecordingOpenCodeRegistrationDirectory :
+        IOpenCodeEndpointDirectory,
+        IBridgeOpenCodeEndpointRegistrationDirectory
+    {
+        public BridgeOpenCodeEndpointDirectorySnapshot Snapshot { get; } =
+            new(true, 0, 0, 0, 0);
+
+        public OpenCodeEndpoint? FindBySession(string sessionExternalId) => null;
+        public IReadOnlyList<OpenCodeEndpoint> ListReady() => [];
+        public BridgeOpenCodeEndpointIdentity Register(int port, string cwd) =>
+            throw new NotSupportedException();
+        public bool Unregister(int port) => false;
+        public bool Unregister(int port, long generation) => false;
+        public bool SetReady(int port, long generation, bool ready) => false;
+        public bool RememberSession(
+            int port,
+            long generation,
+            string sessionExternalId) => false;
+        public bool ForgetSession(
+            int port,
+            long generation,
+            string sessionExternalId) => false;
+        public IReadOnlyList<BridgeOpenCodeEndpointIdentity> ListRegistrations() => [];
+        public ValueTask<long> WaitForChangeAsync(
+            long observedRevision,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(observedRevision);
     }
 
     private sealed class RecordingOpenCodeEventSource : IOpenCodeEventSource
