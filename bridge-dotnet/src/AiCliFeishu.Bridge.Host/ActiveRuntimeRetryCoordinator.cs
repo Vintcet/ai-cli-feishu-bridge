@@ -15,6 +15,12 @@ internal static class BridgeRetryStopKinds
     public const string Stale = "stale";
 }
 
+internal static class BridgeRuntimeNotificationKinds
+{
+    public const string Stop = "stop";
+    public const string Error = "error";
+}
+
 internal sealed record BridgeRetryStopResult(
     string Kind,
     bool RetryAlreadyStarted,
@@ -61,6 +67,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
     private readonly Dictionary<string, RetryCycle> cycles = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> attemptCounts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> generations = new(StringComparer.Ordinal);
+    private readonly HashSet<string> notificationFlights = new(StringComparer.Ordinal);
     private readonly HashSet<Task> workers = [];
     private readonly SemaphoreSlim cardPatchGate = new(1, 1);
     private RetryRegistryState retries = RetryRegistryState.Empty;
@@ -167,29 +174,59 @@ internal sealed class ActiveRuntimeRetryCoordinator :
                     ExtensionString(session, "lastNotificationStatus"),
                     "pending",
                     StringComparison.Ordinal) ||
-                !string.Equals(
-                    ExtensionString(session, "pendingNotificationKind"),
-                    "error",
-                    StringComparison.Ordinal) ||
-                ExtensionString(session, "lastNotificationTurnId") is not { } turnId ||
-                (ExtensionString(session, "pendingNotificationMessage") ?? session.LastError)
-                    is not { } error)
+                ExtensionString(session, "lastNotificationTurnId") is not { } turnId)
             {
                 continue;
             }
+            var pendingKind = ExtensionString(session, "pendingNotificationKind") ??
+                (string.Equals(
+                    session.Status,
+                    SessionStatuses.Error,
+                    StringComparison.Ordinal)
+                    ? BridgeRuntimeNotificationKinds.Error
+                    : BridgeRuntimeNotificationKinds.Stop);
             try
             {
-                await ProcessFailureAsync(
-                    new(
-                        Runtime(session),
-                        session.SessionId,
-                        turnId,
-                        error,
-                        null,
-                        Generation(session.SessionId),
-                        $"retry-recovery-{CycleId(session.SessionId, turnId)}",
-                        $"retry-recovery-{CycleId(session.SessionId, turnId)}"),
-                    cancellationToken);
+                if (string.Equals(
+                        pendingKind,
+                        BridgeRuntimeNotificationKinds.Error,
+                        StringComparison.Ordinal))
+                {
+                    if ((ExtensionString(session, "pendingNotificationMessage") ??
+                            session.LastError) is not { } error)
+                    {
+                        continue;
+                    }
+                    await ProcessFailureAsync(
+                        new(
+                            Runtime(session),
+                            session.SessionId,
+                            turnId,
+                            error,
+                            null,
+                            Generation(session.SessionId),
+                            $"retry-recovery-{CycleId(session.SessionId, turnId)}",
+                            $"retry-recovery-{CycleId(session.SessionId, turnId)}"),
+                        cancellationToken);
+                }
+                else if (string.Equals(
+                             pendingKind,
+                             BridgeRuntimeNotificationKinds.Stop,
+                             StringComparison.Ordinal))
+                {
+                    await ProcessCompletionNotificationAsync(
+                        new(
+                            Runtime(session),
+                            session.SessionId,
+                            turnId,
+                            BridgeRuntimeNotificationKinds.Stop,
+                            ExtensionString(session, "pendingNotificationMessage") ??
+                                ExtensionString(session, "lastAssistantMessage") ??
+                                CompletionFallback(session),
+                            $"completion-recovery-{CycleId(session.SessionId, turnId)}",
+                            $"completion-recovery-{CycleId(session.SessionId, turnId)}"),
+                        cancellationToken);
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -232,6 +269,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             cycles.Clear();
             attemptCounts.Clear();
             generations.Clear();
+            notificationFlights.Clear();
             retries = RetryRegistryState.Empty;
         }
     }
@@ -255,6 +293,11 @@ internal sealed class ActiveRuntimeRetryCoordinator :
                     cancellationToken);
                 break;
             case RuntimeEventTypes.TurnCompleted:
+                Reset(runtimeEvent.Session!.ExternalId);
+                await ProcessCompletionNotificationAsync(
+                    Completion(runtimeEvent),
+                    cancellationToken);
+                break;
             case RuntimeEventTypes.SessionEnded:
             case RuntimeEventTypes.RuntimeDisconnected:
                 Reset(runtimeEvent.Session!.ExternalId);
@@ -318,7 +361,14 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             replacement);
     }
 
-    private async Task ProcessFailureAsync(
+    private Task ProcessFailureAsync(
+        RetryFailure failure,
+        CancellationToken cancellationToken) => RunNotificationAsync(
+        failure.SessionId,
+        failure.TurnId,
+        () => ProcessFailureCoreAsync(failure, cancellationToken));
+
+    private async Task ProcessFailureCoreAsync(
         RetryFailure failure,
         CancellationToken cancellationToken)
     {
@@ -348,11 +398,20 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             IsRuntimeReady(session);
         var attempt = retryCount + 1;
         var delay = RetryDelay(settings);
-        var claimed = await TryClaimNotificationAsync(failure, cancellationToken);
-        if (!claimed)
+        var notification = new RuntimeNotification(
+            failure.Runtime,
+            failure.SessionId,
+            failure.TurnId,
+            BridgeRuntimeNotificationKinds.Error,
+            failure.Error,
+            failure.TraceId,
+            failure.EventId);
+        var claim = await TryClaimNotificationAsync(notification, cancellationToken);
+        if (claim is null)
         {
             return;
         }
+        notification = claim;
 
         RetryCycle? cycle = null;
         if (canRetry)
@@ -391,7 +450,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
                         failure.Runtime,
                         failure.SessionId,
                         failure.TurnId,
-                        failure.Error,
+                        notification.Message,
                         attempt,
                         settings.MaxAttempts,
                         delay,
@@ -404,15 +463,15 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         }
 
         var retryView = cycle is null ? null : View(cycle, "scheduled");
-        var cards = renderer.RuntimeError(SessionView(session), failure.Error, retryView);
+        var cards = renderer.RuntimeError(SessionView(session), notification.Message, retryView);
         var chats = NotificationChats(store, session);
         var delivery = await SendCardsAsync(
-            failure,
+            notification,
             chats,
             cards,
             cancellationToken);
         await PersistDeliveryAsync(
-            failure,
+            notification,
             delivery,
             chats.Count * cards.Count,
             cancellationToken);
@@ -436,6 +495,79 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             attemptCounts[cycle.SessionId] = cycle.Attempt;
             cycle.Phase = RetryCyclePhases.Scheduled;
             StartWorker(cycle);
+        }
+    }
+
+    private Task ProcessCompletionNotificationAsync(
+        RuntimeNotification notification,
+        CancellationToken cancellationToken) => RunNotificationAsync(
+        notification.SessionId,
+        notification.TurnId,
+        () => ProcessCompletionNotificationCoreAsync(notification, cancellationToken));
+
+    private async Task ProcessCompletionNotificationCoreAsync(
+        RuntimeNotification notification,
+        CancellationToken cancellationToken)
+    {
+        var store = await storeOwner.ReadAsync(cancellationToken);
+        if (!store.Sessions.Sessions.TryGetValue(notification.SessionId, out var session) ||
+            !string.Equals(Runtime(session), notification.Runtime, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        notification = notification with
+        {
+            Message = string.IsNullOrWhiteSpace(notification.Message)
+                ? CompletionFallback(session)
+                : notification.Message,
+        };
+        var claim = await TryClaimNotificationAsync(notification, cancellationToken);
+        if (claim is null)
+        {
+            return;
+        }
+
+        var cards = renderer.RuntimeCompletion(
+            SessionView(session),
+            claim.Message);
+        var chats = NotificationChats(store, session);
+        var delivery = await SendCardsAsync(
+            claim,
+            chats,
+            cards,
+            cancellationToken);
+        await PersistDeliveryAsync(
+            claim,
+            delivery,
+            chats.Count * cards.Count,
+            cancellationToken);
+    }
+
+    private async Task RunNotificationAsync(
+        string sessionId,
+        string turnId,
+        Func<Task> action)
+    {
+        var key = $"{sessionId}\0{turnId}";
+        lock (sync)
+        {
+            if (!notificationFlights.Add(key))
+            {
+                return;
+            }
+        }
+
+        try
+        {
+            await action();
+        }
+        finally
+        {
+            lock (sync)
+            {
+                notificationFlights.Remove(key);
+            }
         }
     }
 
@@ -681,39 +813,82 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         return cards[Math.Clamp(cardIndex, 0, cards.Count - 1)];
     }
 
-    private async Task<bool> TryClaimNotificationAsync(
-        RetryFailure failure,
+    private async Task<RuntimeNotification?> TryClaimNotificationAsync(
+        RuntimeNotification notification,
         CancellationToken cancellationToken)
     {
-        var claimed = false;
+        RuntimeNotification? claimed = null;
         await storeOwner.UpdateAsync(
             store =>
             {
-                if (!store.Sessions.Sessions.TryGetValue(failure.SessionId, out var session))
+                if (!store.Sessions.Sessions.TryGetValue(
+                        notification.SessionId,
+                        out var session))
                 {
                     return store;
                 }
+
                 var existingTurn = ExtensionString(session, "lastNotificationTurnId");
                 var existingStatus = ExtensionString(session, "lastNotificationStatus");
-                if (string.Equals(existingTurn, failure.TurnId, StringComparison.Ordinal) &&
-                    !string.Equals(existingStatus, "pending", StringComparison.Ordinal))
+                var existingKind = ExtensionString(session, "pendingNotificationKind");
+                if (existingKind is null &&
+                    string.Equals(
+                        existingStatus,
+                        "pending",
+                        StringComparison.Ordinal))
                 {
-                    return store;
+                    existingKind = string.Equals(
+                        session.Status,
+                        SessionStatuses.Error,
+                        StringComparison.Ordinal)
+                        ? BridgeRuntimeNotificationKinds.Error
+                        : BridgeRuntimeNotificationKinds.Stop;
                 }
-                claimed = true;
+                if (string.Equals(
+                        existingTurn,
+                        notification.TurnId,
+                        StringComparison.Ordinal))
+                {
+                    if (!string.Equals(
+                            existingStatus,
+                            "pending",
+                            StringComparison.Ordinal) ||
+                        existingKind is not null &&
+                        !string.Equals(
+                            existingKind,
+                            notification.Kind,
+                            StringComparison.Ordinal))
+                    {
+                        // A completed notification, or a different notification
+                        // kind for the same turn, owns this turn permanently.
+                        return store;
+                    }
+
+                    claimed = notification with
+                    {
+                        Message = ExtensionString(
+                            session,
+                            "pendingNotificationMessage") ?? notification.Message,
+                    };
+                }
+                else
+                {
+                    claimed = notification;
+                }
+
                 return NodeStoreBusinessStateMerger.PatchSessionExtensions(
                     store,
-                    failure.SessionId,
+                    notification.SessionId,
                     new Dictionary<string, JsonElement?>
                     {
                         ["lastNotificationTurnId"] =
-                            JsonSerializer.SerializeToElement(failure.TurnId),
+                            JsonSerializer.SerializeToElement(notification.TurnId),
                         ["lastNotificationStatus"] =
                             JsonSerializer.SerializeToElement("pending"),
                         ["pendingNotificationKind"] =
-                            JsonSerializer.SerializeToElement("error"),
+                            JsonSerializer.SerializeToElement(notification.Kind),
                         ["pendingNotificationMessage"] =
-                            JsonSerializer.SerializeToElement(failure.Error),
+                            JsonSerializer.SerializeToElement(claimed.Message),
                     });
             },
             cancellationToken);
@@ -721,7 +896,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
     }
 
     private async Task<IReadOnlyList<RetryMessageTarget>> SendCardsAsync(
-        RetryFailure failure,
+        RuntimeNotification notification,
         IReadOnlyList<string> chatIds,
         IReadOnlyList<FeishuCardView> cards,
         CancellationToken cancellationToken)
@@ -736,7 +911,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
                     var messageId = await gateway.SendCardAsync(
                         chatId,
                         cards[index],
-                        NotificationKey(failure, chatId, index),
+                        NotificationKey(notification, chatId, index),
                         cancellationToken);
                     if (!string.IsNullOrWhiteSpace(messageId))
                     {
@@ -756,7 +931,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
     }
 
     private async Task PersistDeliveryAsync(
-        RetryFailure failure,
+        RuntimeNotification notification,
         IReadOnlyList<RetryMessageTarget> delivered,
         int expectedCount,
         CancellationToken cancellationToken)
@@ -764,16 +939,16 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         await storeOwner.UpdateAsync(
             store =>
             {
-                var updated = AddRoutes(store, failure, delivered);
+                var updated = AddRoutes(store, notification, delivered);
                 var complete = expectedCount > 0 && delivered.Count == expectedCount;
                 if (expectedCount == 0)
                 {
-                    return ClearNotification(updated, failure.SessionId);
+                    return ClearNotification(updated, notification.SessionId);
                 }
                 return complete
                     ? NodeStoreBusinessStateMerger.PatchSessionExtensions(
                         updated,
-                        failure.SessionId,
+                        notification.SessionId,
                         new Dictionary<string, JsonElement?>
                         {
                             ["lastNotificationStatus"] =
@@ -788,7 +963,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
 
     private static NodeStoreSnapshot AddRoutes(
         NodeStoreSnapshot store,
-        RetryFailure failure,
+        RuntimeNotification notification,
         IReadOnlyList<RetryMessageTarget> delivered)
     {
         if (delivered.Count == 0)
@@ -804,9 +979,9 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             messages[target.MessageId] = new()
             {
                 MessageId = target.MessageId,
-                SessionId = failure.SessionId,
+                SessionId = notification.SessionId,
                 ChatId = target.ChatId,
-                Kind = "error",
+                Kind = notification.Kind,
                 CreatedAt = createdAt,
             };
         }
@@ -908,6 +1083,19 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             }),
         };
 
+    private static RuntimeNotification Completion(
+        RuntimeEventEnvelope runtimeEvent) => new(
+        runtimeEvent.Runtime,
+        runtimeEvent.Session!.ExternalId,
+        OptionalString(runtimeEvent.Payload, "turnId") ??
+            runtimeEvent.CorrelationId ??
+            runtimeEvent.EventId,
+        BridgeRuntimeNotificationKinds.Stop,
+        OptionalString(runtimeEvent.Payload, "message") ??
+            CompletionFallback(runtimeEvent.Runtime),
+        runtimeEvent.TraceId,
+        runtimeEvent.EventId);
+
     private static RetryFailure Failure(
         RuntimeEventEnvelope runtimeEvent,
         long generation) => new(
@@ -929,6 +1117,15 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         cycle.MaxAttempts,
         Math.Max(0, (int)Math.Ceiling(cycle.Delay.TotalSeconds)));
 
+    private static string CompletionFallback(RuntimeEventEnvelope runtimeEvent) =>
+        CompletionFallback(runtimeEvent.Runtime);
+
+    private static string CompletionFallback(SessionStoreRecord session) =>
+        CompletionFallback(Runtime(session));
+
+    private static string CompletionFallback(string runtime) =>
+        $"{RuntimeDisplayName(runtime)} 已结束本轮处理。";
+
     private static FeishuSessionView SessionView(SessionStoreRecord session) => new(
         session.SessionId,
         Runtime(session),
@@ -936,15 +1133,16 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             session.ProjectName ??
             session.ShortId ??
             ShortId(session.SessionId),
-        session.Cwd);
+        session.Cwd,
+        ExtensionBoolean(session, "managedByAssistant"));
 
     private static string NotificationKey(
-        RetryFailure failure,
+        RuntimeNotification notification,
         string chatId,
         int cardIndex)
     {
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(
-            $"{failure.SessionId}\0{failure.TurnId}\0error\0{chatId}\0{cardIndex}"));
+            $"{notification.SessionId}\0{notification.TurnId}\0{notification.Kind}\0{chatId}\0{cardIndex}"));
         return Convert.ToHexString(bytes).ToLowerInvariant()[..32];
     }
 
@@ -999,6 +1197,13 @@ internal sealed class ActiveRuntimeRetryCoordinator :
 
     private static string Runtime(SessionStoreRecord session) =>
         string.IsNullOrWhiteSpace(session.Runtime) ? RuntimeNames.Codex : session.Runtime;
+
+    private static string RuntimeDisplayName(string runtime) => runtime switch
+    {
+        RuntimeNames.ClaudeCode => "Claude Code",
+        RuntimeNames.OpenCode => "OpenCode",
+        _ => "Codex",
+    };
 
     private static string RequiredString(JsonElement value, string name) =>
         value.GetProperty(name).GetString()!;
@@ -1099,6 +1304,15 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         string Error,
         string? ErrorCode,
         long Generation,
+        string TraceId,
+        string EventId);
+
+    private sealed record RuntimeNotification(
+        string Runtime,
+        string SessionId,
+        string TurnId,
+        string Kind,
+        string Message,
         string TraceId,
         string EventId);
 

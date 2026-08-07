@@ -239,7 +239,8 @@ internal sealed class ActiveFeishuApprovalCoordinator(
                 stored.ProjectName ??
                 stored.ShortId ??
                 ShortId(stored.SessionId),
-            session.Cwd);
+            session.Cwd,
+            ExtensionBoolean(stored.ExtensionData, "managedByAssistant"));
 
     private static FeishuApprovalView ApprovalView(
         ApprovalState approval,
@@ -276,6 +277,13 @@ internal sealed class ActiveFeishuApprovalCoordinator(
         !string.IsNullOrWhiteSpace(value.GetString())
             ? value.GetString()!.Trim()
             : null;
+
+    private static bool ExtensionBoolean(
+        Dictionary<string, JsonElement>? extensions,
+        string name) =>
+        extensions is not null &&
+        extensions.TryGetValue(name, out var value) &&
+        value.ValueKind == JsonValueKind.True;
 
     private static string ShortId(string sessionId)
     {

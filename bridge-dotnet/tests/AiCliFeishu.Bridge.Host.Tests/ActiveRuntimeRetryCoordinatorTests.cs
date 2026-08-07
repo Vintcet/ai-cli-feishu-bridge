@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Text.Json;
+using System.Text.Encodings.Web;
 using AiCliFeishu.Bridge.Adapters.Feishu;
 using AiCliFeishu.Bridge.Adapters.Storage;
 using AiCliFeishu.Bridge.Core;
@@ -200,6 +201,275 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
     }
 
     [TestMethod]
+    public async Task TurnCompletionPersistsStateBeforeSendingStopCard()
+    {
+        await using var fixture = await RetryFixture.CreateAsync();
+        fixture.Gateway.BeforeSend = () =>
+        {
+            Assert.IsTrue(fixture.State.Completed);
+            Assert.AreEqual(
+                "pending",
+                ExtensionString(
+                    fixture.Store.Current.Sessions.Sessions[SessionId],
+                    "lastNotificationStatus"));
+        };
+
+        await fixture.Coordinator.HandleAsync(Event(
+            "completed-stop",
+            RuntimeEventTypes.TurnCompleted,
+            "turn-stop-card",
+            new
+            {
+                turnId = "turn-stop-card",
+                message = "任务已经完成。",
+            }));
+
+        CollectionAssert.AreEqual(
+            new[] { "state:turn.completed", "send:chat-1" },
+            fixture.Actions.ToArray());
+        Assert.AreEqual(1, fixture.Gateway.Sends.Count);
+        var idempotencyKey = fixture.Gateway.Attempts.Single().IdempotencyKey;
+        Assert.AreEqual(32, idempotencyKey.Length);
+        Assert.IsTrue(idempotencyKey.All(character =>
+            character is >= '0' and <= '9' or >= 'a' and <= 'f'));
+        Assert.AreEqual("stop", fixture.Store.Current.Routes.Messages
+            .Values.Single().Kind);
+        Assert.AreEqual(
+            "sent",
+            ExtensionString(
+                fixture.Store.Current.Sessions.Sessions[SessionId],
+                "lastNotificationStatus"));
+        Assert.AreEqual(
+            "turn-stop-card",
+            ExtensionString(
+                fixture.Store.Current.Sessions.Sessions[SessionId],
+                "lastNotificationTurnId"));
+        Assert.IsNull(ExtensionString(
+            fixture.Store.Current.Sessions.Sessions[SessionId],
+            "pendingNotificationKind"));
+        StringAssert.Contains(
+            CardJson(fixture.Gateway.Sends.Single().Card),
+            "Codex 本轮已完成");
+        StringAssert.Contains(
+            CardJson(fixture.Gateway.Sends.Single().Card),
+            "任务已经完成");
+    }
+
+    [TestMethod]
+    public async Task DuplicateCompletionDoesNotSendAnotherStopCard()
+    {
+        await using var fixture = await RetryFixture.CreateAsync();
+        var completed = Event(
+            "completed-duplicate",
+            RuntimeEventTypes.TurnCompleted,
+            "turn-duplicate",
+            new
+            {
+                turnId = "turn-duplicate",
+                message = "只发送一次。",
+            });
+
+        await fixture.Coordinator.HandleAsync(completed);
+        await fixture.Coordinator.HandleAsync(completed);
+
+        Assert.AreEqual(1, fixture.Gateway.Sends.Count);
+        Assert.AreEqual(1, fixture.Gateway.Attempts.Count);
+        Assert.AreEqual(1, fixture.Store.Current.Routes.Messages.Count);
+        Assert.AreEqual("stop", fixture.Store.Current.Routes.Messages
+            .Values.Single().Kind);
+    }
+
+    [TestMethod]
+    public async Task ErrorAndCompletionForTheSameTurnAreMutuallyExclusive()
+    {
+        await using var errorFirst = await RetryFixture.CreateAsync(
+            autoRetry: false);
+        await errorFirst.Coordinator.HandleAsync(Failure(
+            "turn-mutual-error-first",
+            "permission denied"));
+        await errorFirst.Coordinator.HandleAsync(Event(
+            "completion-after-error",
+            RuntimeEventTypes.TurnCompleted,
+            "turn-mutual-error-first",
+            new { turnId = "turn-mutual-error-first", message = "后来完成。" }));
+
+        Assert.AreEqual(1, errorFirst.Gateway.Sends.Count);
+        Assert.AreEqual("error", errorFirst.Store.Current.Routes.Messages
+            .Values.Single().Kind);
+        Assert.IsFalse(CardJson(errorFirst.Gateway.Sends.Single().Card)
+            .Contains("后来完成", StringComparison.Ordinal));
+
+        await using var completionFirst = await RetryFixture.CreateAsync(
+            autoRetry: false);
+        await completionFirst.Coordinator.HandleAsync(Event(
+            "completion-before-error",
+            RuntimeEventTypes.TurnCompleted,
+            "turn-mutual-completion-first",
+            new
+            {
+                turnId = "turn-mutual-completion-first",
+                message = "先完成。",
+            }));
+        await completionFirst.Coordinator.HandleAsync(Failure(
+            "turn-mutual-completion-first",
+            "HTTP 503"));
+        await Task.Delay(40);
+
+        Assert.AreEqual(1, completionFirst.Gateway.Sends.Count);
+        Assert.AreEqual("stop", completionFirst.Store.Current.Routes.Messages
+            .Values.Single().Kind);
+        Assert.IsFalse(completionFirst.Coordinator.HasActiveRetry(SessionId));
+    }
+
+    [TestMethod]
+    public async Task PendingCompletionRecoversPartialMultiChatDeliveryWithStableKey()
+    {
+        var gateway = new RecordingFeishuGateway();
+        gateway.FailChats.Add("chat-2");
+        var store = new RecordingStoreOwner(StoreSnapshot(
+            ["chat-1", "chat-2"],
+            autoRetry: false));
+
+        await using (var first = await RetryFixture.CreateAsync(
+            store: store,
+            gateway: gateway,
+            ready: false))
+        {
+            await first.Coordinator.HandleAsync(Event(
+                "completion-partial",
+                RuntimeEventTypes.TurnCompleted,
+                "turn-partial-stop",
+                new
+                {
+                    turnId = "turn-partial-stop",
+                    message = "多聊天恢复。",
+                }));
+        }
+
+        Assert.AreEqual(
+            "pending",
+            ExtensionString(
+                store.Current.Sessions.Sessions[SessionId],
+                "lastNotificationStatus"));
+        var firstKey = gateway.Attempts.Single(attempt =>
+            attempt.ChatId == "chat-1").IdempotencyKey;
+        gateway.FailChats.Clear();
+
+        await using (var recovered = await RetryFixture.CreateAsync(
+            store: store,
+            gateway: gateway,
+            ready: false))
+        {
+            Assert.AreEqual(
+                "sent",
+                ExtensionString(
+                    store.Current.Sessions.Sessions[SessionId],
+                    "lastNotificationStatus"));
+        }
+
+        var recoveredKey = gateway.Attempts.Last(attempt =>
+            attempt.ChatId == "chat-1").IdempotencyKey;
+        Assert.AreEqual(firstKey, recoveredKey);
+        Assert.AreEqual(2, store.Current.Routes.Messages.Count);
+        Assert.IsTrue(store.Current.Routes.Messages.Values.All(route =>
+            route.Kind == "stop"));
+    }
+
+    [TestMethod]
+    public async Task PendingStopClaimRecoversOnStartup()
+    {
+        var store = new RecordingStoreOwner(WithPendingNotification(
+            StoreSnapshot(["chat-1"], autoRetry: false),
+            "turn-pending-stop",
+            "stop",
+            "启动后继续发送。"));
+        var gateway = new RecordingFeishuGateway();
+
+        await using var fixture = await RetryFixture.CreateAsync(
+            store: store,
+            gateway: gateway,
+            ready: false);
+
+        Assert.AreEqual(1, gateway.Sends.Count);
+        Assert.AreEqual("stop", store.Current.Routes.Messages
+            .Values.Single().Kind);
+        Assert.AreEqual(
+            "sent",
+            ExtensionString(
+                store.Current.Sessions.Sessions[SessionId],
+                "lastNotificationStatus"));
+        StringAssert.Contains(
+            CardJson(gateway.Sends.Single().Card),
+            "启动后继续发送");
+    }
+
+    [TestMethod]
+    public async Task OpenCodeCompletionWithoutMessageUsesRuntimeFallback()
+    {
+        var store = new RecordingStoreOwner(StoreSnapshot(
+            ["chat-1"],
+            autoRetry: false,
+            runtime: RuntimeNames.OpenCode));
+        await using var fixture = await RetryFixture.CreateAsync(
+            store: store,
+            runtime: RuntimeNames.OpenCode,
+            ready: false);
+
+        await fixture.Coordinator.HandleAsync(Event(
+            "opencode-idle",
+            RuntimeEventTypes.TurnCompleted,
+            "turn-opencode-idle",
+            new { },
+            runtime: RuntimeNames.OpenCode));
+
+        Assert.AreEqual(1, fixture.Gateway.Sends.Count);
+        StringAssert.Contains(
+            CardJson(fixture.Gateway.Sends.Single().Card),
+            "OpenCode 已结束本轮处理");
+        Assert.AreEqual("stop", store.Current.Routes.Messages
+            .Values.Single().Kind);
+    }
+
+    [TestMethod]
+    public async Task CompletionWithoutRecipientsClearsNotificationClaim()
+    {
+        await using var fixture = await RetryFixture.CreateAsync(
+            chats: [],
+            autoRetry: false,
+            ready: false);
+
+        await fixture.Coordinator.HandleAsync(Event(
+            "completion-local-only",
+            RuntimeEventTypes.TurnCompleted,
+            "turn-local-completion",
+            new { turnId = "turn-local-completion" }));
+
+        var session = fixture.Store.Current.Sessions.Sessions[SessionId];
+        Assert.AreEqual(0, fixture.Gateway.Sends.Count);
+        Assert.AreEqual(0, fixture.Store.Current.Routes.Messages.Count);
+        Assert.IsNull(ExtensionString(session, "lastNotificationStatus"));
+        Assert.IsNull(ExtensionString(session, "lastNotificationTurnId"));
+        Assert.IsNull(ExtensionString(session, "pendingNotificationKind"));
+    }
+
+    [TestMethod]
+    public async Task CompletionStateSinkFailureHasNoNotificationSideEffect()
+    {
+        await using var fixture = await RetryFixture.CreateAsync(
+            stateError: new InvalidOperationException("synthetic completion state failure"));
+
+        await Assert.ThrowsExceptionAsync<InvalidOperationException>(() =>
+            fixture.Coordinator.HandleAsync(Event(
+                "completion-state-failure",
+                RuntimeEventTypes.TurnCompleted,
+                "turn-completion-state-failure",
+                new { message = "不会发送。" })));
+
+        Assert.AreEqual(0, fixture.Gateway.Sends.Count);
+        Assert.AreEqual(0, fixture.Store.Updates);
+    }
+
+    [TestMethod]
     public async Task PendingPartialDeliveryRecoversWithStableIdempotencyKeys()
     {
         var gateway = new RecordingFeishuGateway();
@@ -287,13 +557,15 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         string eventId,
         string eventType,
         string turnId,
-        object payload) => new()
+        object payload,
+        string? runtime = null,
+        string? sessionId = null) => new()
         {
             ProtocolVersion = BridgeProtocolVersion.Current,
-            Runtime = RuntimeNames.Codex,
+            Runtime = runtime ?? RuntimeNames.Codex,
             Session = new RuntimeSessionReference
             {
-                ExternalId = SessionId,
+                ExternalId = sessionId ?? SessionId,
                 Cwd = "K:/repo",
             },
             TraceId = $"trace-{eventId}",
@@ -306,7 +578,9 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
 
     private static NodeStoreSnapshot StoreSnapshot(
         IReadOnlyList<string> chats,
-        bool autoRetry)
+        bool autoRetry,
+        string runtime = RuntimeNames.Codex,
+        IReadOnlyDictionary<string, JsonElement>? sessionExtensions = null)
     {
         var users = chats.Select((chatId, index) => new BindingStoreRecord
             {
@@ -316,21 +590,29 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
                 BoundAt = "2026-08-08T00:00:00.000Z",
             })
             .ToDictionary(binding => binding.OpenId, StringComparer.Ordinal);
+        var extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            ["alias"] = JsonSerializer.SerializeToElement("retry-test"),
+        };
+        if (sessionExtensions is not null)
+        {
+            foreach (var (name, value) in sessionExtensions)
+            {
+                extensions[name] = value.Clone();
+            }
+        }
         var session = new SessionStoreRecord
         {
             SessionId = SessionId,
             ShortId = "retry-1",
             ProjectName = "repo",
             Cwd = "K:/repo",
-            Runtime = RuntimeNames.Codex,
+            Runtime = runtime,
             Status = SessionStatuses.Waiting,
             OpenedAt = "2026-08-08T00:00:00.000Z",
             LastSeenAt = "2026-08-08T00:00:00.000Z",
             LastError = null,
-            ExtensionData = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
-            {
-                ["alias"] = JsonSerializer.SerializeToElement("retry-test"),
-            },
+            ExtensionData = extensions,
         };
         return new(
             new BindingStoreDocument
@@ -356,6 +638,21 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             },
             new ControlTokenStoreDocument());
     }
+
+    private static NodeStoreSnapshot WithPendingNotification(
+        NodeStoreSnapshot store,
+        string turnId,
+        string kind,
+        string message) => NodeStoreBusinessStateMerger.PatchSessionExtensions(
+        store,
+        SessionId,
+        new Dictionary<string, JsonElement?>
+        {
+            ["lastNotificationTurnId"] = JsonSerializer.SerializeToElement(turnId),
+            ["lastNotificationStatus"] = JsonSerializer.SerializeToElement("pending"),
+            ["pendingNotificationKind"] = JsonSerializer.SerializeToElement(kind),
+            ["pendingNotificationMessage"] = JsonSerializer.SerializeToElement(message),
+        });
 
     private static string? ExtensionString(ExtensibleStoreObject value, string name) =>
         value.ExtensionData is not null &&
@@ -401,7 +698,11 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         return null;
     }
 
-    private static string CardJson(FeishuCardView card) => card.Content.ToJsonString();
+    private static string CardJson(FeishuCardView card) => card.Content.ToJsonString(
+        new JsonSerializerOptions
+        {
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        });
 
     private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
     {
@@ -445,14 +746,17 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             RecordingStoreOwner? store = null,
             RecordingFeishuGateway? gateway = null,
             IReadOnlyList<string>? chats = null,
+            bool autoRetry = true,
             bool ready = true,
+            string runtime = RuntimeNames.Codex,
             TimeSpan? retryDelay = null,
             Exception? stateError = null)
         {
             var actions = new ConcurrentQueue<string>();
             store ??= new RecordingStoreOwner(StoreSnapshot(
                 chats ?? ["chat-1"],
-                autoRetry: true));
+                autoRetry,
+                runtime));
             gateway ??= new RecordingFeishuGateway();
             gateway.Actions = actions;
             var state = new RecordingStateSink(actions) { Error = stateError };
@@ -490,6 +794,7 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         IBridgeActiveRuntimeStateSink
     {
         public Exception? Error { get; set; }
+        public bool Completed { get; private set; }
         public TaskCompletionSource Entered { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource? PersistenceGate { get; set; }
@@ -512,6 +817,7 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             {
                 throw Error;
             }
+            Completed = true;
         }
     }
 
@@ -620,6 +926,7 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         private readonly List<(string MessageId, FeishuCardView Card)> patches = [];
 
         public ConcurrentQueue<string>? Actions { get; set; }
+        public Action? BeforeSend { get; set; }
         public HashSet<string> FailChats { get; } = new(StringComparer.Ordinal);
 
         public IReadOnlyList<SendAttempt> Attempts
@@ -663,6 +970,7 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             var key = idempotencyKey ?? throw new AssertFailedException("错误通知缺少幂等键。");
+            BeforeSend?.Invoke();
             Actions?.Enqueue($"send:{chatId}");
             lock (sync)
             {

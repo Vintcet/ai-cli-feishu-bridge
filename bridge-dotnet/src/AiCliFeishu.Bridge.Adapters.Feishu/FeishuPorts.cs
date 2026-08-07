@@ -127,6 +127,10 @@ public interface IFeishuCardRenderer
         FeishuSessionView session,
         string error,
         FeishuRuntimeRetryView? retry = null);
+
+    IReadOnlyList<FeishuCardView> RuntimeCompletion(
+        FeishuSessionView session,
+        string message);
 }
 
 public interface IFeishuCardPatchLedger

@@ -136,7 +136,8 @@ public sealed record FeishuSessionView(
     string SessionId,
     string Runtime,
     string Label,
-    string Cwd);
+    string Cwd,
+    bool ManagedByAssistant = false);
 
 public sealed record FeishuApprovalView(
     string RequestId,

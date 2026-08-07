@@ -400,6 +400,44 @@ public sealed partial class FeishuCardRenderer : IFeishuCardRenderer
         }).ToArray();
     }
 
+    public IReadOnlyList<FeishuCardView> RuntimeCompletion(
+        FeishuSessionView session,
+        string message)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        var runtime = RuntimeName(session.Runtime);
+        var safeMessage = RedactSensitiveText(message).Trim();
+        var waitingForReply = FeishuMarkdownCards.LooksLikeQuestion(safeMessage);
+        var fallback = $"{runtime} 已结束本轮处理。";
+        var chunks = FeishuMarkdownCards.SplitMessage(
+            safeMessage,
+            fallback);
+        var title = waitingForReply
+            ? $"{runtime} 等待你回复"
+            : $"{runtime} 本轮已完成";
+        var template = waitingForReply ? "orange" : "green";
+        var footer = session.ManagedByAssistant
+            ? "下一轮请直接发送消息。"
+            : "这个窗口不是由 AI CLI 飞书助手打开，不能从飞书回复。";
+
+        return chunks.Select((chunk, index) =>
+        {
+            var part = chunks.Count > 1 ? $"（{index + 1}/{chunks.Count}）" : string.Empty;
+            var elements = new List<JsonNode?>
+            {
+                Markdown($"**会话：** {session.Label}"),
+                new JsonObject { ["tag"] = "hr" },
+                Markdown($"**{runtime} 回复{part}**"),
+            };
+            elements.AddRange(FeishuMarkdownCards.ToElements(chunk));
+            if (index == chunks.Count - 1)
+            {
+                elements.Add(Note(footer));
+            }
+            return Card(template, $"{title}{part}", elements);
+        }).ToArray();
+    }
+
     private static FeishuCardView Card(
         string template,
         string title,
