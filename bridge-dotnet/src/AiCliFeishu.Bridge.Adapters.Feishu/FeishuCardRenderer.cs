@@ -1,10 +1,13 @@
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using AiCliFeishu.Bridge.Core;
 
 namespace AiCliFeishu.Bridge.Adapters.Feishu;
 
-public sealed class FeishuCardRenderer : IFeishuCardRenderer
+public sealed partial class FeishuCardRenderer : IFeishuCardRenderer
 {
+    private const int ErrorChunkLength = 2_800;
+
     public FeishuCardView CommandMenu() => Card(
         "blue",
         "AI CLI 飞书助手命令",
@@ -354,6 +357,49 @@ public sealed class FeishuCardRenderer : IFeishuCardRenderer
                 $"{Truncate(question.Question, 800)}\n\n**结果：** {result}")]);
     }
 
+    public IReadOnlyList<FeishuCardView> RuntimeError(
+        FeishuSessionView session,
+        string error,
+        FeishuRuntimeRetryView? retry = null)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        if (retry is not null)
+        {
+            ValidateRetry(retry);
+        }
+        var runtime = RuntimeName(session.Runtime);
+        var chunks = SplitError(RedactSensitiveText(error));
+        return chunks.Select((chunk, index) =>
+        {
+            var elements = new List<JsonNode?>
+            {
+                Markdown($"**会话：** {session.Label}\n**错误信息**\n{chunk}"),
+            };
+            if (index == chunks.Count - 1 && retry is not null)
+            {
+                elements.Add(Note(RetryStatus(retry)));
+                if (retry.State is not "stopped")
+                {
+                    elements.Add(ActionRow(Button(
+                        "danger",
+                        retry.State == "running" ? "停止后续自动重试" : "停止自动重试",
+                        new()
+                        {
+                            ["action"] = FeishuCardActions.RetryStop,
+                            ["sessionId"] = session.SessionId,
+                            ["retryCycleId"] = retry.CycleId,
+                        })));
+                }
+                else
+                {
+                    elements.Add(Note("你仍可以从飞书或电脑端重新发送任务。"));
+                }
+            }
+            var part = chunks.Count > 1 ? $"（{index + 1}/{chunks.Count}）" : string.Empty;
+            return Card("red", $"{runtime} 运行错误{part}", elements);
+        }).ToArray();
+    }
+
     private static FeishuCardView Card(
         string template,
         string title,
@@ -517,6 +563,58 @@ public sealed class FeishuCardRenderer : IFeishuCardRenderer
         var text = string.IsNullOrWhiteSpace(value) ? "（没有可展示的参数）" : value.Trim();
         return text.Length <= length ? text : string.Concat(text.AsSpan(0, length - 1), "…");
     }
+
+    private static IReadOnlyList<string> SplitError(string? error)
+    {
+        var text = string.IsNullOrWhiteSpace(error) ? "未知错误" : error.Trim();
+        var chunks = new List<string>((text.Length / ErrorChunkLength) + 1);
+        for (var offset = 0; offset < text.Length; offset += ErrorChunkLength)
+        {
+            chunks.Add(text.Substring(offset, Math.Min(ErrorChunkLength, text.Length - offset)));
+        }
+        return chunks;
+    }
+
+    private static string RedactSensitiveText(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return string.Empty;
+        }
+        var environment = SensitiveEnvironmentValue().Replace(text, "$1=[已隐藏]");
+        return SensitiveStructuredValue().Replace(environment, "$1[已隐藏]");
+    }
+
+    private static string RetryStatus(FeishuRuntimeRetryView retry) => retry.State switch
+    {
+        "scheduled" =>
+            $"助手将在 {retry.DelaySeconds} 秒后自动重试（第 {retry.Attempt}/{retry.MaxAttempts} 次）。",
+        "running" => $"助手已发起第 {retry.Attempt}/{retry.MaxAttempts} 次自动重试。",
+        _ => "已停止自动重试。",
+    };
+
+    private static void ValidateRetry(FeishuRuntimeRetryView retry)
+    {
+        if (string.IsNullOrWhiteSpace(retry.CycleId) ||
+            retry.State is not ("scheduled" or "running" or "stopped") ||
+            retry.Attempt < 1 || retry.MaxAttempts < retry.Attempt ||
+            retry.DelaySeconds < 0)
+        {
+            throw new ArgumentException("飞书自动重试卡片状态无效。", nameof(retry));
+        }
+    }
+
+    [GeneratedRegex(
+        "\\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY)[A-Z0-9_]*)" +
+        "\\s*=\\s*([^\\s\"']+)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex SensitiveEnvironmentValue();
+
+    [GeneratedRegex(
+        "(\"?(?:secret|token|password|passwd|api[_-]?key|authorization|cookie)\"?" +
+        "\\s*[:=]\\s*)[\"']?[^\\s,}\"']+[\"']?",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex SensitiveStructuredValue();
 
     private static void ValidateQuestionPosition(int index, int count)
     {

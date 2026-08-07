@@ -5,6 +5,7 @@ using AiCliFeishu.Bridge.Adapters.ManagedTerminal;
 using AiCliFeishu.Bridge.Adapters.OpenCode;
 using AiCliFeishu.Bridge.Adapters.Storage;
 using AiCliFeishu.Bridge.Core;
+using AiCliFeishu.Bridge.Protocol;
 
 namespace AiCliFeishu.Bridge.Host;
 
@@ -23,6 +24,15 @@ internal interface IBridgeActiveOwnerLeaseLifecycle : IAsyncDisposable
 internal interface IBridgePersistentBusinessStateOwner
 {
     BridgeBusinessStateSnapshot Snapshot { get; }
+}
+
+internal interface IBridgeActiveRuntimeStateSink
+{
+    BridgeBusinessStateSnapshot Snapshot { get; }
+
+    Task HandleAsync(
+        RuntimeEventEnvelope runtimeEvent,
+        CancellationToken cancellationToken = default);
 }
 
 internal sealed record BridgeApprovalClaim(
@@ -207,6 +217,8 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IBridgeActiveOwnerLeaseLifecycle),
         typeof(IBridgeProductionStoreOwner),
         typeof(IBridgePersistentBusinessStateOwner),
+        typeof(IBridgeActiveRuntimeStateSink),
+        typeof(IBridgeActiveRuntimeRetryCoordinator),
         typeof(IBridgeActiveApprovalStateOwner),
         typeof(IBridgeActiveInputStateOwner),
         typeof(IBridgeFeishuCredentialSource),
@@ -223,6 +235,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveOwnerLeaseHostedService),
         typeof(ActiveProductionStoreOwner),
         typeof(ActivePersistentBusinessStateOwner),
+        typeof(ActiveRuntimeRetryCoordinator),
         typeof(ActiveFeishuCredentialSource),
         typeof(ActiveFeishuEventSource),
         typeof(ActiveFeishuGateway),
@@ -286,6 +299,9 @@ internal static class BridgeProductionAssemblyPreflight
     private static readonly Type[] activeRuntimeFactoryServices =
     [
         typeof(IBridgeRuntimeEventHandler),
+        typeof(IBridgeActiveRuntimeStateSink),
+        typeof(IBridgeActiveRuntimeRetryCoordinator),
+        typeof(ActiveRuntimeRetryCoordinator),
         typeof(IRuntimeEventSink),
         typeof(RuntimeAdapterRegistry),
         typeof(IBridgeRuntimeCommandGateway),

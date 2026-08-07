@@ -139,6 +139,42 @@ public sealed class NodeStoreBusinessStateMergerTests
         Assert.IsFalse(approval.ExtensionData.ContainsKey("DESKTOPAPPROVALREQUESTED"));
     }
 
+    [TestMethod]
+    public void DirectSessionExtensionPatchAddsAndRemovesFieldsWithoutStaleBusinessMerge()
+    {
+        var source = Store();
+        source.Sessions.Sessions["session-1"].ExtensionData!["LASTNOTIFICATIONSTATUS"] =
+            JsonSerializer.SerializeToElement("pending");
+        var patch = new Dictionary<string, JsonElement?>
+        {
+            ["lastNotificationStatus"] = JsonSerializer.SerializeToElement("sent"),
+            ["lastNotificationTurnId"] = JsonSerializer.SerializeToElement("turn-2"),
+            ["futureSession"] = null,
+        };
+
+        var updated = NodeStoreBusinessStateMerger.PatchSessionExtensions(
+            source,
+            "session-1",
+            patch);
+
+        var session = updated.Sessions.Sessions["session-1"];
+        Assert.AreEqual("existing-short", session.ShortId);
+        Assert.AreEqual("existing-project", session.ProjectName);
+        Assert.AreEqual(SessionStatuses.Waiting, session.Status);
+        Assert.AreEqual("sent", session.ExtensionData!["lastNotificationStatus"].GetString());
+        Assert.AreEqual("turn-2", session.ExtensionData["lastNotificationTurnId"].GetString());
+        Assert.IsFalse(session.ExtensionData.ContainsKey("LASTNOTIFICATIONSTATUS"));
+        Assert.IsFalse(session.ExtensionData.ContainsKey("futureSession"));
+        Assert.AreSame(source.Bindings, updated.Bindings);
+        Assert.AreSame(source.Routes, updated.Routes);
+        Assert.AreSame(source.Approvals, updated.Approvals);
+        Assert.AreSame(source.Settings, updated.Settings);
+        Assert.AreSame(source.ControlToken, updated.ControlToken);
+        Assert.AreEqual(
+            "keep-root",
+            updated.Sessions.ExtensionData!["futureRoot"].GetString());
+    }
+
     private static NodeStoreSnapshot Store()
     {
         var store = EmptyStore();

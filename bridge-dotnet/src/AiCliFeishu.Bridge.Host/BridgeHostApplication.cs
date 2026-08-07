@@ -125,14 +125,14 @@ public static class BridgeHostApplication
             (IBridgeHostSubsystem)services.GetRequiredService<IBridgeProductionStoreOwner>());
         services.AddSingleton<IBridgePersistentBusinessStateOwner,
             ActivePersistentBusinessStateOwner>();
+        services.AddSingleton<IBridgeActiveRuntimeStateSink>(services =>
+            (IBridgeActiveRuntimeStateSink)services
+                .GetRequiredService<IBridgePersistentBusinessStateOwner>());
         services.AddSingleton<IBridgeActiveApprovalStateOwner>(services =>
             (IBridgeActiveApprovalStateOwner)services
                 .GetRequiredService<IBridgePersistentBusinessStateOwner>());
         services.AddSingleton<IBridgeActiveInputStateOwner>(services =>
             (IBridgeActiveInputStateOwner)services
-                .GetRequiredService<IBridgePersistentBusinessStateOwner>());
-        services.AddSingleton<IBridgeRuntimeEventHandler>(services =>
-            (IBridgeRuntimeEventHandler)services
                 .GetRequiredService<IBridgePersistentBusinessStateOwner>());
         services.AddSingleton<BridgeRuntimeEventIngress>();
         services.AddSingleton<IRuntimeEventSink>(services =>
@@ -197,12 +197,25 @@ public static class BridgeHostApplication
         services.AddSingleton<IBridgeRuntimeIngressAssembly,
             BridgeRuntimeIngressAssembly>();
         AddRuntimeCommandAssembly(services);
+        services.AddSingleton<ActiveRuntimeRetryCoordinator>(services => new(
+            services.GetRequiredService<BridgeHostOptions>(),
+            services.GetRequiredService<IBridgeActiveRuntimeStateSink>(),
+            services.GetRequiredService<IBridgeProductionStoreOwner>(),
+            () => services.GetRequiredService<IBridgeRuntimeCommandGateway>(),
+            services.GetRequiredService<IFeishuGateway>(),
+            services.GetRequiredService<IFeishuCardRenderer>()));
+        services.AddSingleton<IBridgeActiveRuntimeRetryCoordinator>(services =>
+            services.GetRequiredService<ActiveRuntimeRetryCoordinator>());
+        services.AddSingleton<IBridgeRuntimeEventHandler>(services =>
+            services.GetRequiredService<ActiveRuntimeRetryCoordinator>());
         services.AddSingleton<BridgeBoundaryCatalog>();
         services.AddSingleton<BridgeBoundarySubsystem>();
         services.AddSingleton<BridgeFeishuEventSubsystem>();
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             (IBridgeHostSubsystem)services
                 .GetRequiredService<IOpenCodeEndpointDirectory>());
+        services.AddSingleton<IBridgeHostSubsystem>(services =>
+            services.GetRequiredService<ActiveRuntimeRetryCoordinator>());
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             services.GetRequiredService<BridgeBoundarySubsystem>());
         services.AddSingleton<IBridgeHostSubsystem>(services =>

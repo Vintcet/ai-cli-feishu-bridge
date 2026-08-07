@@ -10,9 +10,9 @@ internal sealed class ActivePersistentBusinessStateOwner(
     IBridgeProductionStoreOwner storeOwner,
     TimeProvider? timeProvider = null)
     : IBridgePersistentBusinessStateOwner,
+      IBridgeActiveRuntimeStateSink,
       IBridgeActiveApprovalStateOwner,
       IBridgeActiveInputStateOwner,
-      IBridgeRuntimeEventHandler,
       IBridgeHostSubsystem,
       IBridgeHostSubsystemHealth
 {

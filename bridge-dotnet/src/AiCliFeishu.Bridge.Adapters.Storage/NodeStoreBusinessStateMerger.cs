@@ -14,6 +14,58 @@ public sealed record NodeStoreApprovalExtensionPatch(
 
 public static class NodeStoreBusinessStateMerger
 {
+    public static NodeStoreSnapshot PatchSessionExtensions(
+        NodeStoreSnapshot store,
+        string sessionId,
+        IReadOnlyDictionary<string, JsonElement?> patch)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentNullException.ThrowIfNull(patch);
+        if (!store.Sessions.Sessions.TryGetValue(sessionId, out var current))
+        {
+            throw new KeyNotFoundException($"会话 {sessionId} 不存在。");
+        }
+        if (patch.Any(item =>
+            string.IsNullOrWhiteSpace(item.Key) ||
+            item.Value?.ValueKind is JsonValueKind.Undefined))
+        {
+            throw new InvalidDataException("会话扩展字段补丁无效。");
+        }
+
+        var extensions = Clone(current.ExtensionData) ??
+            new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        foreach (var (name, value) in patch)
+        {
+            foreach (var existing in extensions.Keys.Where(key => string.Equals(
+                         key,
+                         name,
+                         StringComparison.OrdinalIgnoreCase)).ToArray())
+            {
+                extensions.Remove(existing);
+            }
+            if (value is not null)
+            {
+                extensions[name] = value.Value.Clone();
+            }
+        }
+
+        var sessions = new Dictionary<string, SessionStoreRecord>(
+            store.Sessions.Sessions,
+            StringComparer.Ordinal)
+        {
+            [sessionId] = CloneSession(current, extensions),
+        };
+        return store with
+        {
+            Sessions = new SessionStoreDocument
+            {
+                Sessions = sessions,
+                ExtensionData = Clone(store.Sessions.ExtensionData),
+            },
+        };
+    }
+
     public static NodeStoreSnapshot Merge(
         NodeStoreSnapshot store,
         SessionDirectoryState sessions,
@@ -178,6 +230,23 @@ public static class NodeStoreBusinessStateMerger
         var name = Path.GetFileName(trimmed);
         return string.IsNullOrEmpty(name) ? cwd : name;
     }
+
+    private static SessionStoreRecord CloneSession(
+        SessionStoreRecord source,
+        Dictionary<string, JsonElement>? extensionData) => new()
+        {
+            SessionId = source.SessionId,
+            ShortId = source.ShortId,
+            Cwd = source.Cwd,
+            ProjectName = source.ProjectName,
+            Status = source.Status,
+            Runtime = source.Runtime,
+            OpenedAt = source.OpenedAt,
+            LastSeenAt = source.LastSeenAt,
+            EndedAt = source.EndedAt,
+            LastError = source.LastError,
+            ExtensionData = extensionData,
+        };
 
     private static Dictionary<string, JsonElement>? Clone(
         Dictionary<string, JsonElement>? extensionData) =>

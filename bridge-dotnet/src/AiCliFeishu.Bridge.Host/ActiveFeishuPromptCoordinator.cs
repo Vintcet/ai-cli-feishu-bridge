@@ -12,6 +12,7 @@ internal sealed class ActiveFeishuPromptCoordinator(
     IBridgeProductionStoreOwner storeOwner,
     IBridgePersistentBusinessStateOwner businessStateOwner,
     IBridgeRuntimeCommandGateway runtimeCommands,
+    IBridgeActiveRuntimeRetryCoordinator runtimeRetries,
     IFeishuGateway gateway)
 {
     private const int MaximumDirectiveDepth = 3;
@@ -179,6 +180,9 @@ internal sealed class ActiveFeishuPromptCoordinator(
             await RejectAsync(intent, target, pendingReason, cancellationToken);
             return null;
         }
+        await runtimeRetries.BeginManualTurnAsync(
+            target.SessionId,
+            cancellationToken);
 
         var runtimeSession = new RuntimeSession(target.SessionId, target.Cwd);
         var ready = runtimeCommands.IsReady(runtime, runtimeSession);

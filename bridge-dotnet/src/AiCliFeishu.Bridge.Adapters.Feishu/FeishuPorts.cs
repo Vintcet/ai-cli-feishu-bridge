@@ -122,6 +122,11 @@ public interface IFeishuCardRenderer
         string resolution,
         int questionIndex,
         int questionCount);
+
+    IReadOnlyList<FeishuCardView> RuntimeError(
+        FeishuSessionView session,
+        string error,
+        FeishuRuntimeRetryView? retry = null);
 }
 
 public interface IFeishuCardPatchLedger

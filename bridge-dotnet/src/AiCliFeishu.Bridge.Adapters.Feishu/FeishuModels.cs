@@ -160,6 +160,13 @@ public sealed record FeishuInputCardTarget(
     int QuestionIndex,
     string? SelectionKey = null);
 
+public sealed record FeishuRuntimeRetryView(
+    string CycleId,
+    string State,
+    int Attempt,
+    int MaxAttempts,
+    int DelaySeconds = 0);
+
 public sealed record FeishuCallbackResult(
     string ToastType,
     string ToastContent,

@@ -312,6 +312,50 @@ public sealed class ActiveFeishuIntentHandlerTests
     }
 
     [TestMethod]
+    public async Task RetryStopValidatesCycleAndReturnsCoordinatorResult()
+    {
+        var fixture = Fixture.Create(bound: true);
+        fixture.RuntimeRetries.StopResult = new(
+            BridgeRetryStopKinds.Stopped,
+            false,
+            new FeishuCardRenderer().RuntimeLaunchCancelled(RuntimeNames.Codex));
+
+        var stopped = await fixture.Handler.HandleAsync(RetryIntent());
+        fixture.RuntimeRetries.StopResult = new(
+            BridgeRetryStopKinds.Stopped,
+            true,
+            stopped!.Card);
+        var running = await fixture.Handler.HandleAsync(RetryIntent());
+        fixture.RuntimeRetries.StopResult = new(
+            BridgeRetryStopKinds.AlreadyStopped,
+            false,
+            stopped.Card);
+        var repeated = await fixture.Handler.HandleAsync(RetryIntent());
+        fixture.RuntimeRetries.StopResult = new(BridgeRetryStopKinds.Stale, false);
+        var stale = await fixture.Handler.HandleAsync(RetryIntent());
+        var invalid = await fixture.Handler.HandleAsync(new(
+            "event-invalid",
+            FeishuIntentTypes.RetryStop,
+            "owner-1",
+            "chat-1",
+            "card-message-1",
+            "card",
+            "trace-1"));
+
+        Assert.AreEqual("success", stopped.ToastType);
+        Assert.AreEqual("已停止自动重试。", stopped.ToastContent);
+        Assert.IsNotNull(stopped.Card);
+        StringAssert.Contains(running!.ToastContent, "已经发送");
+        Assert.AreEqual("info", repeated!.ToastType);
+        Assert.AreEqual("自动重试已经停止。", repeated.ToastContent);
+        Assert.AreEqual("warning", stale!.ToastType);
+        Assert.AreEqual("error", invalid!.ToastType);
+        Assert.AreEqual(4, fixture.RuntimeRetries.StopCalls.Count);
+        Assert.IsTrue(fixture.RuntimeRetries.StopCalls.All(call =>
+            call == ("session-12345678", "cycle-1", "card-message-1")));
+    }
+
+    [TestMethod]
     public async Task PassiveModeFailsBeforeReadingProductionStore()
     {
         var fixture = Fixture.Create(bound: true, active: false);
@@ -347,6 +391,20 @@ public sealed class ActiveFeishuIntentHandlerTests
             "card",
             "trace-1",
             Parameters: RuntimeParameters(flowId, runtime, projectName));
+
+    private static FeishuIntent RetryIntent() => new(
+        "event-retry",
+        FeishuIntentTypes.RetryStop,
+        "owner-1",
+        "chat-1",
+        "card-message-1",
+        "card",
+        "trace-1",
+        Parameters: new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["sessionId"] = "session-12345678",
+            ["retryCycleId"] = "cycle-1",
+        });
 
     private static IReadOnlyDictionary<string, string> RuntimeParameters(
         string flowId,
@@ -409,7 +467,8 @@ public sealed class ActiveFeishuIntentHandlerTests
         ActiveFeishuIntentHandler Handler,
         RecordingStoreOwner Store,
         RecordingFeishuGateway Gateway,
-        RecordingRuntimeCommandGateway RuntimeCommands)
+        RecordingRuntimeCommandGateway RuntimeCommands,
+        RecordingRuntimeRetryCoordinator RuntimeRetries)
     {
         public static Fixture Create(
             bool bound,
@@ -425,12 +484,14 @@ public sealed class ActiveFeishuIntentHandlerTests
             var store = new RecordingStoreOwner(StoreSnapshot(bound, workspaceRoot));
             var gateway = new RecordingFeishuGateway();
             var runtimeCommands = new RecordingRuntimeCommandGateway();
+            var runtimeRetries = new RecordingRuntimeRetryCoordinator();
             var business = new RecordingBusinessStateOwner(BusinessSnapshot());
             var launches = new RecordingLaunchCoordinator();
             var prompts = new ActiveFeishuPromptCoordinator(
                 store,
                 business,
                 runtimeCommands,
+                runtimeRetries,
                 gateway);
             var renderer = new FeishuCardRenderer();
             var interactions = new FeishuInteractionCoordinator(
@@ -455,6 +516,7 @@ public sealed class ActiveFeishuIntentHandlerTests
                     business,
                     launches,
                     runtimeCommands,
+                    runtimeRetries,
                     gateway,
                     renderer,
                     prompts,
@@ -462,7 +524,8 @@ public sealed class ActiveFeishuIntentHandlerTests
                     inputs),
                 store,
                 gateway,
-                runtimeCommands);
+                runtimeCommands,
+                runtimeRetries);
         }
     }
 
@@ -745,6 +808,37 @@ public sealed class ActiveFeishuIntentHandlerTests
             {
                 await Handler(command, cancellationToken);
             }
+        }
+    }
+
+    private sealed class RecordingRuntimeRetryCoordinator :
+        IBridgeActiveRuntimeRetryCoordinator
+    {
+        public BridgeRetryStopResult StopResult { get; set; } =
+            new(BridgeRetryStopKinds.Stale, false);
+
+        public List<(string SessionId, string CycleId, string MessageId)> StopCalls
+            { get; } = [];
+
+        public bool HasActiveRetry(string sessionId) => false;
+
+        public ValueTask BeginManualTurnAsync(
+            string sessionId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.CompletedTask;
+        }
+
+        public Task<BridgeRetryStopResult> StopAsync(
+            string sessionId,
+            string cycleId,
+            string messageId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            StopCalls.Add((sessionId, cycleId, messageId));
+            return Task.FromResult(StopResult);
         }
     }
 

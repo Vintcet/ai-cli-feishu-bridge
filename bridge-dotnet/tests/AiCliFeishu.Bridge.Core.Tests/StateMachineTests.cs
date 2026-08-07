@@ -270,6 +270,25 @@ public sealed class StateMachineTests
     }
 
     [TestMethod]
+    public void RuntimeErrorClassifierMatchesNodeRetryContract()
+    {
+        Assert.IsTrue(RuntimeErrorClassifier.IsRetryable("HTTP 429 Too Many Requests"));
+        Assert.IsTrue(RuntimeErrorClassifier.IsRetryable(
+            "provider failed",
+            "internal_server_error"));
+        Assert.IsTrue(RuntimeErrorClassifier.IsRetryable("服务繁忙，请稍后重试"));
+        Assert.IsTrue(RuntimeErrorClassifier.IsRetryable(
+            "provider failed",
+            "bad_gateway_502"));
+
+        Assert.IsFalse(RuntimeErrorClassifier.IsRetryable("permission denied"));
+        Assert.IsFalse(RuntimeErrorClassifier.IsRetryable(
+            "normal response discussing HTTP",
+            "validation_error"));
+        Assert.IsFalse(RuntimeErrorClassifier.IsRetryable(null));
+    }
+
+    [TestMethod]
     public void ApprovalRetentionNeverDropsPendingByCountLimit()
     {
         var requests = new Dictionary<string, ApprovalState>(StringComparer.Ordinal)

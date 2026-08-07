@@ -428,6 +428,39 @@ public sealed class FeishuInteractionCoordinatorTests
     }
 
     [TestMethod]
+    public void RuntimeErrorCardsAreChunkedRedactedAndExposeOnlyFinalRetryAction()
+    {
+        var error = $"API_TOKEN=secret-value\n{new string('x', 3_000)}";
+        var cards = new FeishuCardRenderer().RuntimeError(
+            Session(),
+            error,
+            new("cycle-1", "scheduled", 1, 3, 5));
+
+        Assert.AreEqual(2, cards.Count);
+        Assert.IsFalse(CardText(cards[0]).Contains("secret-value", StringComparison.Ordinal));
+        StringAssert.Contains(CardText(cards[0]), "API_TOKEN=[已隐藏]");
+        StringAssert.Contains(CardText(cards[1]), "5 秒后自动重试");
+        Assert.AreEqual(0, ActionRows(cards[0]).Count());
+        var button = ActionRows(cards[1]).Single()["actions"]!.AsArray().Single()!;
+        Assert.AreEqual(FeishuCardActions.RetryStop, ActionName(button));
+        Assert.AreEqual("session-1", ActionValue(button)["sessionId"]!.GetValue<string>());
+        Assert.AreEqual("cycle-1", ActionValue(button)["retryCycleId"]!.GetValue<string>());
+    }
+
+    [TestMethod]
+    public void StoppedRuntimeErrorCardRemovesRetryAction()
+    {
+        var card = new FeishuCardRenderer().RuntimeError(
+            Session(),
+            "HTTP 503 Service Unavailable",
+            new("cycle-1", "stopped", 2, 3)).Single();
+
+        Assert.AreEqual(0, ActionRows(card).Count());
+        StringAssert.Contains(CardText(card), "已停止自动重试");
+        StringAssert.Contains(CardText(card), "仍可以从飞书或电脑端重新发送任务");
+    }
+
+    [TestMethod]
     public void ReleasedPatchClaimDoesNotLeaveStaleEvictionEntry()
     {
         var ledger = new InMemoryFeishuCardPatchLedger(2);

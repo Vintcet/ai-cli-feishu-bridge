@@ -436,7 +436,7 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(typeof(ActiveProductionStoreOwner), storeOwner.ImplementationType);
         var subsystems = services.Where(descriptor =>
             descriptor.ServiceType == typeof(IBridgeHostSubsystem)).ToArray();
-        Assert.AreEqual(8, subsystems.Length);
+        Assert.AreEqual(9, subsystems.Length);
         Assert.IsTrue(subsystems.All(descriptor =>
             descriptor.ImplementationFactory is not null));
         var hostedServices = services.Where(descriptor =>
@@ -681,6 +681,12 @@ public sealed class BridgeProductionAssemblyTests
         Assert.IsTrue(services.Any(descriptor =>
             descriptor.ServiceType == typeof(IBridgeRuntimeEventHandler) &&
             descriptor.ImplementationFactory is not null));
+        Assert.IsNotNull(services.Single(descriptor => descriptor.ServiceType ==
+            typeof(ActiveRuntimeRetryCoordinator)).ImplementationFactory);
+        Assert.IsNotNull(services.Single(descriptor => descriptor.ServiceType ==
+            typeof(IBridgeActiveRuntimeStateSink)).ImplementationFactory);
+        Assert.IsNotNull(services.Single(descriptor => descriptor.ServiceType ==
+            typeof(IBridgeActiveRuntimeRetryCoordinator)).ImplementationFactory);
         var feishuHandler = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgeFeishuIntentHandler));
         Assert.IsNotNull(feishuHandler.ImplementationFactory);
@@ -953,9 +959,15 @@ public sealed class BridgeProductionAssemblyTests
 
     private static void AddCompleteActiveRuntimeAssembly(IServiceCollection services)
     {
-        services.AddSingleton<IBridgeRuntimeEventHandler>(provider =>
-            (IBridgeRuntimeEventHandler)provider
+        services.AddSingleton<IBridgeActiveRuntimeStateSink>(provider =>
+            (IBridgeActiveRuntimeStateSink)provider
                 .GetRequiredService<IBridgePersistentBusinessStateOwner>());
+        services.AddSingleton<ActiveRuntimeRetryCoordinator>(provider =>
+            ActivatorUtilities.CreateInstance<ActiveRuntimeRetryCoordinator>(provider));
+        services.AddSingleton<IBridgeActiveRuntimeRetryCoordinator>(provider =>
+            provider.GetRequiredService<ActiveRuntimeRetryCoordinator>());
+        services.AddSingleton<IBridgeRuntimeEventHandler>(provider =>
+            provider.GetRequiredService<ActiveRuntimeRetryCoordinator>());
         services.AddSingleton<BridgeRuntimeEventIngress>();
         services.AddSingleton<IRuntimeEventSink>(provider =>
             provider.GetRequiredService<BridgeRuntimeEventIngress>());
@@ -1081,9 +1093,9 @@ public sealed class BridgeProductionAssemblyTests
     }
     private sealed class RecordingPersistentBusinessStateOwner
         : IBridgePersistentBusinessStateOwner,
+          IBridgeActiveRuntimeStateSink,
           IBridgeActiveApprovalStateOwner,
-          IBridgeActiveInputStateOwner,
-          IBridgeRuntimeEventHandler
+          IBridgeActiveInputStateOwner
     {
         public BridgeBusinessStateSnapshot Snapshot { get; } =
             BridgeBusinessStateSnapshot.NotInitialized;

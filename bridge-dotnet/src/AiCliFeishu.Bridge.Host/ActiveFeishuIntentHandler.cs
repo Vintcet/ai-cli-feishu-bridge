@@ -13,6 +13,7 @@ internal sealed class ActiveFeishuIntentHandler(
     IBridgePersistentBusinessStateOwner businessStateOwner,
     IBridgeManagedRuntimeLaunchCoordinator runtimeLaunches,
     IBridgeRuntimeCommandGateway runtimeCommands,
+    IBridgeActiveRuntimeRetryCoordinator runtimeRetries,
     IFeishuGateway gateway,
     IFeishuCardRenderer renderer,
     ActiveFeishuPromptCoordinator prompts,
@@ -45,6 +46,7 @@ internal sealed class ActiveFeishuIntentHandler(
             FeishuIntentTypes.InputToggle,
             FeishuIntentTypes.InputSubmit,
             FeishuIntentTypes.InputDeferToLocal,
+            FeishuIntentTypes.RetryStop,
         ],
         StringComparer.Ordinal);
 
@@ -89,6 +91,9 @@ internal sealed class ActiveFeishuIntentHandler(
             FeishuIntentTypes.InputDeferToLocal => await inputs.HandleAsync(
                 intent,
                 store,
+                cancellationToken),
+            FeishuIntentTypes.RetryStop => await StopRetryAsync(
+                intent,
                 cancellationToken),
             FeishuIntentTypes.CommandMenu => await PresentCardAsync(
                 intent,
@@ -135,6 +140,38 @@ internal sealed class ActiveFeishuIntentHandler(
                 cancellationToken),
             _ => throw new InvalidOperationException("飞书全局意图分派不完整。"),
         };
+    }
+
+    private async Task<FeishuCallbackResult> StopRetryAsync(
+        FeishuIntent intent,
+        CancellationToken cancellationToken)
+    {
+        var sessionId = ShortParameter(intent.Parameters, "sessionId", 256);
+        var cycleId = ShortParameter(intent.Parameters, "retryCycleId", 128);
+        if (sessionId is null || cycleId is null)
+        {
+            return new("error", "自动重试参数不完整。");
+        }
+
+        var result = await runtimeRetries.StopAsync(
+            sessionId,
+            cycleId,
+            intent.MessageId,
+            cancellationToken);
+        if (result.Kind == BridgeRetryStopKinds.Stale)
+        {
+            return new(
+                "warning",
+                "这轮自动重试已经结束，或已被新的任务替代。");
+        }
+        return new(
+            result.Kind == BridgeRetryStopKinds.AlreadyStopped ? "info" : "success",
+            result.RetryAlreadyStarted
+                ? "本次重试已经发送，已停止后续自动重试。"
+                : result.Kind == BridgeRetryStopKinds.AlreadyStopped
+                    ? "自动重试已经停止。"
+                    : "已停止自动重试。",
+            result.Card);
     }
 
     private FeishuCallbackResult HandleRuntimeNewSelect(

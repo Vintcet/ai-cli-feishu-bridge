@@ -38,6 +38,9 @@ public sealed class ActiveFeishuPromptCoordinatorTests
         Assert.AreEqual("修复测试", command.Payload.GetProperty("prompt").GetString());
         Assert.AreEqual("queue", command.Payload.GetProperty("mode").GetString());
         Assert.IsTrue(BridgeProtocolValidator.Validate(command).IsValid);
+        CollectionAssert.AreEqual(
+            new[] { target.SessionId },
+            fixture.RuntimeRetries.ManualSessions.ToArray());
         Assert.AreEqual("Codex 已接收。", fixture.Gateway.Replies.Single().Text);
         var route = fixture.Store.Current.Routes.Messages["reply-1"];
         Assert.AreEqual(target.SessionId, route.SessionId);
@@ -241,6 +244,8 @@ public sealed class ActiveFeishuPromptCoordinatorTests
 
         Assert.AreEqual(0, approvalFixture.RuntimeCommands.Commands.Count);
         Assert.AreEqual(0, inputFixture.RuntimeCommands.Commands.Count);
+        Assert.AreEqual(0, approvalFixture.RuntimeRetries.ManualSessions.Count);
+        Assert.AreEqual(0, inputFixture.RuntimeRetries.ManualSessions.Count);
         StringAssert.Contains(
             approvalFixture.Gateway.Replies.Single().Text,
             "请先处理待审批操作");
@@ -417,6 +422,7 @@ public sealed class ActiveFeishuPromptCoordinatorTests
         ActiveFeishuPromptCoordinator Coordinator,
         RecordingStoreOwner Store,
         RecordingRuntimeCommandGateway RuntimeCommands,
+        RecordingRuntimeRetryCoordinator RuntimeRetries,
         RecordingFeishuGateway Gateway)
     {
         public static Fixture Create(
@@ -451,11 +457,13 @@ public sealed class ActiveFeishuPromptCoordinatorTests
                 inputs ?? []));
             var runtimeCommands = new RecordingRuntimeCommandGateway(
                 readySessionIds ?? new HashSet<string>(StringComparer.Ordinal));
+            var runtimeRetries = new RecordingRuntimeRetryCoordinator();
             var gateway = new RecordingFeishuGateway();
             return new(
-                new(store, business, runtimeCommands, gateway),
+                new(store, business, runtimeCommands, runtimeRetries, gateway),
                 store,
                 runtimeCommands,
+                runtimeRetries,
                 gateway);
         }
     }
@@ -549,6 +557,30 @@ public sealed class ActiveFeishuPromptCoordinatorTests
             Commands.Add(command);
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class RecordingRuntimeRetryCoordinator :
+        IBridgeActiveRuntimeRetryCoordinator
+    {
+        public List<string> ManualSessions { get; } = [];
+
+        public bool HasActiveRetry(string sessionId) => false;
+
+        public ValueTask BeginManualTurnAsync(
+            string sessionId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ManualSessions.Add(sessionId);
+            return ValueTask.CompletedTask;
+        }
+
+        public Task<BridgeRetryStopResult> StopAsync(
+            string sessionId,
+            string cycleId,
+            string messageId,
+            CancellationToken cancellationToken = default) =>
+            throw new AssertFailedException("提示协调器不应直接停止自动重试。");
     }
 
     private sealed class RecordingFeishuGateway : IFeishuGateway
