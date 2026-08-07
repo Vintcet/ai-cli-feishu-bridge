@@ -308,6 +308,36 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void PassivePreflightRejectsConcreteActiveOpenCodeEventSource()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<ActiveOpenCodeEventSource>()));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+    }
+
+    [TestMethod]
+    public void PassivePreflightRejectsOpenCodeEventStreamOwnerBeforeResolvingIt()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+        var constructed = false;
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<IBridgeOpenCodeEventStreamOwner>(_ =>
+                {
+                    constructed = true;
+                    return new RecordingOpenCodeEventSource();
+                })));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+        Assert.IsFalse(constructed);
+    }
+
+    [TestMethod]
     public void PassivePreflightRejectsUnknownHostedLifecycle()
     {
         var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
@@ -387,6 +417,9 @@ public sealed class BridgeProductionAssemblyTests
         Assert.IsFalse(error.Message.Contains(
             nameof(BridgeProductionCapability.OpenCodeEndpointDirectory),
             StringComparison.Ordinal));
+        Assert.IsFalse(error.Message.Contains(
+            nameof(BridgeProductionCapability.OpenCodeEventStream),
+            StringComparison.Ordinal));
         Assert.IsFalse(services.Any(descriptor =>
             descriptor.ImplementationType?.Name.StartsWith("Passive", StringComparison.Ordinal) == true));
         Assert.IsFalse(services.Any(descriptor =>
@@ -396,7 +429,7 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(typeof(ActiveProductionStoreOwner), storeOwner.ImplementationType);
         var subsystems = services.Where(descriptor =>
             descriptor.ServiceType == typeof(IBridgeHostSubsystem)).ToArray();
-        Assert.AreEqual(5, subsystems.Length);
+        Assert.AreEqual(6, subsystems.Length);
         Assert.IsTrue(subsystems.All(descriptor =>
             descriptor.ImplementationFactory is not null));
         var hostedServices = services.Where(descriptor =>
@@ -415,7 +448,7 @@ public sealed class BridgeProductionAssemblyTests
         var manifest = (BridgeProductionAssemblyManifest)services.Single(descriptor =>
             descriptor.ServiceType == typeof(BridgeProductionAssemblyManifest))
             .ImplementationInstance!;
-        Assert.AreEqual(12, manifest.Owners.Count);
+        Assert.AreEqual(13, manifest.Owners.Count);
         Assert.AreEqual(
             BridgeProductionCapability.ActiveOwnerLease,
             manifest.Owners[0].Capability);
@@ -484,6 +517,12 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveOpenCodeEndpointDirectory),
             manifest.Owners[11].OwnerType);
+        Assert.AreEqual(
+            BridgeProductionCapability.OpenCodeEventStream,
+            manifest.Owners[12].Capability);
+        Assert.AreEqual(
+            typeof(ActiveOpenCodeEventSource),
+            manifest.Owners[12].OwnerType);
         var businessOwner = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgePersistentBusinessStateOwner));
         Assert.AreEqual(
@@ -538,6 +577,14 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveOpenCodeEndpointDirectory),
             openCodeDirectory.ImplementationType);
+        var openCodeEventSource = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IOpenCodeEventSource));
+        Assert.AreEqual(
+            typeof(ActiveOpenCodeEventSource),
+            openCodeEventSource.ImplementationType);
+        var openCodeEventOwner = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IBridgeOpenCodeEventStreamOwner));
+        Assert.IsNotNull(openCodeEventOwner.ImplementationFactory);
         var openCodeRegistrations = services.Single(descriptor =>
             descriptor.ServiceType ==
                 typeof(IBridgeOpenCodeEndpointRegistrationDirectory));
@@ -551,6 +598,15 @@ public sealed class BridgeProductionAssemblyTests
             Assert.AreSame(
                 openCodeDirectoryOwner,
                 openCodeRegistrations.ImplementationFactory(provider));
+        }
+        var eventStreamOwner = new RecordingOpenCodeEventSource();
+        var eventStreamServices = new ServiceCollection();
+        eventStreamServices.AddSingleton<IOpenCodeEventSource>(eventStreamOwner);
+        using (var provider = eventStreamServices.BuildServiceProvider())
+        {
+            Assert.AreSame(
+                eventStreamOwner,
+                openCodeEventOwner.ImplementationFactory(provider));
         }
         var lifecycleOwner = new RecordingManagedRuntimeLifecycle();
         var lifecycleServices = new ServiceCollection();
@@ -919,8 +975,14 @@ public sealed class BridgeProductionAssemblyTests
             ValueTask.FromResult(observedRevision);
     }
 
-    private sealed class RecordingOpenCodeEventSource : IOpenCodeEventSource
+    private sealed class RecordingOpenCodeEventSource :
+        IBridgeOpenCodeEventStreamOwner
     {
+        public ValueTask<bool> ProbeHealthAsync(
+            OpenCodeEndpoint endpoint,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(false);
+
         public async IAsyncEnumerable<OpenCodeRawEvent> ReadAllAsync(
             OpenCodeEndpoint endpoint,
             [System.Runtime.CompilerServices.EnumeratorCancellation]

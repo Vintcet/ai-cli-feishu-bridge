@@ -137,6 +137,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IBridgeManagedRuntimeLaunchCoordinator),
         typeof(IBridgeManagedHookIngress),
         typeof(IBridgeOpenCodeEndpointRegistrationDirectory),
+        typeof(IBridgeOpenCodeEventStreamOwner),
     ];
     private static readonly HashSet<Type> activeOnlyImplementationTypes =
     [
@@ -153,6 +154,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveManagedHookIngress),
         typeof(ActiveManagedHookResponseSink),
         typeof(ActiveOpenCodeEndpointDirectory),
+        typeof(ActiveOpenCodeEventSource),
     ];
 
     private static readonly (Type Contract, Type Implementation)[] passivePorts =

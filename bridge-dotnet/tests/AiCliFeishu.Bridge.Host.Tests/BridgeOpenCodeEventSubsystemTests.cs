@@ -44,6 +44,7 @@ public sealed class BridgeOpenCodeEventSubsystemTests
                 source,
                 new OpenCodeEventNormalizer(),
                 new RecordingRuntimeEventSink()),
+            source,
             BridgeHostOptions.Passive(Path.GetTempPath()));
 
         await subsystem.StartAsync(CancellationToken.None);
@@ -69,6 +70,7 @@ public sealed class BridgeOpenCodeEventSubsystemTests
                 source,
                 new OpenCodeEventNormalizer(),
                 new RecordingRuntimeEventSink()),
+            source,
             BridgeHostOptions.Passive(Path.GetTempPath()));
 
         await Assert.ThrowsExceptionAsync<InvalidOperationException>(() =>

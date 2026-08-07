@@ -416,6 +416,8 @@ public static class BridgeControlApi
         MapManagedIngress(app, "/hooks/activity", BridgeManagedIngressKind.Activity);
         MapManagedIngress(app, "/hooks/stop", BridgeManagedIngressKind.Stop);
 
+        MapOpenCodeEndpointApi(app);
+
         app.MapPost("/control/shutdown", async (
             HttpContext context,
             IBridgeControlTokenProvider tokenProvider,
@@ -464,6 +466,119 @@ public static class BridgeControlApi
             path,
             (Func<HttpContext, Task<IResult>>)(context =>
                 HandleManagedIngressAsync(context, kind)));
+
+    private static void MapOpenCodeEndpointIngress(
+        WebApplication app,
+        string path,
+        bool register) =>
+        app.MapPost(
+            path,
+            (Func<HttpContext, Task<IResult>>)(context =>
+                HandleOpenCodeEndpointIngressAsync(context, register)));
+
+    internal static void MapOpenCodeEndpointApi(WebApplication app)
+    {
+        ArgumentNullException.ThrowIfNull(app);
+        MapOpenCodeEndpointIngress(app, "/opencode/register", register: true);
+        MapOpenCodeEndpointIngress(app, "/opencode/unregister", register: false);
+    }
+
+    private static async Task<IResult> HandleOpenCodeEndpointIngressAsync(
+        HttpContext context,
+        bool register)
+    {
+        const int maximumBodyBytes = 1024 * 1024;
+        var request = context.Request;
+        var cancellationToken = context.RequestAborted;
+        if (!HasApplicationJsonContentType(request))
+        {
+            return Results.Json(
+                new ControlError(false, "请求必须使用 application/json。"),
+                statusCode: StatusCodes.Status415UnsupportedMediaType);
+        }
+        if (IsCrossSite(request))
+        {
+            return Results.Json(
+                new ControlError(false, "拒绝跨站请求。"),
+                statusCode: StatusCodes.Status403Forbidden);
+        }
+        var tokenProvider = context.RequestServices
+            .GetRequiredService<IBridgeControlTokenProvider>();
+        if (!await IsAuthenticatedAsync(request, tokenProvider, cancellationToken))
+        {
+            return Results.Json(
+                new ControlError(false, "本机控制令牌无效。"),
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        var body = await ReadLimitedJsonObjectAsync(
+            request,
+            maximumBodyBytes,
+            cancellationToken);
+        if (body.Status is ManagedJsonReadStatus.TooLarge)
+        {
+            return Results.Json(
+                new ControlError(false, "请求体不能超过 1 MiB。"),
+                statusCode: StatusCodes.Status413PayloadTooLarge);
+        }
+        if (body.Status is not ManagedJsonReadStatus.Valid ||
+            !TryReadPort(body.Value, out var port))
+        {
+            return Results.Json(
+                new ControlError(false, "端口参数不正确。"),
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var options = context.RequestServices.GetRequiredService<BridgeHostOptions>();
+        if (options.OwnershipMode is not BridgeOwnershipMode.Active)
+        {
+            return Results.Json(
+                new ControlError(false, "Passive Host 不登记 OpenCode 端点。"),
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+
+        var directory = context.RequestServices
+            .GetRequiredService<IBridgeOpenCodeEndpointRegistrationDirectory>();
+        try
+        {
+            if (!register)
+            {
+                directory.Unregister(port);
+                return Results.Ok(new { ok = true, port });
+            }
+            var cwd = body.Value.TryGetProperty("cwd", out var cwdValue) &&
+                cwdValue.ValueKind is JsonValueKind.String
+                    ? cwdValue.GetString()?.Trim()
+                    : null;
+            if (string.IsNullOrEmpty(cwd) || cwd.Length > 1024)
+            {
+                return Results.Json(
+                    new ControlError(false, "目录参数不正确。"),
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+            var identity = directory.Register(port, cwd);
+            return Results.Ok(new
+            {
+                ok = true,
+                port = identity.Port,
+                cwd = identity.Cwd,
+            });
+        }
+        catch (ArgumentException)
+        {
+            return Results.Json(
+                new ControlError(false, register
+                    ? "OpenCode 端点参数不正确。"
+                    : "端口参数不正确。"),
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+        catch (InvalidOperationException)
+        {
+            return Results.Json(
+                new ControlError(false, "OpenCode 端点目录当前不可处理。"),
+                statusCode: StatusCodes.Status409Conflict);
+        }
+    }
 
     private static async Task<IResult> HandleManagedIngressAsync(
         HttpContext context,
@@ -588,6 +703,28 @@ public static class BridgeControlApi
                 value.Split(';', 2)[0].Trim(),
                 "application/json",
                 StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryReadPort(JsonElement value, out int port)
+    {
+        port = 0;
+        if (!value.TryGetProperty("port", out var property))
+        {
+            return false;
+        }
+        var parsed = property.ValueKind switch
+        {
+            JsonValueKind.Number when property.TryGetInt32(out var number) => number,
+            JsonValueKind.String when int.TryParse(property.GetString(), out var number) =>
+                number,
+            _ => 0,
+        };
+        if (parsed is <= 0 or > 65_535)
+        {
+            return false;
+        }
+        port = parsed;
+        return true;
     }
 
     private static async ValueTask<ManagedJsonReadResult> ReadLimitedJsonObjectAsync(
