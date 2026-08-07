@@ -14,7 +14,8 @@ internal sealed class ActiveFeishuIntentHandler(
     IBridgeManagedRuntimeLaunchCoordinator runtimeLaunches,
     IBridgeRuntimeCommandGateway runtimeCommands,
     IFeishuGateway gateway,
-    IFeishuCardRenderer renderer) : IBridgeFeishuIntentHandler
+    IFeishuCardRenderer renderer,
+    ActiveFeishuPromptCoordinator prompts) : IBridgeFeishuIntentHandler
 {
     private const int MaximumListedSessions = 50;
     private const int MaximumRememberedNewFlows = 500;
@@ -35,6 +36,7 @@ internal sealed class ActiveFeishuIntentHandler(
             FeishuIntentTypes.RuntimeNewSelect,
             FeishuIntentTypes.RuntimeNewSubmit,
             FeishuIntentTypes.RuntimeNewCancel,
+            FeishuIntentTypes.MessagePrompt,
         ],
         StringComparer.Ordinal);
 
@@ -59,6 +61,10 @@ internal sealed class ActiveFeishuIntentHandler(
 
         return intent.IntentType switch
         {
+            FeishuIntentTypes.MessagePrompt => await prompts.HandleAsync(
+                intent,
+                store,
+                cancellationToken),
             FeishuIntentTypes.CommandMenu => await PresentCardAsync(
                 intent,
                 renderer.CommandMenu(),

@@ -920,6 +920,7 @@ public sealed class BridgeProductionAssemblyTests
 
     private static void AddCompleteActiveFeishuAssembly(IServiceCollection services)
     {
+        services.AddSingleton<ActiveFeishuPromptCoordinator>();
         services.AddSingleton<ActiveFeishuIntentHandler>();
         services.AddSingleton<IBridgeFeishuIntentHandler>(provider =>
             provider.GetRequiredService<ActiveFeishuIntentHandler>());

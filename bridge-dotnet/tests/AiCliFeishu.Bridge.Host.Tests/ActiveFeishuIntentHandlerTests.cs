@@ -297,15 +297,17 @@ public sealed class ActiveFeishuIntentHandlerTests
     }
 
     [TestMethod]
-    public async Task BoundOwnerCannotAcknowledgeAnUnmigratedIntent()
+    public async Task BoundOwnerPromptUsesMigratedCoordinator()
     {
         var fixture = Fixture.Create(bound: true);
 
-        var error = await Assert.ThrowsExceptionAsync<NotSupportedException>(() =>
-            fixture.Handler.HandleAsync(Intent(FeishuIntentTypes.MessagePrompt)));
+        var result = await fixture.Handler.HandleAsync(
+            Intent(FeishuIntentTypes.MessagePrompt));
 
-        StringAssert.Contains(error.Message, FeishuIntentTypes.MessagePrompt);
-        Assert.AreEqual(0, fixture.Gateway.TotalOutbound);
+        Assert.IsNull(result);
+        Assert.AreEqual(1, fixture.Gateway.Replies.Count);
+        StringAssert.Contains(fixture.Gateway.Replies[0].Text, "请先处理待审批操作");
+        Assert.AreEqual(0, fixture.RuntimeCommands.Commands.Count);
     }
 
     [TestMethod]
@@ -424,6 +426,11 @@ public sealed class ActiveFeishuIntentHandlerTests
             var runtimeCommands = new RecordingRuntimeCommandGateway();
             var business = new RecordingBusinessStateOwner(BusinessSnapshot());
             var launches = new RecordingLaunchCoordinator();
+            var prompts = new ActiveFeishuPromptCoordinator(
+                store,
+                business,
+                runtimeCommands,
+                gateway);
             return new(
                 new(
                     options,
@@ -432,7 +439,8 @@ public sealed class ActiveFeishuIntentHandlerTests
                     launches,
                     runtimeCommands,
                     gateway,
-                    new FeishuCardRenderer()),
+                    new FeishuCardRenderer(),
+                    prompts),
                 store,
                 gateway,
                 runtimeCommands);

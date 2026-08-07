@@ -150,6 +150,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveFeishuCredentialSource),
         typeof(ActiveFeishuEventSource),
         typeof(ActiveFeishuGateway),
+        typeof(ActiveFeishuPromptCoordinator),
         typeof(ActiveFeishuIntentHandler),
         typeof(ActiveManagedTerminalDirectory),
         typeof(ActiveManagedTerminalTransport),
@@ -223,6 +224,7 @@ internal static class BridgeProductionAssemblyPreflight
     ];
     private static readonly Type[] activeFeishuConcreteServices =
     [
+        typeof(ActiveFeishuPromptCoordinator),
         typeof(ActiveFeishuIntentHandler),
         typeof(BridgeFeishuIntentIngress),
         typeof(FeishuEventNormalizer),

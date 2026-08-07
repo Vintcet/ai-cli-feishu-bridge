@@ -143,6 +143,7 @@ public static class BridgeHostApplication
                 .GetRequiredService<IBridgeFeishuCredentialSource>());
         services.AddSingleton<IFeishuEventSource, ActiveFeishuEventSource>();
         services.AddSingleton<IFeishuGateway, ActiveFeishuGateway>();
+        services.AddSingleton<ActiveFeishuPromptCoordinator>();
         services.AddSingleton<ActiveFeishuIntentHandler>();
         services.AddSingleton<IBridgeFeishuIntentHandler>(services =>
             services.GetRequiredService<ActiveFeishuIntentHandler>());
