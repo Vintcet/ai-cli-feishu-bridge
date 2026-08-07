@@ -219,9 +219,11 @@ internal sealed class ActivePersistentBusinessStateOwner(
                         $"状态所有者不支持 Runtime 事件 {runtimeEvent.EventType}。");
             }
 
+            var sessionExtensionPatch = SessionExtensionPatch(runtimeEvent);
             if (ReferenceEquals(sessions, current.Sessions) &&
                 ReferenceEquals(approvals, current.Approvals) &&
-                ReferenceEquals(inputs, current.Inputs))
+                ReferenceEquals(inputs, current.Inputs) &&
+                sessionExtensionPatch is null)
             {
                 return;
             }
@@ -232,7 +234,7 @@ internal sealed class ActivePersistentBusinessStateOwner(
                 Approvals = approvals,
                 Inputs = inputs,
             };
-            await PersistAsync(next, cancellationToken);
+            await PersistAsync(next, cancellationToken, sessionExtensionPatch);
             Volatile.Write(ref snapshot, next);
         }
         finally
@@ -243,14 +245,59 @@ internal sealed class ActivePersistentBusinessStateOwner(
 
     private async Task PersistAsync(
         BridgeBusinessStateSnapshot business,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        NodeStoreSessionExtensionPatch? sessionExtensionPatch = null)
     {
         await storeOwner.UpdateAsync(
             store => NodeStoreBusinessStateMerger.Merge(
                 store,
                 business.Sessions,
-                business.Approvals),
+                business.Approvals,
+                sessionExtensionPatch),
             cancellationToken);
+    }
+
+    private static NodeStoreSessionExtensionPatch? SessionExtensionPatch(
+        RuntimeEventEnvelope runtimeEvent)
+    {
+        if (runtimeEvent.EventType is not RuntimeEventTypes.SessionStarted ||
+            runtimeEvent.Payload.ValueKind is not JsonValueKind.Object ||
+            !runtimeEvent.Payload.TryGetProperty(
+                "managedTerminalId",
+                out var terminalIdElement))
+        {
+            return null;
+        }
+        if (terminalIdElement.ValueKind is not JsonValueKind.String ||
+            terminalIdElement.GetString() is not { } terminalId ||
+            terminalId.Length is < 8 or > 64 ||
+            terminalId.Any(character =>
+                !char.IsAsciiLetterOrDigit(character) && character is not '_' and not '-'))
+        {
+            throw new InvalidDataException("标准会话事件包含无效的托管终端 ID。");
+        }
+        if (!runtimeEvent.Payload.TryGetProperty(
+                "managedTerminalElevated",
+                out var elevatedElement) ||
+            elevatedElement.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+        {
+            throw new InvalidDataException("标准会话事件缺少托管终端权限身份。");
+        }
+
+        var values = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            ["managedTerminalId"] = JsonSerializer.SerializeToElement(terminalId),
+            ["managedTerminalElevated"] = elevatedElement.Clone(),
+            ["managedByAssistant"] = JsonSerializer.SerializeToElement(true),
+            ["historyEligible"] = JsonSerializer.SerializeToElement(true),
+        };
+        if (runtimeEvent.Payload.TryGetProperty("source", out var sourceElement) &&
+            sourceElement.ValueKind is JsonValueKind.String &&
+            sourceElement.GetString() is { Length: > 0 } source)
+        {
+            values["source"] = JsonSerializer.SerializeToElement(source);
+        }
+        return new(runtimeEvent.Session!.ExternalId, values);
     }
 
     private void EnsureActive()

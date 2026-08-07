@@ -79,8 +79,32 @@ public sealed class ManagedRuntimeHookNormalizer(
         {
             return runtimeEvent;
         }
-        var fingerprint = $"{runtime}:{hook.GetRawText()}";
+        var fingerprint = Fingerprint(hook, runtime);
         return TryRemember(fingerprint) ? runtimeEvent : null;
+    }
+
+    public void Release(JsonElement hook)
+    {
+        if (hook.ValueKind is not JsonValueKind.Object)
+        {
+            return;
+        }
+        var fingerprint = Fingerprint(hook);
+        lock (fingerprintLock)
+        {
+            if (!fingerprintSet.Remove(fingerprint))
+            {
+                return;
+            }
+            var retained = recentFingerprints
+                .Where(item => !string.Equals(item, fingerprint, StringComparison.Ordinal))
+                .ToArray();
+            recentFingerprints.Clear();
+            foreach (var item in retained)
+            {
+                recentFingerprints.Enqueue(item);
+            }
+        }
     }
 
     private static NormalizedHook? NormalizePayload(
@@ -95,7 +119,17 @@ public sealed class ManagedRuntimeHookNormalizer(
         {
             "SessionStart" => Event(
                 RuntimeEventTypes.SessionStarted,
-                OptionalObject(("model", OptionalString(hook, "model")))),
+                OptionalObject(
+                    ("model", OptionalString(hook, "model")),
+                    ("source", OptionalString(hook, "source")),
+                    ("managedTerminalId", OptionalString(hook, "managed_terminal_id")),
+                    ("managedTerminalElevated", OptionalBooleanValue(
+                        hook,
+                        "managed_terminal_elevated")),
+                    ("managedByAssistant", OptionalString(
+                        hook,
+                        "managed_terminal_id") is null ? null : true),
+                    ("historyEligible", true))),
             "SessionEnd" => Event(
                 RuntimeEventTypes.SessionEnded,
                 OptionalObject(("reason", OptionalString(hook, "reason")))),
@@ -296,6 +330,9 @@ public sealed class ManagedRuntimeHookNormalizer(
             return true;
         }
     }
+
+    private static string Fingerprint(JsonElement hook, string? runtime = null) =>
+        $"{runtime ?? OptionalString(hook, "runtime") ?? RuntimeNames.Codex}:{hook.GetRawText()}";
 
     private readonly record struct NormalizedHook(
         string EventType,

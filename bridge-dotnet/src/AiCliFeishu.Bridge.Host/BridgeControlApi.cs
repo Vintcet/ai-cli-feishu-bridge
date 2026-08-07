@@ -398,6 +398,24 @@ public static class BridgeControlApi
                 : Results.Json(result, statusCode: StatusCodes.Status400BadRequest);
         });
 
+        MapManagedIngress(
+            app,
+            "/managed-terminals/register",
+            BridgeManagedIngressKind.TerminalRegister);
+        MapManagedIngress(
+            app,
+            "/managed-terminals/unregister",
+            BridgeManagedIngressKind.TerminalUnregister);
+        MapManagedIngress(app, "/hooks/session-start", BridgeManagedIngressKind.SessionStart);
+        MapManagedIngress(app, "/hooks/session-end", BridgeManagedIngressKind.SessionEnd);
+        MapManagedIngress(app, "/hooks/permission", BridgeManagedIngressKind.Permission);
+        MapManagedIngress(
+            app,
+            "/hooks/request-user-input",
+            BridgeManagedIngressKind.RequestUserInput);
+        MapManagedIngress(app, "/hooks/activity", BridgeManagedIngressKind.Activity);
+        MapManagedIngress(app, "/hooks/stop", BridgeManagedIngressKind.Stop);
+
         app.MapPost("/control/shutdown", async (
             HttpContext context,
             IBridgeControlTokenProvider tokenProvider,
@@ -438,6 +456,100 @@ public static class BridgeControlApi
         });
     }
 
+    private static void MapManagedIngress(
+        WebApplication app,
+        string path,
+        BridgeManagedIngressKind kind) =>
+        app.MapPost(
+            path,
+            (Func<HttpContext, Task<IResult>>)(context =>
+                HandleManagedIngressAsync(context, kind)));
+
+    private static async Task<IResult> HandleManagedIngressAsync(
+        HttpContext context,
+        BridgeManagedIngressKind kind)
+    {
+        const int maximumBodyBytes = 1024 * 1024;
+        var request = context.Request;
+        var cancellationToken = context.RequestAborted;
+        if (!HasApplicationJsonContentType(request))
+        {
+            return Results.Json(
+                new ControlError(false, "请求必须使用 application/json。"),
+                statusCode: StatusCodes.Status415UnsupportedMediaType);
+        }
+        if (IsCrossSite(request))
+        {
+            return Results.Json(
+                new ControlError(false, "拒绝跨站请求。"),
+                statusCode: StatusCodes.Status403Forbidden);
+        }
+        var tokenProvider = context.RequestServices
+            .GetRequiredService<IBridgeControlTokenProvider>();
+        if (!await IsAuthenticatedAsync(request, tokenProvider, cancellationToken))
+        {
+            return Results.Json(
+                new ControlError(false, "本机控制令牌无效。"),
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        var body = await ReadLimitedJsonObjectAsync(
+            request,
+            maximumBodyBytes,
+            cancellationToken);
+        if (body.Status is ManagedJsonReadStatus.TooLarge)
+        {
+            return Results.Json(
+                new ControlError(false, "请求体不能超过 1 MiB。"),
+                statusCode: StatusCodes.Status413PayloadTooLarge);
+        }
+        if (body.Status is not ManagedJsonReadStatus.Valid)
+        {
+            return Results.Json(
+                new { },
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var options = context.RequestServices.GetRequiredService<BridgeHostOptions>();
+        if (options.OwnershipMode is not BridgeOwnershipMode.Active)
+        {
+            return Results.Json(
+                new ControlError(false, "Passive Host 不处理托管终端 Hook。"),
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+
+        var ingress = context.RequestServices
+            .GetRequiredService<IBridgeManagedHookIngress>();
+        try
+        {
+            var result = await ingress.HandleAsync(
+                kind,
+                body.Value,
+                context.TraceIdentifier,
+                cancellationToken);
+            return Results.Json(result);
+        }
+        catch (Exception error) when (
+            error is InvalidDataException or ArgumentException or JsonException)
+        {
+            return Results.Json(
+                new { },
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+        catch (KeyNotFoundException)
+        {
+            return Results.Json(
+                new ControlError(false, "托管终端或会话身份不存在。"),
+                statusCode: StatusCodes.Status409Conflict);
+        }
+        catch (InvalidOperationException)
+        {
+            return Results.Json(
+                new ControlError(false, "托管终端 Hook 当前不可处理。"),
+                statusCode: StatusCodes.Status409Conflict);
+        }
+    }
+
     private static bool IsCrossSite(HttpRequest request)
     {
         var value = request.Headers["Sec-Fetch-Site"].ToString();
@@ -468,6 +580,65 @@ public static class BridgeControlApi
             CryptographicOperations.FixedTimeEquals(expectedBytes, actualBytes);
     }
 
+    private static bool HasApplicationJsonContentType(HttpRequest request)
+    {
+        var value = request.ContentType;
+        return value is not null &&
+            string.Equals(
+                value.Split(';', 2)[0].Trim(),
+                "application/json",
+                StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async ValueTask<ManagedJsonReadResult> ReadLimitedJsonObjectAsync(
+        HttpRequest request,
+        int maximumBytes,
+        CancellationToken cancellationToken)
+    {
+        if (request.ContentLength > maximumBytes)
+        {
+            return new(ManagedJsonReadStatus.TooLarge, default);
+        }
+        await using var buffer = new MemoryStream(
+            request.ContentLength > 0 && request.ContentLength <= maximumBytes
+                ? (int)request.ContentLength.Value
+                : 0);
+        var chunk = new byte[64 * 1024];
+        while (true)
+        {
+            var read = await request.Body.ReadAsync(
+                chunk.AsMemory(),
+                cancellationToken);
+            if (read == 0)
+            {
+                break;
+            }
+            if (buffer.Length + read > maximumBytes)
+            {
+                return new(ManagedJsonReadStatus.TooLarge, default);
+            }
+            await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken);
+        }
+        if (buffer.Length == 0)
+        {
+            return new(ManagedJsonReadStatus.Invalid, default);
+        }
+        try
+        {
+            buffer.Position = 0;
+            using var document = await JsonDocument.ParseAsync(
+                buffer,
+                cancellationToken: cancellationToken);
+            return document.RootElement.ValueKind is JsonValueKind.Object
+                ? new(ManagedJsonReadStatus.Valid, document.RootElement.Clone())
+                : new(ManagedJsonReadStatus.Invalid, default);
+        }
+        catch (JsonException)
+        {
+            return new(ManagedJsonReadStatus.Invalid, default);
+        }
+    }
+
     private static async ValueTask<JsonElement?> ReadJsonObjectAsync(
         HttpRequest request,
         CancellationToken cancellationToken)
@@ -496,6 +667,17 @@ public static class BridgeControlApi
     private sealed record RuntimeLaunchClaimResult(
         bool Ok,
         BridgeManagedRuntimeLaunchRequest? Request);
+
+    private enum ManagedJsonReadStatus
+    {
+        Valid,
+        Invalid,
+        TooLarge,
+    }
+
+    private readonly record struct ManagedJsonReadResult(
+        ManagedJsonReadStatus Status,
+        JsonElement Value);
 }
 
 public static class BridgeHostManagementContract

@@ -144,6 +144,11 @@ public static class BridgeHostApplication
         services.AddSingleton<IBridgeRuntimeEventHandler>(services =>
             (IBridgeRuntimeEventHandler)services
                 .GetRequiredService<IBridgePersistentBusinessStateOwner>());
+        services.AddSingleton<BridgeRuntimeEventIngress>();
+        services.AddSingleton<IRuntimeEventSink>(services =>
+            services.GetRequiredService<BridgeRuntimeEventIngress>());
+        services.AddSingleton<ManagedRuntimeHookNormalizer>();
+        services.AddSingleton<ManagedRuntimeHookBridge>();
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             (IBridgeHostSubsystem)services
                 .GetRequiredService<IBridgePersistentBusinessStateOwner>());
@@ -169,6 +174,8 @@ public static class BridgeHostApplication
         services.AddSingleton<IBridgeManagedRuntimeLaunchCoordinator>(services =>
             (IBridgeManagedRuntimeLaunchCoordinator)services
                 .GetRequiredService<IManagedRuntimeLifecycle>());
+        services.AddSingleton<IBridgeManagedHookIngress,
+            ActiveManagedHookIngress>();
         services.AddHostedService<BridgeInstanceLeaseService>();
         services.AddHostedService<ActiveOwnerLeaseHostedService>();
         services.AddHostedService<BridgeRuntimeWorker>();
@@ -201,6 +208,9 @@ public static class BridgeHostApplication
             new(
                 BridgeProductionCapability.ManagedRuntimeLifecycle,
                 typeof(ActiveManagedRuntimeLifecycle)),
+            new(
+                BridgeProductionCapability.ManagedHookIngress,
+                typeof(ActiveManagedHookIngress)),
         ]));
         // Production ports are registered only by their owning migration slices.
         // The incomplete manifest fails preflight and prevents Active mode from

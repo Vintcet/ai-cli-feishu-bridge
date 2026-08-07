@@ -17,7 +17,15 @@ internal sealed record BridgeManagedTerminalClaim(
     string Runtime,
     bool Elevated,
     DateTimeOffset CreatedAt,
-    long Generation);
+    long Generation,
+    bool ExistingClaim);
+
+internal sealed record BridgeManagedTerminalIdentity(
+    string TerminalId,
+    string SessionExternalId,
+    string Cwd,
+    string Runtime,
+    bool Elevated);
 
 internal sealed record BridgeManagedTerminalDirectorySnapshot(
     bool Initialized,
@@ -43,7 +51,12 @@ internal interface IBridgeManagedTerminalRegistrationDirectory
         string terminalId,
         string cwd,
         string runtime,
-        string sessionExternalId);
+        string sessionExternalId,
+        bool? elevated = null);
+
+    BridgeManagedTerminalIdentity? FindClaimBySession(string sessionExternalId);
+
+    BridgeManagedTerminalIdentity? FindClaimByTerminal(string terminalId);
 
     void Release(string sessionExternalId);
 
@@ -173,6 +186,47 @@ internal sealed class ActiveManagedTerminalDirectory(
         }
     }
 
+    public BridgeManagedTerminalIdentity? FindClaimBySession(string sessionExternalId)
+    {
+        sessionExternalId = RequireSessionId(sessionExternalId);
+        lock (sync)
+        {
+            EnsureInitializedLocked();
+            var registration = registrations.Values.SingleOrDefault(item =>
+                string.Equals(
+                    item.SessionExternalId,
+                    sessionExternalId,
+                    StringComparison.Ordinal));
+            if (registration is not null)
+            {
+                return Identity(registration, sessionExternalId);
+            }
+            var link = persistedLinks.Values.SingleOrDefault(item =>
+                string.Equals(
+                    item.SessionExternalId,
+                    sessionExternalId,
+                    StringComparison.Ordinal));
+            return link is null ? null : Identity(link);
+        }
+    }
+
+    public BridgeManagedTerminalIdentity? FindClaimByTerminal(string terminalId)
+    {
+        terminalId = RequireTerminalId(terminalId);
+        lock (sync)
+        {
+            EnsureInitializedLocked();
+            if (registrations.TryGetValue(terminalId, out var registration) &&
+                registration.SessionExternalId is { } sessionExternalId)
+            {
+                return Identity(registration, sessionExternalId);
+            }
+            return persistedLinks.TryGetValue(terminalId, out var link)
+                ? Identity(link)
+                : null;
+        }
+    }
+
     public void Register(BridgeManagedTerminalRegistration registration)
     {
         ArgumentNullException.ThrowIfNull(registration);
@@ -203,7 +257,8 @@ internal sealed class ActiveManagedTerminalDirectory(
             {
                 if (!string.Equals(link.NormalizedCwd, cwd, CwdComparison) ||
                     link.Runtime is not null &&
-                    !string.Equals(link.Runtime, runtime, StringComparison.Ordinal))
+                    !string.Equals(link.Runtime, runtime, StringComparison.Ordinal) ||
+                    link.Elevated != registration.Elevated)
                 {
                     throw new InvalidOperationException(
                         "托管终端心跳与持久化会话身份不一致。");
@@ -272,7 +327,8 @@ internal sealed class ActiveManagedTerminalDirectory(
         string terminalId,
         string cwd,
         string runtime,
-        string sessionExternalId)
+        string sessionExternalId,
+        bool? elevated = null)
     {
         terminalId = RequireTerminalId(terminalId);
         var normalizedCwd = NormalizeCwd(cwd);
@@ -292,7 +348,8 @@ internal sealed class ActiveManagedTerminalDirectory(
                     registration.NormalizedCwd,
                     normalizedCwd,
                     CwdComparison) ||
-                !string.Equals(registration.Runtime, runtime, StringComparison.Ordinal))
+                !string.Equals(registration.Runtime, runtime, StringComparison.Ordinal) ||
+                elevated is not null && registration.Elevated != elevated)
             {
                 throw new InvalidOperationException(
                     "托管终端 ID 与项目目录或运行时不匹配。");
@@ -351,6 +408,7 @@ internal sealed class ActiveManagedTerminalDirectory(
         Registration registration,
         string sessionExternalId)
     {
+        var existingClaim = registration.SessionExternalId is not null;
         if (registration.SessionExternalId is not null &&
             !string.Equals(
                 registration.SessionExternalId,
@@ -367,13 +425,15 @@ internal sealed class ActiveManagedTerminalDirectory(
             registration.TerminalId,
             sessionExternalId,
             registration.NormalizedCwd,
-            registration.Runtime);
+            registration.Runtime,
+            registration.Elevated);
         return new(
             registration.TerminalId,
             registration.Runtime,
             registration.Elevated,
             registration.CreatedAt,
-            registration.Generation);
+            registration.Generation,
+            existingClaim);
     }
 
     private void EnsureSessionNotClaimed(string sessionExternalId, string terminalId)
@@ -444,7 +504,11 @@ internal sealed class ActiveManagedTerminalDirectory(
                     terminalId,
                     session.SessionId,
                     normalizedCwd,
-                    runtime)) ||
+                    runtime,
+                    ExtensionBoolean(
+                        session,
+                        "managedTerminalElevated",
+                        strict: true) ?? false)) ||
                 !linkedSessions.Add(session.SessionId))
             {
                 throw new InvalidDataException(
@@ -467,6 +531,22 @@ internal sealed class ActiveManagedTerminalDirectory(
         registration.SessionExternalId!,
         registration.Ready,
         registration.Generation);
+
+    private static BridgeManagedTerminalIdentity Identity(
+        Registration registration,
+        string sessionExternalId) => new(
+            registration.TerminalId,
+            sessionExternalId,
+            registration.NormalizedCwd,
+            registration.Runtime,
+            registration.Elevated);
+
+    private static BridgeManagedTerminalIdentity Identity(PersistedLink link) => new(
+        link.TerminalId,
+        link.SessionExternalId,
+        link.NormalizedCwd,
+        link.Runtime ?? RuntimeNames.Codex,
+        link.Elevated);
 
     private void Prune(DateTimeOffset now)
     {
@@ -577,6 +657,39 @@ internal sealed class ActiveManagedTerminalDirectory(
         return string.IsNullOrWhiteSpace(value) ? null : value;
     }
 
+    private static bool? ExtensionBoolean(
+        SessionStoreRecord session,
+        string name,
+        bool strict)
+    {
+        if (session.ExtensionData is null)
+        {
+            return null;
+        }
+        var values = session.ExtensionData
+            .Where(item => string.Equals(
+                item.Key,
+                name,
+                StringComparison.OrdinalIgnoreCase))
+            .Select(item => item.Value)
+            .Take(2)
+            .ToArray();
+        if (values.Length == 0 ||
+            values[0].ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+        if (values.Length != 1 ||
+            values[0].ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+        {
+            return strict
+                ? throw new InvalidDataException(
+                    $"生产 Store 的托管终端绑定包含无效扩展字段 {name}。")
+                : null;
+        }
+        return values[0].GetBoolean();
+    }
+
     private static StringComparison CwdComparison => OperatingSystem.IsWindows()
         ? StringComparison.OrdinalIgnoreCase
         : StringComparison.Ordinal;
@@ -607,5 +720,6 @@ internal sealed class ActiveManagedTerminalDirectory(
         string TerminalId,
         string SessionExternalId,
         string NormalizedCwd,
-        string? Runtime);
+        string? Runtime,
+        bool Elevated);
 }

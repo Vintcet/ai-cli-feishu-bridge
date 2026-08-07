@@ -485,7 +485,12 @@ public sealed class ActiveManagedTerminalTransportTests
             string terminalId,
             string cwd,
             string runtime,
+            string sessionExternalId,
+            bool? elevated = null) => null;
+        public BridgeManagedTerminalIdentity? FindClaimBySession(
             string sessionExternalId) => null;
+        public BridgeManagedTerminalIdentity? FindClaimByTerminal(
+            string terminalId) => null;
         public void Release(string sessionExternalId) { }
 
         public bool IsCurrent(ManagedTerminalTarget target)

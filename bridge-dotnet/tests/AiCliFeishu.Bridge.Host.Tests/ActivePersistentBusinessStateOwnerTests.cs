@@ -104,6 +104,49 @@ public sealed class ActivePersistentBusinessStateOwnerTests
     }
 
     [TestMethod]
+    public async Task SessionStartPersistsManagedBindingInTheSameBusinessCommit()
+    {
+        await WriteStoreAsync(SessionStatuses.Waiting, approvalStatus: null);
+        await using var lease = new ActiveOwnerLeaseAcquirer(Options());
+        await lease.AcquireAsync();
+        var store = StoreOwner(lease);
+        await store.OpenAsync();
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+
+        await owner.HandleAsync(Event(
+            "managed-session-started",
+            RuntimeEventTypes.SessionStarted,
+            Origin.AddMinutes(2),
+            new
+            {
+                model = "gpt-5",
+                source = "startup",
+                managedTerminalId = "terminal-managed",
+                managedTerminalElevated = true,
+                managedByAssistant = true,
+                historyEligible = true,
+            }));
+
+        Assert.AreEqual(1, owner.Snapshot.Revision);
+        Assert.AreEqual(
+            SessionStatuses.Ready,
+            owner.Snapshot.Sessions.Sessions["session-1"].Status);
+        var reloaded = await new NodeJsonStoreRepository(directory!).LoadAsync();
+        var extensions = reloaded.Sessions.Sessions["session-1"].ExtensionData!;
+        Assert.AreEqual(
+            "terminal-managed",
+            extensions["managedTerminalId"].GetString());
+        Assert.IsTrue(extensions["managedTerminalElevated"].GetBoolean());
+        Assert.IsTrue(extensions["managedByAssistant"].GetBoolean());
+        Assert.IsTrue(extensions["historyEligible"].GetBoolean());
+        Assert.AreEqual("startup", extensions["source"].GetString());
+
+        await store.CloseAsync();
+        await lease.ReleaseAsync();
+    }
+
+    [TestMethod]
     public async Task ApprovalRequestPersistsRequiredNodeCompatibilityFields()
     {
         await WriteStoreAsync(SessionStatuses.Waiting, approvalStatus: null);

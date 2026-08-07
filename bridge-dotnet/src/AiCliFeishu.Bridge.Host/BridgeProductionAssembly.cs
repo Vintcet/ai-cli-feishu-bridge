@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using AiCliFeishu.Bridge.Adapters.Feishu;
 using AiCliFeishu.Bridge.Adapters.ManagedTerminal;
@@ -28,7 +29,14 @@ internal interface IBridgeFeishuCredentialSource
     BridgeFeishuCredentials Credentials { get; }
 }
 
-internal interface IBridgeManagedHookIngress;
+internal interface IBridgeManagedHookIngress
+{
+    Task<JsonElement> HandleAsync(
+        BridgeManagedIngressKind kind,
+        JsonElement payload,
+        string traceId,
+        CancellationToken cancellationToken = default);
+}
 
 internal enum BridgeProductionCapability
 {
@@ -141,6 +149,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveManagedTerminalDirectory),
         typeof(ActiveManagedTerminalTransport),
         typeof(ActiveManagedRuntimeLifecycle),
+        typeof(ActiveManagedHookIngress),
     ];
 
     private static readonly (Type Contract, Type Implementation)[] passivePorts =

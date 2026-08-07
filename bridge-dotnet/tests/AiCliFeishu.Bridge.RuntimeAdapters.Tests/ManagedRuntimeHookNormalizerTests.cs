@@ -149,6 +149,35 @@ public sealed class ManagedRuntimeHookNormalizerTests
     }
 
     [TestMethod]
+    public void SessionStartCarriesCanonicalManagedBindingMetadata()
+    {
+        var normalizer = Normalizer();
+        using var hook = JsonDocument.Parse("""
+            {
+              "hook_event_name": "SessionStart",
+              "runtime": "codex",
+              "session_id": "session-managed",
+              "cwd": "C:/repo",
+              "model": "gpt-5",
+              "source": "startup",
+              "managed_terminal_id": "terminal-managed",
+              "managed_terminal_elevated": true
+            }
+            """);
+
+        var runtimeEvent = normalizer.Normalize(hook.RootElement, "trace-managed");
+
+        Assert.IsNotNull(runtimeEvent);
+        Assert.AreEqual(
+            "terminal-managed",
+            runtimeEvent.Payload.GetProperty("managedTerminalId").GetString());
+        Assert.IsTrue(runtimeEvent.Payload.GetProperty("managedTerminalElevated").GetBoolean());
+        Assert.IsTrue(runtimeEvent.Payload.GetProperty("managedByAssistant").GetBoolean());
+        Assert.IsTrue(runtimeEvent.Payload.GetProperty("historyEligible").GetBoolean());
+        Assert.AreEqual("startup", runtimeEvent.Payload.GetProperty("source").GetString());
+    }
+
+    [TestMethod]
     public void DuplicateHookIsIgnoredUntilItsFingerprintIsEvicted()
     {
         var normalizer = new ManagedRuntimeHookNormalizer(

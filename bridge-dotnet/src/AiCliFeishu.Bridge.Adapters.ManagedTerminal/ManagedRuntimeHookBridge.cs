@@ -29,7 +29,15 @@ public sealed class ManagedRuntimeHookBridge(
             var runtimeEvent = normalizer.Normalize(hook, traceId);
             if (runtimeEvent is not null)
             {
-                await eventSink.PublishAsync(runtimeEvent, cancellationToken);
+                try
+                {
+                    await eventSink.PublishAsync(runtimeEvent, cancellationToken);
+                }
+                catch
+                {
+                    normalizer.Release(hook);
+                    throw;
+                }
             }
             return EmptyResponse.Clone();
         }

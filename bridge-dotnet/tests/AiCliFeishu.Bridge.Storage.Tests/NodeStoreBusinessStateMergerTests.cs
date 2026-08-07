@@ -81,6 +81,35 @@ public sealed class NodeStoreBusinessStateMergerTests
         Assert.AreEqual("turn-new", merged.Approvals.Requests[approval.RequestId].TurnId);
     }
 
+    [TestMethod]
+    public void SessionExtensionPatchReplacesKnownKeysAndPreservesUnknownFields()
+    {
+        var source = Store();
+        source.Sessions.Sessions["session-1"].ExtensionData!["MANAGEDTERMINALID"] =
+            JsonSerializer.SerializeToElement("terminal-old");
+        var core = NodeStoreCoreProjection.Project(source);
+        var patch = new NodeStoreSessionExtensionPatch(
+            "session-1",
+            new Dictionary<string, JsonElement>
+            {
+                ["managedTerminalId"] =
+                    JsonSerializer.SerializeToElement("terminal-new"),
+                ["managedTerminalElevated"] = JsonSerializer.SerializeToElement(true),
+            });
+
+        var merged = NodeStoreBusinessStateMerger.Merge(
+            source,
+            core.Sessions,
+            core.Approvals,
+            patch);
+
+        var extensions = merged.Sessions.Sessions["session-1"].ExtensionData!;
+        Assert.AreEqual("terminal-new", extensions["managedTerminalId"].GetString());
+        Assert.IsTrue(extensions["managedTerminalElevated"].GetBoolean());
+        Assert.AreEqual("keep-session", extensions["futureSession"].GetString());
+        Assert.IsFalse(extensions.ContainsKey("MANAGEDTERMINALID"));
+    }
+
     private static NodeStoreSnapshot Store()
     {
         var store = EmptyStore();

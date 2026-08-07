@@ -4,32 +4,56 @@ using AiCliFeishu.Bridge.Core;
 
 namespace AiCliFeishu.Bridge.Adapters.Storage;
 
+public sealed record NodeStoreSessionExtensionPatch(
+    string SessionId,
+    IReadOnlyDictionary<string, JsonElement> Values);
+
 public static class NodeStoreBusinessStateMerger
 {
     public static NodeStoreSnapshot Merge(
         NodeStoreSnapshot store,
         SessionDirectoryState sessions,
-        ApprovalRegistryState approvals)
+        ApprovalRegistryState approvals,
+        NodeStoreSessionExtensionPatch? sessionExtensionPatch = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(sessions);
         ArgumentNullException.ThrowIfNull(approvals);
         return store with
         {
-            Sessions = MergeSessions(store.Sessions, sessions),
+            Sessions = MergeSessions(
+                store.Sessions,
+                sessions,
+                sessionExtensionPatch),
             Approvals = MergeApprovals(store.Approvals, approvals),
         };
     }
 
     private static SessionStoreDocument MergeSessions(
         SessionStoreDocument document,
-        SessionDirectoryState state)
+        SessionDirectoryState state,
+        NodeStoreSessionExtensionPatch? extensionPatch)
     {
+        if (extensionPatch is not null &&
+            (!state.Sessions.ContainsKey(extensionPatch.SessionId) ||
+             extensionPatch.Values.Any(item =>
+                 string.IsNullOrWhiteSpace(item.Key) ||
+                 item.Value.ValueKind is JsonValueKind.Undefined)))
+        {
+            throw new InvalidDataException("会话扩展字段补丁无效。");
+        }
         var records = state.Sessions.ToDictionary(
             item => item.Key,
             item => MergeSession(
                 document.Sessions.GetValueOrDefault(item.Key),
-                item.Value),
+                item.Value,
+                extensionPatch is { } patch &&
+                string.Equals(
+                    item.Key,
+                    patch.SessionId,
+                    StringComparison.Ordinal)
+                        ? patch.Values
+                        : null),
             StringComparer.Ordinal);
         return new SessionStoreDocument
         {
@@ -40,7 +64,8 @@ public static class NodeStoreBusinessStateMerger
 
     private static SessionStoreRecord MergeSession(
         SessionStoreRecord? current,
-        SessionState state) => new()
+        SessionState state,
+        IReadOnlyDictionary<string, JsonElement>? extensionPatch) => new()
     {
         SessionId = state.SessionId,
         ShortId = current?.ShortId ?? ShortSessionId(state.SessionId),
@@ -52,7 +77,7 @@ public static class NodeStoreBusinessStateMerger
         LastSeenAt = Timestamp(current?.LastSeenAt, state.LastSeenAt),
         EndedAt = OptionalTimestamp(current?.EndedAt, state.EndedAt),
         LastError = state.LastError,
-        ExtensionData = Clone(current?.ExtensionData),
+        ExtensionData = MergeExtensions(current?.ExtensionData, extensionPatch),
     };
 
     private static ApprovalStoreDocument MergeApprovals(
@@ -135,4 +160,29 @@ public static class NodeStoreBusinessStateMerger
             item => item.Key,
             item => item.Value.Clone(),
             StringComparer.Ordinal);
+
+    private static Dictionary<string, JsonElement>? MergeExtensions(
+        Dictionary<string, JsonElement>? extensionData,
+        IReadOnlyDictionary<string, JsonElement>? patch)
+    {
+        var merged = Clone(extensionData);
+        if (patch is null || patch.Count == 0)
+        {
+            return merged;
+        }
+        merged ??= new(StringComparer.Ordinal);
+        foreach (var item in patch)
+        {
+            foreach (var existingKey in merged.Keys.Where(key =>
+                         string.Equals(
+                             key,
+                             item.Key,
+                             StringComparison.OrdinalIgnoreCase)).ToArray())
+            {
+                merged.Remove(existingKey);
+            }
+            merged[item.Key] = item.Value.Clone();
+        }
+        return merged;
+    }
 }

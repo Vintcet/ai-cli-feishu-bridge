@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using AiCliFeishu.Bridge.Protocol;
 using Microsoft.AspNetCore.Builder;
@@ -415,6 +416,81 @@ public sealed class BridgeControlApiTests
         complete.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
         using var completeResponse = await client.SendAsync(complete);
         Assert.AreEqual(HttpStatusCode.ServiceUnavailable, completeResponse.StatusCode);
+    }
+
+    [TestMethod]
+    public async Task ManagedIngressRoutesAuthenticateAndFailClosedInPassiveHost()
+    {
+        var paths = new[]
+        {
+            "/managed-terminals/register",
+            "/managed-terminals/unregister",
+            "/hooks/session-start",
+            "/hooks/session-end",
+            "/hooks/permission",
+            "/hooks/request-user-input",
+            "/hooks/activity",
+            "/hooks/stop",
+        };
+        foreach (var path in paths)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, path)
+            {
+                Content = JsonContent.Create(new { }),
+            };
+            request.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+            using var response = await client!.SendAsync(request);
+            Assert.AreEqual(
+                HttpStatusCode.ServiceUnavailable,
+                response.StatusCode,
+                path);
+        }
+
+        using var missingToken = await client!.PostAsJsonAsync(
+            "/hooks/session-start",
+            new { });
+        Assert.AreEqual(HttpStatusCode.Unauthorized, missingToken.StatusCode);
+
+        using var crossSite = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/hooks/session-start")
+        {
+            Content = JsonContent.Create(new { }),
+        };
+        crossSite.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        crossSite.Headers.Add("Sec-Fetch-Site", "cross-site");
+        using var crossSiteResponse = await client!.SendAsync(crossSite);
+        Assert.AreEqual(HttpStatusCode.Forbidden, crossSiteResponse.StatusCode);
+
+        using var wrongMediaType = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/hooks/session-start")
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "text/plain"),
+        };
+        wrongMediaType.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var mediaResponse = await client.SendAsync(wrongMediaType);
+        Assert.AreEqual(HttpStatusCode.UnsupportedMediaType, mediaResponse.StatusCode);
+    }
+
+    [TestMethod]
+    public async Task ManagedIngressRejectsBodiesLargerThanOneMebibyte()
+    {
+        var json = JsonSerializer.Serialize(new
+        {
+            padding = new string('x', 1024 * 1024),
+        });
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/hooks/activity")
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+
+        using var response = await client!.SendAsync(request);
+
+        Assert.AreEqual(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
     }
 
     [TestMethod]

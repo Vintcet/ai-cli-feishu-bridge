@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
@@ -253,6 +254,18 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void PassivePreflightRejectsConcreteActiveManagedHookIngress()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<ActiveManagedHookIngress>()));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+    }
+
+    [TestMethod]
     public void PassivePreflightRejectsUnknownHostedLifecycle()
     {
         var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
@@ -351,7 +364,7 @@ public sealed class BridgeProductionAssemblyTests
         var manifest = (BridgeProductionAssemblyManifest)services.Single(descriptor =>
             descriptor.ServiceType == typeof(BridgeProductionAssemblyManifest))
             .ImplementationInstance!;
-        Assert.AreEqual(9, manifest.Owners.Count);
+        Assert.AreEqual(10, manifest.Owners.Count);
         Assert.AreEqual(
             BridgeProductionCapability.ActiveOwnerLease,
             manifest.Owners[0].Capability);
@@ -402,6 +415,12 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveManagedRuntimeLifecycle),
             manifest.Owners[8].OwnerType);
+        Assert.AreEqual(
+            BridgeProductionCapability.ManagedHookIngress,
+            manifest.Owners[9].Capability);
+        Assert.AreEqual(
+            typeof(ActiveManagedHookIngress),
+            manifest.Owners[9].OwnerType);
         var businessOwner = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgePersistentBusinessStateOwner));
         Assert.AreEqual(
@@ -441,6 +460,13 @@ public sealed class BridgeProductionAssemblyTests
             descriptor.ServiceType ==
                 typeof(IBridgeManagedRuntimeLaunchCoordinator));
         Assert.IsNotNull(launchCoordinator.ImplementationFactory);
+        var hookIngress = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IBridgeManagedHookIngress));
+        Assert.AreEqual(typeof(ActiveManagedHookIngress), hookIngress.ImplementationType);
+        Assert.IsTrue(services.Any(descriptor =>
+            descriptor.ServiceType == typeof(ManagedRuntimeHookBridge)));
+        Assert.IsFalse(services.Any(descriptor =>
+            descriptor.ServiceType == typeof(IManagedHookResponseSink)));
         var lifecycleOwner = new RecordingManagedRuntimeLifecycle();
         var lifecycleServices = new ServiceCollection();
         lifecycleServices.AddSingleton<IManagedRuntimeLifecycle>(lifecycleOwner);
@@ -681,7 +707,15 @@ public sealed class BridgeProductionAssemblyTests
         public BridgeFeishuCredentials Credentials { get; } =
             new("cli_recording", "recording-secret");
     }
-    private sealed class RecordingManagedHookIngress : IBridgeManagedHookIngress;
+    private sealed class RecordingManagedHookIngress : IBridgeManagedHookIngress
+    {
+        public Task<JsonElement> HandleAsync(
+            BridgeManagedIngressKind kind,
+            JsonElement payload,
+            string traceId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(JsonSerializer.SerializeToElement(new { }));
+    }
 
     private sealed class RecordingManagedTerminalRegistrationDirectory
         : IManagedTerminalDirectory,
@@ -701,7 +735,12 @@ public sealed class BridgeProductionAssemblyTests
             string terminalId,
             string cwd,
             string runtime,
+            string sessionExternalId,
+            bool? elevated = null) => null;
+        public BridgeManagedTerminalIdentity? FindClaimBySession(
             string sessionExternalId) => null;
+        public BridgeManagedTerminalIdentity? FindClaimByTerminal(
+            string terminalId) => null;
         public void Release(string sessionExternalId) { }
         public bool IsCurrent(ManagedTerminalTarget target) => false;
     }
