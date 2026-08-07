@@ -162,6 +162,8 @@ public static class BridgeHostApplication
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             (IBridgeHostSubsystem)services
                 .GetRequiredService<IManagedTerminalDirectory>());
+        services.AddSingleton<IManagedTerminalTransport,
+            ActiveManagedTerminalTransport>();
         services.AddHostedService<BridgeInstanceLeaseService>();
         services.AddHostedService<ActiveOwnerLeaseHostedService>();
         services.AddHostedService<BridgeRuntimeWorker>();
@@ -188,6 +190,9 @@ public static class BridgeHostApplication
             new(
                 BridgeProductionCapability.ManagedTerminalDirectory,
                 typeof(ActiveManagedTerminalDirectory)),
+            new(
+                BridgeProductionCapability.ManagedTerminalTransport,
+                typeof(ActiveManagedTerminalTransport)),
         ]));
         // Production ports are registered only by their owning migration slices.
         // The incomplete manifest fails preflight and prevents Active mode from

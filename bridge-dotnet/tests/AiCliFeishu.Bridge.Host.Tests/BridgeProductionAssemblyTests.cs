@@ -229,6 +229,18 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void PassivePreflightRejectsConcreteActiveManagedTerminalTransport()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<ActiveManagedTerminalTransport>()));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+    }
+
+    [TestMethod]
     public void PassivePreflightRejectsUnknownHostedLifecycle()
     {
         var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
@@ -293,6 +305,9 @@ public sealed class BridgeProductionAssemblyTests
         Assert.IsFalse(error.Message.Contains(
             nameof(BridgeProductionCapability.ManagedTerminalDirectory),
             StringComparison.Ordinal));
+        Assert.IsFalse(error.Message.Contains(
+            nameof(BridgeProductionCapability.ManagedTerminalTransport),
+            StringComparison.Ordinal));
         Assert.IsFalse(services.Any(descriptor =>
             descriptor.ImplementationType?.Name.StartsWith("Passive", StringComparison.Ordinal) == true));
         Assert.IsFalse(services.Any(descriptor =>
@@ -321,7 +336,7 @@ public sealed class BridgeProductionAssemblyTests
         var manifest = (BridgeProductionAssemblyManifest)services.Single(descriptor =>
             descriptor.ServiceType == typeof(BridgeProductionAssemblyManifest))
             .ImplementationInstance!;
-        Assert.AreEqual(7, manifest.Owners.Count);
+        Assert.AreEqual(8, manifest.Owners.Count);
         Assert.AreEqual(
             BridgeProductionCapability.ActiveOwnerLease,
             manifest.Owners[0].Capability);
@@ -360,6 +375,12 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveManagedTerminalDirectory),
             manifest.Owners[6].OwnerType);
+        Assert.AreEqual(
+            BridgeProductionCapability.ManagedTerminalTransport,
+            manifest.Owners[7].Capability);
+        Assert.AreEqual(
+            typeof(ActiveManagedTerminalTransport),
+            manifest.Owners[7].OwnerType);
         var businessOwner = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgePersistentBusinessStateOwner));
         Assert.AreEqual(
@@ -385,6 +406,11 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveManagedTerminalDirectory),
             terminalDirectory.ImplementationType);
+        var terminalTransport = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IManagedTerminalTransport));
+        Assert.AreEqual(
+            typeof(ActiveManagedTerminalTransport),
+            terminalTransport.ImplementationType);
         var registrationDirectory = services.Single(descriptor =>
             descriptor.ServiceType ==
                 typeof(IBridgeManagedTerminalRegistrationDirectory));

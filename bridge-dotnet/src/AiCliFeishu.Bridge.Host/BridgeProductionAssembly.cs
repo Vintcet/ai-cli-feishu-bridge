@@ -138,6 +138,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveFeishuEventSource),
         typeof(ActiveFeishuGateway),
         typeof(ActiveManagedTerminalDirectory),
+        typeof(ActiveManagedTerminalTransport),
     ];
 
     private static readonly (Type Contract, Type Implementation)[] passivePorts =
