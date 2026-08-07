@@ -6,6 +6,7 @@ public enum NodeStoreAccess
 {
     ReadOnly,
     ReadWriteCopy,
+    ReadWriteActiveOwner,
 }
 
 public sealed class NodeJsonStoreRepository
@@ -89,6 +90,14 @@ public sealed class NodeJsonStoreRepository
                 stream.Flush(flushToDisk: true);
             }
             File.Move(temporary, destination, overwrite: true);
+            using var committed = new FileStream(
+                destination,
+                FileMode.Open,
+                FileAccess.ReadWrite,
+                FileShare.Read,
+                4_096,
+                FileOptions.WriteThrough);
+            committed.Flush(flushToDisk: true);
         }
         catch
         {
@@ -108,10 +117,11 @@ public sealed class NodeJsonStoreRepository
 
     private void EnsureWritable()
     {
-        if (Access != NodeStoreAccess.ReadWriteCopy)
+        if (Access is not (NodeStoreAccess.ReadWriteCopy or
+            NodeStoreAccess.ReadWriteActiveOwner))
         {
             throw new InvalidOperationException(
-                "M2 C# Store 默认为只读；只能对明确创建的迁移副本启用写入。 ");
+                "只读 Node Store Repository 不允许写入。");
         }
     }
 }

@@ -10,13 +10,13 @@ internal interface IBridgeActiveOwnerLeaseLifecycle : IAsyncDisposable
 {
     bool IsHeld { get; }
 
+    ActiveOwnerLeaseRecord? HeldLease { get; }
+
     ValueTask<ActiveOwnerLeaseRecord> AcquireAsync(
         CancellationToken cancellationToken = default);
 
     ValueTask ReleaseAsync(CancellationToken cancellationToken = default);
 }
-
-internal interface IBridgeProductionStoreOwner;
 
 internal interface IBridgePersistentBusinessStateOwner;
 
@@ -125,6 +125,7 @@ internal static class BridgeProductionAssemblyPreflight
     [
         typeof(ActiveOwnerLeaseAcquirer),
         typeof(ActiveOwnerLeaseHostedService),
+        typeof(ActiveProductionStoreOwner),
     ];
 
     private static readonly (Type Contract, Type Implementation)[] passivePorts =

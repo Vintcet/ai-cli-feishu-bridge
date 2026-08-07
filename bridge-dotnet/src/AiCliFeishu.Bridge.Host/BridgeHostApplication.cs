@@ -135,6 +135,10 @@ public static class BridgeHostApplication
     {
         services.AddSingleton<IBridgeActiveOwnerLeaseLifecycle,
             ActiveOwnerLeaseAcquirer>();
+        services.AddSingleton<IBridgeProductionStoreOwner,
+            ActiveProductionStoreOwner>();
+        services.AddSingleton<IBridgeHostSubsystem>(services =>
+            (IBridgeHostSubsystem)services.GetRequiredService<IBridgeProductionStoreOwner>());
         services.AddHostedService<BridgeInstanceLeaseService>();
         services.AddHostedService<ActiveOwnerLeaseHostedService>();
         services.AddHostedService<BridgeRuntimeWorker>();
@@ -143,6 +147,9 @@ public static class BridgeHostApplication
             new(
                 BridgeProductionCapability.ActiveOwnerLease,
                 typeof(ActiveOwnerLeaseAcquirer)),
+            new(
+                BridgeProductionCapability.ProductionStoreOwner,
+                typeof(ActiveProductionStoreOwner)),
         ]));
         // Production ports are registered only by their owning migration slices.
         // The incomplete manifest fails preflight and prevents Active mode from

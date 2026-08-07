@@ -34,6 +34,24 @@ public sealed class NodeJsonStoreRepositoryTests
     }
 
     [TestMethod]
+    public async Task ActiveOwnerAccessUsesTheSameAtomicWritePath()
+    {
+        await using var directory = await StoreTestDirectory.CreateAsync();
+        var repository = new NodeJsonStoreRepository(
+            directory.Path,
+            NodeStoreAccess.ReadWriteActiveOwner);
+        var snapshot = await repository.LoadAsync();
+
+        await repository.WriteAsync(snapshot);
+
+        Assert.AreEqual(NodeStoreAccess.ReadWriteActiveOwner, repository.Access);
+        Assert.IsFalse(Directory.EnumerateFiles(directory.Path, "*.tmp").Any());
+        Assert.AreEqual(
+            "keep-root",
+            (await repository.LoadAsync()).Sessions.ExtensionData!["futureRoot"].GetString());
+    }
+
+    [TestMethod]
     public async Task CopyRoundTripPreservesUnknownFields()
     {
         await using var directory = await StoreTestDirectory.CreateAsync();

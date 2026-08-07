@@ -74,6 +74,8 @@ internal sealed class ActiveOwnerLeaseAcquirer : IBridgeActiveOwnerLeaseLifecycl
 
     public bool IsHeld => held;
 
+    public ActiveOwnerLeaseRecord? HeldLease => held ? record : null;
+
     public async ValueTask<ActiveOwnerLeaseRecord> AcquireAsync(
         CancellationToken cancellationToken = default)
     {
