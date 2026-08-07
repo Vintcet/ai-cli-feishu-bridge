@@ -45,6 +45,7 @@
     <Compile Include="BridgeHostCutoverCoordinatorTests.cs" />
     <Compile Include="BridgeHostCutoverProcessOperationsTests.cs" />
     <Compile Include="BridgeHostCutoverProcessIntegrationTests.cs" />
+    <Compile Include="BridgeHostRecoveryProcessIntegrationTests.cs" />
     <Compile Include="BridgeHostCutoverCheckpointTests.cs" />
     <Compile Include="BridgeHostCutoverCheckpointWriterTests.cs" />
     <Compile Include="BridgeHostRecoveryPlanTests.cs" />

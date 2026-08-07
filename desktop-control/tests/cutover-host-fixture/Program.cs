@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Text;
+using System.Text.Json;
 
 var options = FixtureOptions.Parse(args);
 var builder = WebApplication.CreateBuilder(args);
@@ -43,7 +45,19 @@ app.MapPost("/control/shutdown", (
     return Results.Accepted(value: new { ok = true });
 });
 
-await app.RunAsync();
+FixtureLease? lease = null;
+try
+{
+    if (options.DataDirectory is not null)
+    {
+        lease = FixtureLease.Acquire(options);
+    }
+    await app.RunAsync();
+}
+finally
+{
+    lease?.Dispose();
+}
 
 static object Status(FixtureOptions options) => new
 {
@@ -82,7 +96,8 @@ internal sealed record FixtureOptions(
     string HostKind,
     string InstanceName,
     int Port,
-    string ControlToken)
+    string ControlToken,
+    string? DataDirectory)
 {
     public static FixtureOptions Parse(string[] args)
     {
@@ -110,11 +125,124 @@ internal sealed record FixtureOptions(
         {
             throw new InvalidOperationException("--port must be between 1 and 65535.");
         }
-        return new(hostKind, instanceName, port, Required("--token"));
+        return new(
+            hostKind,
+            instanceName,
+            port,
+            Required("--token"),
+            OptionalPath("--data-directory"));
 
         string Required(string name) =>
             values.GetValueOrDefault(name) is { Length: > 0 } value
                 ? value
                 : throw new InvalidOperationException($"Missing {name}.");
+
+        string? OptionalPath(string name) =>
+            values.GetValueOrDefault(name) is { Length: > 0 } value
+                ? Path.GetFullPath(value)
+                : null;
+    }
+}
+
+internal sealed class FixtureLease : IDisposable
+{
+    private const string LockDirectoryName = "bridge-active-owner.lock";
+    private const string MetadataFileName = "owner.json";
+
+    private readonly string lockDirectory;
+    private readonly string metadataPath;
+    private readonly string leaseId;
+    private bool disposed;
+
+    private FixtureLease(
+        string lockDirectory,
+        string metadataPath,
+        string leaseId)
+    {
+        this.lockDirectory = lockDirectory;
+        this.metadataPath = metadataPath;
+        this.leaseId = leaseId;
+    }
+
+    public static FixtureLease Acquire(FixtureOptions options)
+    {
+        var dataDirectory = options.DataDirectory ??
+            throw new InvalidOperationException("Fixture data directory is missing.");
+        Directory.CreateDirectory(dataDirectory);
+
+        var lockDirectory = Path.Combine(dataDirectory, LockDirectoryName);
+        var temporaryDirectory = Path.Combine(
+            dataDirectory,
+            $"{LockDirectoryName}.fixture-{Environment.ProcessId}-{Guid.NewGuid():N}.tmp");
+        var leaseId = $"fixture-{Guid.NewGuid():N}";
+        Directory.CreateDirectory(temporaryDirectory);
+        try
+        {
+            var temporaryMetadata = Path.Combine(temporaryDirectory, MetadataFileName);
+            var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+            {
+                schemaVersion = 1,
+                hostKind = options.HostKind,
+                ownershipMode = "active",
+                processId = Environment.ProcessId,
+                instanceName = options.InstanceName,
+                leaseId,
+                acquiredAt = DateTimeOffset.UtcNow,
+            }) + "\n");
+            using (var stream = new FileStream(
+                temporaryMetadata,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 4096,
+                FileOptions.WriteThrough))
+            {
+                stream.Write(bytes);
+                stream.Flush(flushToDisk: true);
+            }
+
+            Directory.Move(temporaryDirectory, lockDirectory);
+            return new(
+                lockDirectory,
+                Path.Combine(lockDirectory, MetadataFileName),
+                leaseId);
+        }
+        catch
+        {
+            if (Directory.Exists(temporaryDirectory))
+            {
+                Directory.Delete(temporaryDirectory, recursive: true);
+            }
+            throw;
+        }
+    }
+
+    public void Dispose()
+    {
+        if (disposed)
+        {
+            return;
+        }
+        disposed = true;
+
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(metadataPath));
+            var root = document.RootElement;
+            if (!root.TryGetProperty("processId", out var processId) ||
+                processId.GetInt32() != Environment.ProcessId ||
+                !root.TryGetProperty("leaseId", out var lease) ||
+                !string.Equals(lease.GetString(), leaseId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            File.Delete(metadataPath);
+            Directory.Delete(lockDirectory, recursive: false);
+        }
+        catch (Exception error) when (
+            error is DirectoryNotFoundException or FileNotFoundException)
+        {
+        }
     }
 }
