@@ -317,8 +317,8 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 - `data/bridge-host-{instance}.lock` 使用跨进程独占写句柄实现单实例租约，进程退出后可重新取得；
 - 生产 Store 另有跨语言 `data/bridge-active-owner.lock/owner.json` 所有权租约，契约版本保存在 `protocol/ownership/v1/`。Node 会在加载或写入 Store 前，以完整临时目录写入、刷盘并原子发布该租约；第二个在线 Owner 会被拒绝，有效但 PID 已退出的残留可原子隔离回收，路径类型或元数据损坏则安全拒绝。平滑停止时只有完成 Controller/CLI 清理、Store 刷盘和行为记录器关闭后才释放租约，且释放前核对 `leaseId`，不会删除已替换的 Owner；
 - Passive C# Host 的第一个子系统只读取共享租约并以不含路径、PID、leaseId 或时间的粗粒度健康状态报告 `live`、`stale`、`missing` 或 `invalid`，不会创建、隔离、删除或取得生产租约。`BridgeHostOptions.Validate()` 仍硬性拒绝 `active`，因此这一切片只建立交接协议，不改变生产流量或写入所有权；
-- C# 已实现与 Node 同契约的内部原子取得器，用隔离目录验证完整元数据刷盘、目录原子发布、在线 Owner 拒绝、死亡租约确定性墓碑、并发回收唯一胜者和释放身份校验。该类型仅向 Host 测试程序集开放，没有注册到 Host DI，也没有桌面或命令行入口；生产 `active` 闸门仍保持关闭；
-- Host 装配根现按所有权模式显式分成 Infrastructure、Passive 和预留 Active 三部分：Passive 分支唯一注册只读 Store、无网络飞书、空 OpenCode 事件源和拒绝执行的 Runtime 端口；Active 分支不会继承任何 Passive 实现，目前只登记空的生产装配清单，因此不能形成可启动的生产对象图；
+- C# 已实现与 Node 同契约的原子取得器，用隔离目录验证完整元数据刷盘、目录原子发布、在线 Owner 拒绝、死亡租约确定性墓碑、并发回收唯一胜者和释放身份校验。Active 分支现将它登记为第一个生产能力和位于其他运行时工作之前的 Hosted Service，使未来完整 Active Host 必须先取得共享租约并在停机末尾释放；
+- Host 装配根现按所有权模式显式分成 Infrastructure、Passive 和预留 Active 三部分：Passive 分支唯一注册只读 Store、无网络飞书、空 OpenCode 事件源和拒绝执行的 Runtime 端口；Active 分支不会继承任何 Passive 实现，目前只具备 Active Owner 租约这一项生产能力，因此不能形成可启动的生产对象图；
 - `BridgeProductionAssemblyPreflight` 在构建 ServiceProvider、启动 Hosted Service 或监听 Kestrel 之前静态审查装配描述符。未来 Active Host 必须对 Active Owner 租约、生产 Store、持久化业务状态、飞书凭据/事件/发送、Managed Terminal 目录/传输/生命周期/Hook ingress/回包、OpenCode 目录/事件/传输/生命周期 15 项能力逐项声明唯一且类型匹配的生产所有者；缺失、重复、未注册或回退到 Passive 实现均 fail closed，预检本身不解析服务，因而不会取得租约、读写 Store、打开网络或启动 CLI；
 - `/health` 无令牌时只返回存活结果，携带既有本机控制令牌时才返回进程、生命周期、组件和所有权状态；
 - `/control/shutdown` 沿用 JSON Content-Type、Fetch Metadata 和定时比较控制令牌的安全边界；
@@ -372,7 +372,7 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 dotnet test .\bridge-dotnet\tests\AiCliFeishu.Bridge.Host.Tests\AiCliFeishu.Bridge.Host.Tests.csproj -c Release
 ```
 
-Host 子系统的初始化顺序固定为 `PassiveOwnerGuard → Boundary validation → ReadOnlyNodeStoreShadow → BridgeBusinessStateOwner → Feishu Event Pump → OpenCode Event Pump`，停止时按相反顺序执行。Node 和 C# 回收死亡 PID 的有效租约时，都会按旧 `leaseId` 原子改名并保留确定性墓碑；并发启动者因此不能把刚建立的新租约误当成旧租约移动。控制面板的纯切换事务、内存/持久化隔离协调器、真实进程适配器、正式只读 Store/租约检查器、保守恢复计划、未接入入口的耐崩溃检查点存储、只读恢复观察器、隔离检查点写者协议和隔离恢复执行器已经固定阶段、提交点、采样顺序、身份边界、失败回退、刷盘和冲突证据语义，检查点文件版本 CAS、写入者崩溃后的孤儿临时文件隔离、启动 PID 返回前的持久化绑定、恢复后的端点/租约稳定收敛，以及对应真实子进程演练也已完成，但仍没有生产执行入口。生产装配审查已建立明确的 Passive/Active 分支和静态完整性预检；后续必须按能力清单逐个实现并登记真实生产所有者，在 15 项能力全部满足且全链路审查通过前，不得把切换能力接入 `BridgeClient`、`MainForm`、`Program`、启动配置或发布脚本，也不得解除 `active` 闸门。任何时刻仍只允许一个生产写入者。
+Host 子系统的初始化顺序固定为 `PassiveOwnerGuard → Boundary validation → ReadOnlyNodeStoreShadow → BridgeBusinessStateOwner → Feishu Event Pump → OpenCode Event Pump`，停止时按相反顺序执行。Node 和 C# 回收死亡 PID 的有效租约时，都会按旧 `leaseId` 原子改名并保留确定性墓碑；并发启动者因此不能把刚建立的新租约误当成旧租约移动。控制面板的纯切换事务、内存/持久化隔离协调器、真实进程适配器、正式只读 Store/租约检查器、保守恢复计划、未接入入口的耐崩溃检查点存储、只读恢复观察器、隔离检查点写者协议和隔离恢复执行器已经固定阶段、提交点、采样顺序、身份边界、失败回退、刷盘和冲突证据语义，检查点文件版本 CAS、写入者崩溃后的孤儿临时文件隔离、启动 PID 返回前的持久化绑定、恢复后的端点/租约稳定收敛，以及对应真实子进程演练也已完成，但仍没有生产执行入口。生产装配审查已建立明确的 Passive/Active 分支和静态完整性预检，并完成 Active Owner 租约这一项生产能力；后续必须继续按能力清单逐个实现并登记其余 14 项真实生产所有者，在 15 项能力全部满足且全链路审查通过前，不得把切换能力接入 `BridgeClient`、`MainForm`、`Program`、启动配置或发布脚本，也不得解除 `active` 闸门。任何时刻仍只允许一个生产写入者。
 
 ### M6：删除旧实现
 

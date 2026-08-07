@@ -47,6 +47,34 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void PassivePreflightRejectsActiveLeaseLifecycleOverride()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+            {
+                services.AddSingleton<IBridgeActiveOwnerLeaseLifecycle,
+                    RecordingActiveOwnerLeaseLifecycle>();
+                services.AddHostedService<ActiveOwnerLeaseHostedService>();
+            }));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+    }
+
+    [TestMethod]
+    public void PassivePreflightRejectsUnknownHostedLifecycle()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddHostedService<UnknownHostedService>()));
+
+        StringAssert.Contains(error.Message, "后台生命周期注册缺失、重复、越序或包含未知实现");
+    }
+
+    [TestMethod]
     public void PassivePreflightRejectsProductionPortOverrideBeforeResolvingIt()
     {
         var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
@@ -78,7 +106,9 @@ public sealed class BridgeProductionAssemblyTests
             BridgeProductionAssemblyPreflight.Validate(options, services));
 
         StringAssert.Contains(error.Message, "Active Host 生产装配不完整");
-        StringAssert.Contains(error.Message, nameof(BridgeProductionCapability.ActiveOwnerLease));
+        Assert.IsFalse(error.Message.Contains(
+            nameof(BridgeProductionCapability.ActiveOwnerLease),
+            StringComparison.Ordinal));
         StringAssert.Contains(error.Message, nameof(BridgeProductionCapability.ProductionStoreOwner));
         Assert.IsFalse(services.Any(descriptor =>
             descriptor.ImplementationType?.Name.StartsWith("Passive", StringComparison.Ordinal) == true));
@@ -86,8 +116,28 @@ public sealed class BridgeProductionAssemblyTests
             descriptor.ServiceType == typeof(IBridgeStoreShadow)));
         Assert.IsFalse(services.Any(descriptor =>
             descriptor.ServiceType == typeof(IBridgeHostSubsystem)));
-        Assert.IsFalse(services.Any(descriptor =>
-            descriptor.ServiceType == typeof(IHostedService)));
+        var hostedServices = services.Where(descriptor =>
+            descriptor.ServiceType == typeof(IHostedService)).ToArray();
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                typeof(BridgeInstanceLeaseService),
+                typeof(ActiveOwnerLeaseHostedService),
+                typeof(BridgeRuntimeWorker),
+            },
+            hostedServices.Select(descriptor => descriptor.ImplementationType).ToArray());
+        var owner = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IBridgeActiveOwnerLeaseLifecycle));
+        Assert.AreEqual(typeof(ActiveOwnerLeaseAcquirer), owner.ImplementationType);
+        var manifest = (BridgeProductionAssemblyManifest)services.Single(descriptor =>
+            descriptor.ServiceType == typeof(BridgeProductionAssemblyManifest))
+            .ImplementationInstance!;
+        Assert.AreEqual(1, manifest.Owners.Count);
+        Assert.AreEqual(
+            BridgeProductionCapability.ActiveOwnerLease,
+            manifest.Owners[0].Capability);
+        Assert.AreEqual(typeof(ActiveOwnerLeaseAcquirer), manifest.Owners[0].OwnerType);
+        Assert.IsFalse(Directory.Exists(options.DataDirectory));
     }
 
     [TestMethod]
@@ -151,8 +201,24 @@ public sealed class BridgeProductionAssemblyTests
 
     }
 
+    [TestMethod]
+    public void ActivePreflightRejectsOwnerLeaseAfterRuntimeWorker()
+    {
+        var options = ActiveOptions();
+        var services = CompleteActiveServices();
+        services.RemoveAll<IHostedService>();
+        services.AddSingleton<IHostedService, BridgeInstanceLeaseService>();
+        services.AddSingleton<IHostedService, BridgeRuntimeWorker>();
+        services.AddSingleton<IHostedService, ActiveOwnerLeaseHostedService>();
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeProductionAssemblyPreflight.Validate(options, services));
+
+        StringAssert.Contains(error.Message, "后台生命周期注册缺失、重复、越序或包含未知实现");
+    }
+
     private static BridgeHostOptions ActiveOptions() => new(
-        Path.GetTempPath(),
+        Path.Combine(Path.GetTempPath(), $"bridge-active-assembly-{Guid.NewGuid():N}"),
         IPAddress.Loopback,
         8765,
         BridgeOwnershipMode.Active,
@@ -161,6 +227,9 @@ public sealed class BridgeProductionAssemblyTests
     private static ServiceCollection CompleteActiveServices()
     {
         var services = new ServiceCollection();
+        services.AddSingleton<IHostedService, BridgeInstanceLeaseService>();
+        services.AddSingleton<IHostedService, ActiveOwnerLeaseHostedService>();
+        services.AddSingleton<IHostedService, BridgeRuntimeWorker>();
         var owners = new[]
         {
             Owner<IBridgeActiveOwnerLeaseLifecycle, RecordingActiveOwnerLeaseLifecycle>(
@@ -226,9 +295,23 @@ public sealed class BridgeProductionAssemblyTests
     }
 
 
+    private sealed class UnknownHostedService : IHostedService
+    {
+        public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
     private sealed class SideEffectProbe;
 
-    private sealed class RecordingActiveOwnerLeaseLifecycle : IBridgeActiveOwnerLeaseLifecycle;
+    private sealed class RecordingActiveOwnerLeaseLifecycle : IBridgeActiveOwnerLeaseLifecycle
+    {
+        public bool IsHeld => false;
+        public ValueTask<AiCliFeishu.Bridge.Adapters.Storage.ActiveOwnerLeaseRecord> AcquireAsync(
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public ValueTask ReleaseAsync(CancellationToken cancellationToken = default) =>
+            ValueTask.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
     private sealed class RecordingProductionStoreOwner : IBridgeProductionStoreOwner;
     private sealed class RecordingPersistentBusinessStateOwner : IBridgePersistentBusinessStateOwner;
     private sealed class RecordingFeishuCredentialSource : IBridgeFeishuCredentialSource;

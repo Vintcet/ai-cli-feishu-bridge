@@ -3,7 +3,7 @@ using AiCliFeishu.Bridge.Adapters.Storage;
 
 namespace AiCliFeishu.Bridge.Host;
 
-internal sealed class ActiveOwnerLeaseAcquirer : IAsyncDisposable
+internal sealed class ActiveOwnerLeaseAcquirer : IBridgeActiveOwnerLeaseLifecycle
 {
     private const int MaximumAcquireAttempts = 8;
 
@@ -11,6 +11,14 @@ internal sealed class ActiveOwnerLeaseAcquirer : IAsyncDisposable
     private readonly ActiveOwnerLeaseObserver observer;
     private readonly ActiveOwnerLeaseRecord record;
     private bool held;
+
+    public ActiveOwnerLeaseAcquirer(BridgeHostOptions options)
+        : this(
+            ActiveDataDirectory(options),
+            options.InstanceName,
+            Environment.ProcessId)
+    {
+    }
 
     internal ActiveOwnerLeaseAcquirer(
         string dataDirectory,
@@ -64,9 +72,9 @@ internal sealed class ActiveOwnerLeaseAcquirer : IAsyncDisposable
 
     internal ActiveOwnerLeaseRecord Record => record;
 
-    internal bool IsHeld => held;
+    public bool IsHeld => held;
 
-    internal async ValueTask<ActiveOwnerLeaseRecord> AcquireAsync(
+    public async ValueTask<ActiveOwnerLeaseRecord> AcquireAsync(
         CancellationToken cancellationToken = default)
     {
         if (held)
@@ -127,7 +135,7 @@ internal sealed class ActiveOwnerLeaseAcquirer : IAsyncDisposable
             "Active Owner 租约在取得期间反复变化，已中止切换。");
     }
 
-    internal async ValueTask ReleaseAsync(
+    public async ValueTask ReleaseAsync(
         CancellationToken cancellationToken = default)
     {
         if (!held)
@@ -147,6 +155,17 @@ internal sealed class ActiveOwnerLeaseAcquirer : IAsyncDisposable
     }
 
     public ValueTask DisposeAsync() => ReleaseAsync();
+
+    private static string ActiveDataDirectory(BridgeHostOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (options.OwnershipMode is not BridgeOwnershipMode.Active)
+        {
+            throw new InvalidOperationException(
+                "Active Owner 租约生命周期只能用于 Active Host。");
+        }
+        return options.DataDirectory;
+    }
 
     private async Task PrepareStagingDirectoryAsync(
         string stagingDirectory,
@@ -215,6 +234,40 @@ internal sealed class ActiveOwnerLeaseAcquirer : IAsyncDisposable
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
+        }
+    }
+}
+
+internal sealed class ActiveOwnerLeaseHostedService(
+    IBridgeActiveOwnerLeaseLifecycle lease,
+    BridgeHealthRegistry health) : IHostedService
+{
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await lease.AcquireAsync(cancellationToken);
+            health.Report("production-owner", "ready", "active-owner-dotnet-held");
+        }
+        catch
+        {
+            health.Report("production-owner", "failed", "active-owner-lease-not-held");
+            throw;
+        }
+    }
+
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        _ = cancellationToken;
+        try
+        {
+            await lease.ReleaseAsync(CancellationToken.None);
+            health.Report("production-owner", "stopped");
+        }
+        catch
+        {
+            health.Report("production-owner", "failed", "active-owner-lease-release-failed");
+            throw;
         }
     }
 }

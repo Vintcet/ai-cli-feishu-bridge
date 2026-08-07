@@ -2,10 +2,19 @@ using Microsoft.Extensions.DependencyInjection;
 using AiCliFeishu.Bridge.Adapters.Feishu;
 using AiCliFeishu.Bridge.Adapters.ManagedTerminal;
 using AiCliFeishu.Bridge.Adapters.OpenCode;
+using AiCliFeishu.Bridge.Adapters.Storage;
 
 namespace AiCliFeishu.Bridge.Host;
 
-internal interface IBridgeActiveOwnerLeaseLifecycle;
+internal interface IBridgeActiveOwnerLeaseLifecycle : IAsyncDisposable
+{
+    bool IsHeld { get; }
+
+    ValueTask<ActiveOwnerLeaseRecord> AcquireAsync(
+        CancellationToken cancellationToken = default);
+
+    ValueTask ReleaseAsync(CancellationToken cancellationToken = default);
+}
 
 internal interface IBridgeProductionStoreOwner;
 
@@ -40,8 +49,6 @@ internal sealed record BridgeProductionCapabilityOwner(
 
 internal sealed class BridgeProductionAssemblyManifest
 {
-    public static BridgeProductionAssemblyManifest Empty { get; } = new([]);
-
     public BridgeProductionAssemblyManifest(
         IEnumerable<BridgeProductionCapabilityOwner> owners)
     {
@@ -114,6 +121,11 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IBridgeFeishuCredentialSource),
         typeof(IBridgeManagedHookIngress),
     ];
+    private static readonly HashSet<Type> activeOnlyImplementationTypes =
+    [
+        typeof(ActiveOwnerLeaseAcquirer),
+        typeof(ActiveOwnerLeaseHostedService),
+    ];
 
     private static readonly (Type Contract, Type Implementation)[] passivePorts =
     [
@@ -155,7 +167,10 @@ internal static class BridgeProductionAssemblyPreflight
     {
         if (services.Any(descriptor =>
             descriptor.ServiceType == typeof(BridgeProductionAssemblyManifest) ||
-            activeOnlyContracts.Contains(descriptor.ServiceType)))
+            activeOnlyContracts.Contains(descriptor.ServiceType) ||
+            activeOnlyImplementationTypes.Contains(descriptor.ServiceType) ||
+            descriptor.ImplementationType is not null &&
+            activeOnlyImplementationTypes.Contains(descriptor.ImplementationType)))
         {
             throw new InvalidOperationException(
                 "Passive Host 不得声明或注册 Active 专用生产能力。");
@@ -184,14 +199,11 @@ internal static class BridgeProductionAssemblyPreflight
             throw new InvalidOperationException(
                 "Passive Host 必须且只能注册一个只读生产所有权守卫。");
         }
-        if (services.Any(descriptor =>
-            descriptor.ServiceType == typeof(ActiveOwnerLeaseAcquirer) ||
-            descriptor.ImplementationType == typeof(ActiveOwnerLeaseAcquirer)))
-        {
-            throw new InvalidOperationException(
-                "Passive Host 不得注册 Active Owner 租约取得器。");
-        }
-
+        ValidateHostedLifecycle(
+            services,
+            "Passive Host",
+            typeof(BridgeInstanceLeaseService),
+            typeof(BridgeRuntimeWorker));
         return new("passive", true, []);
     }
 
@@ -258,6 +270,13 @@ internal static class BridgeProductionAssemblyPreflight
                 $"Active Host 生产装配不完整，缺少能力：{Names(missing)}。");
         }
 
+        ValidateHostedLifecycle(
+            services,
+            "Active Host",
+            typeof(BridgeInstanceLeaseService),
+            typeof(ActiveOwnerLeaseHostedService),
+            typeof(BridgeRuntimeWorker));
+
         foreach (var owner in manifest.Owners)
         {
             var contractType = contractByCapability[owner.Capability];
@@ -285,6 +304,23 @@ internal static class BridgeProductionAssemblyPreflight
             "active",
             true,
             requirements.Select(requirement => requirement.Capability).ToArray());
+    }
+
+    private static void ValidateHostedLifecycle(
+        IServiceCollection services,
+        string hostName,
+        params Type[] expectedImplementations)
+    {
+        var registrations = services
+            .Where(descriptor => descriptor.ServiceType == typeof(IHostedService))
+            .ToArray();
+        if (registrations.Length != expectedImplementations.Length ||
+            registrations.Where((descriptor, index) =>
+                descriptor.ImplementationType != expectedImplementations[index]).Any())
+        {
+            throw new InvalidOperationException(
+                $"{hostName} 后台生命周期注册缺失、重复、越序或包含未知实现。");
+        }
     }
 
     private static string Names(IEnumerable<BridgeProductionCapability> capabilities) =>

@@ -210,7 +210,90 @@ public sealed class BridgeActiveOwnerLeaseAcquirerTests
     }
 
     [TestMethod]
-    public void ProductionHostDoesNotRegisterTheAcquirer()
+    public async Task HostedLifecycleAcquiresAndReleasesTheProductionLease()
+    {
+        var options = new BridgeHostOptions(
+            directory!,
+            System.Net.IPAddress.Loopback,
+            0,
+            BridgeOwnershipMode.Active,
+            "active-lifecycle");
+        await using var lease = new ActiveOwnerLeaseAcquirer(options);
+        var health = new BridgeHealthRegistry(options);
+        var service = new ActiveOwnerLeaseHostedService(lease, health);
+
+        await service.StartAsync(CancellationToken.None);
+
+        Assert.IsTrue(lease.IsHeld);
+        Assert.AreEqual(Environment.ProcessId, lease.Record.ProcessId);
+        Assert.AreEqual("active-lifecycle", lease.Record.InstanceName);
+        Assert.AreEqual(
+            new BridgeComponentHealth(
+                "production-owner",
+                "ready",
+                "active-owner-dotnet-held"),
+            health.Snapshot().Components.Single(component =>
+                component.Name == "production-owner"));
+
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await service.StopAsync(cancelled.Token);
+
+        Assert.IsFalse(lease.IsHeld);
+        Assert.IsFalse(Directory.Exists(lease.LockDirectoryPath));
+        Assert.AreEqual(
+            "stopped",
+            health.Snapshot().Components.Single(component =>
+                component.Name == "production-owner").Status);
+    }
+
+    [TestMethod]
+    public async Task HostedLifecyclePreservesALiveOwnerAndReportsFailure()
+    {
+        var options = new BridgeHostOptions(
+            directory!,
+            System.Net.IPAddress.Loopback,
+            0,
+            BridgeOwnershipMode.Active,
+            "active-lifecycle");
+        var observer = Observer(processId => processId == Environment.ProcessId);
+        var existing = Record(
+            hostKind: "node",
+            processId: Environment.ProcessId,
+            leaseId: "live-node-owner");
+        await WriteRecordAsync(observer, existing);
+        await using var lease = new ActiveOwnerLeaseAcquirer(options);
+        var health = new BridgeHealthRegistry(options);
+        var service = new ActiveOwnerLeaseHostedService(lease, health);
+
+        var error = await Assert.ThrowsExceptionAsync<InvalidOperationException>(async () =>
+            await service.StartAsync(CancellationToken.None));
+
+        StringAssert.Contains(error.Message, Environment.ProcessId.ToString());
+        Assert.IsFalse(lease.IsHeld);
+        Assert.AreEqual(
+            "failed",
+            health.Snapshot().Components.Single(component =>
+                component.Name == "production-owner").Status);
+        var preserved = await observer.InspectAsync();
+        Assert.AreEqual(ActiveOwnerLeaseState.Live, preserved.State);
+        Assert.AreEqual(existing, preserved.Record);
+    }
+
+    [TestMethod]
+    public void ProductionLifecycleRejectsPassiveOptionsBeforeFileAccess()
+    {
+        var options = BridgeHostOptions.Passive(directory!, port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            _ = new ActiveOwnerLeaseAcquirer(options));
+
+        StringAssert.Contains(error.Message, "只能用于 Active Host");
+        Assert.IsFalse(Directory.Exists(directory));
+    }
+
+    [TestMethod]
+    public void PassiveProductionHostDoesNotRegisterTheAcquirer()
     {
         using var app = BridgeHostApplication.Build(
             BridgeHostOptions.Passive(directory!, port: 0));
