@@ -154,6 +154,14 @@ public static class BridgeHostApplication
                 .GetRequiredService<IBridgeFeishuCredentialSource>());
         services.AddSingleton<IFeishuEventSource, ActiveFeishuEventSource>();
         services.AddSingleton<IFeishuGateway, ActiveFeishuGateway>();
+        services.AddSingleton<IManagedTerminalDirectory,
+            ActiveManagedTerminalDirectory>();
+        services.AddSingleton<IBridgeManagedTerminalRegistrationDirectory>(services =>
+            (IBridgeManagedTerminalRegistrationDirectory)services
+                .GetRequiredService<IManagedTerminalDirectory>());
+        services.AddSingleton<IBridgeHostSubsystem>(services =>
+            (IBridgeHostSubsystem)services
+                .GetRequiredService<IManagedTerminalDirectory>());
         services.AddHostedService<BridgeInstanceLeaseService>();
         services.AddHostedService<ActiveOwnerLeaseHostedService>();
         services.AddHostedService<BridgeRuntimeWorker>();
@@ -177,6 +185,9 @@ public static class BridgeHostApplication
             new(
                 BridgeProductionCapability.FeishuOutboundMessaging,
                 typeof(ActiveFeishuGateway)),
+            new(
+                BridgeProductionCapability.ManagedTerminalDirectory,
+                typeof(ActiveManagedTerminalDirectory)),
         ]));
         // Production ports are registered only by their owning migration slices.
         // The incomplete manifest fails preflight and prevents Active mode from

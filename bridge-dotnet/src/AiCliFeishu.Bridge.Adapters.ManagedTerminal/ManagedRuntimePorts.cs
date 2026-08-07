@@ -11,7 +11,8 @@ public enum ManagedTerminalSubmitMode
 public sealed record ManagedTerminalTarget(
     string TerminalId,
     string SessionExternalId,
-    bool Ready);
+    bool Ready,
+    long Generation = 0);
 
 public interface IManagedTerminalDirectory
 {

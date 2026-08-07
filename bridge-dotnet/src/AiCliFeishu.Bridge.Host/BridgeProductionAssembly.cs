@@ -125,6 +125,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IBridgeProductionStoreOwner),
         typeof(IBridgePersistentBusinessStateOwner),
         typeof(IBridgeFeishuCredentialSource),
+        typeof(IBridgeManagedTerminalRegistrationDirectory),
         typeof(IBridgeManagedHookIngress),
     ];
     private static readonly HashSet<Type> activeOnlyImplementationTypes =
@@ -136,6 +137,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveFeishuCredentialSource),
         typeof(ActiveFeishuEventSource),
         typeof(ActiveFeishuGateway),
+        typeof(ActiveManagedTerminalDirectory),
     ];
 
     private static readonly (Type Contract, Type Implementation)[] passivePorts =

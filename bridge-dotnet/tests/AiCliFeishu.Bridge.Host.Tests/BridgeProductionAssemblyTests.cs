@@ -199,6 +199,36 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void PassivePreflightRejectsManagedTerminalRegistrationDirectoryBeforeResolvingIt()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+        var constructed = false;
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<IBridgeManagedTerminalRegistrationDirectory>(_ =>
+                {
+                    constructed = true;
+                    return new RecordingManagedTerminalRegistrationDirectory();
+                })));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+        Assert.IsFalse(constructed);
+    }
+
+    [TestMethod]
+    public void PassivePreflightRejectsConcreteActiveManagedTerminalDirectory()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.AddSingleton<ActiveManagedTerminalDirectory>()));
+
+        StringAssert.Contains(error.Message, "Active 专用生产能力");
+    }
+
+    [TestMethod]
     public void PassivePreflightRejectsUnknownHostedLifecycle()
     {
         var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
@@ -260,6 +290,9 @@ public sealed class BridgeProductionAssemblyTests
         Assert.IsFalse(error.Message.Contains(
             nameof(BridgeProductionCapability.FeishuOutboundMessaging),
             StringComparison.Ordinal));
+        Assert.IsFalse(error.Message.Contains(
+            nameof(BridgeProductionCapability.ManagedTerminalDirectory),
+            StringComparison.Ordinal));
         Assert.IsFalse(services.Any(descriptor =>
             descriptor.ImplementationType?.Name.StartsWith("Passive", StringComparison.Ordinal) == true));
         Assert.IsFalse(services.Any(descriptor =>
@@ -269,7 +302,7 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(typeof(ActiveProductionStoreOwner), storeOwner.ImplementationType);
         var subsystems = services.Where(descriptor =>
             descriptor.ServiceType == typeof(IBridgeHostSubsystem)).ToArray();
-        Assert.AreEqual(3, subsystems.Length);
+        Assert.AreEqual(4, subsystems.Length);
         Assert.IsTrue(subsystems.All(descriptor =>
             descriptor.ImplementationFactory is not null));
         var hostedServices = services.Where(descriptor =>
@@ -288,7 +321,7 @@ public sealed class BridgeProductionAssemblyTests
         var manifest = (BridgeProductionAssemblyManifest)services.Single(descriptor =>
             descriptor.ServiceType == typeof(BridgeProductionAssemblyManifest))
             .ImplementationInstance!;
-        Assert.AreEqual(6, manifest.Owners.Count);
+        Assert.AreEqual(7, manifest.Owners.Count);
         Assert.AreEqual(
             BridgeProductionCapability.ActiveOwnerLease,
             manifest.Owners[0].Capability);
@@ -321,6 +354,12 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveFeishuGateway),
             manifest.Owners[5].OwnerType);
+        Assert.AreEqual(
+            BridgeProductionCapability.ManagedTerminalDirectory,
+            manifest.Owners[6].Capability);
+        Assert.AreEqual(
+            typeof(ActiveManagedTerminalDirectory),
+            manifest.Owners[6].OwnerType);
         var businessOwner = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgePersistentBusinessStateOwner));
         Assert.AreEqual(
@@ -341,6 +380,24 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActiveFeishuGateway),
             gateway.ImplementationType);
+        var terminalDirectory = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IManagedTerminalDirectory));
+        Assert.AreEqual(
+            typeof(ActiveManagedTerminalDirectory),
+            terminalDirectory.ImplementationType);
+        var registrationDirectory = services.Single(descriptor =>
+            descriptor.ServiceType ==
+                typeof(IBridgeManagedTerminalRegistrationDirectory));
+        Assert.IsNotNull(registrationDirectory.ImplementationFactory);
+        var directoryOwner = new RecordingManagedTerminalRegistrationDirectory();
+        var factoryServices = new ServiceCollection();
+        factoryServices.AddSingleton<IManagedTerminalDirectory>(directoryOwner);
+        using (var provider = factoryServices.BuildServiceProvider())
+        {
+            Assert.AreSame(
+                directoryOwner,
+                registrationDirectory.ImplementationFactory(provider));
+        }
         Assert.IsTrue(services.Any(descriptor =>
             descriptor.ServiceType == typeof(IBridgeRuntimeEventHandler) &&
             descriptor.ImplementationFactory is not null));
@@ -560,6 +617,29 @@ public sealed class BridgeProductionAssemblyTests
             new("cli_recording", "recording-secret");
     }
     private sealed class RecordingManagedHookIngress : IBridgeManagedHookIngress;
+
+    private sealed class RecordingManagedTerminalRegistrationDirectory
+        : IManagedTerminalDirectory,
+          IBridgeManagedTerminalRegistrationDirectory
+    {
+        public BridgeManagedTerminalDirectorySnapshot Snapshot { get; } =
+            new(true, 0, 0, 0, 0);
+
+        public ManagedTerminalTarget? FindBySession(string sessionExternalId) => null;
+        public void Register(BridgeManagedTerminalRegistration registration) { }
+        public bool Unregister(string terminalId) => false;
+        public BridgeManagedTerminalClaim? Claim(
+            string cwd,
+            string runtime,
+            string sessionExternalId) => null;
+        public BridgeManagedTerminalClaim? ClaimById(
+            string terminalId,
+            string cwd,
+            string runtime,
+            string sessionExternalId) => null;
+        public void Release(string sessionExternalId) { }
+        public bool IsCurrent(ManagedTerminalTarget target) => false;
+    }
 
     private sealed class RecordingFeishuEventSource : IFeishuEventSource
     {
