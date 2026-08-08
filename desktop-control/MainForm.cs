@@ -41,6 +41,7 @@ internal sealed partial class MainForm : Form
     private readonly DataGridView historyGrid = new();
     private readonly TabControl sessionTabs = new();
     private readonly Button connectionButton = new();
+    private readonly Button productionCutoverButton = new();
     private readonly Button newCodexButton = new();
     private readonly Button newClaudeCodeButton = new();
     private readonly Button newOpenCodeButton = new();
@@ -59,6 +60,7 @@ internal sealed partial class MainForm : Form
     private bool exitRequested;
     private bool trayHintShown;
     private BridgeHostStartupRecoveryResult? startupRecoveryBlock;
+    private BridgeHostProductionCutoverResult? productionCutoverBlock;
     private int activationRequested;
     private string? lastProjectDirectory;
     private BridgeStatus? lastStatus;
@@ -486,6 +488,12 @@ internal sealed partial class MainForm : Form
         };
 
         ConfigureButton(connectionButton, "连接", Primary, Color.White);
+        ConfigureButton(
+            productionCutoverButton,
+            "切换到 C#",
+            Warning,
+            Color.White);
+        productionCutoverButton.Size = new Size(108, 38);
         ConfigureButton(newCodexButton, "新建 Codex", Success, Color.White);
         newCodexButton.Size = new Size(112, 38);
         ConfigureButton(newClaudeCodeButton, "新建 Claude", Color.FromArgb(217, 119, 87), Color.White);
@@ -509,6 +517,8 @@ internal sealed partial class MainForm : Form
                 await DisconnectAsync();
             }
         };
+        productionCutoverButton.Click += async (_, _) =>
+            await CutoverToDotNetAsync();
         newCodexButton.Click += async (_, _) => await NewRuntimeAsync(RuntimeCatalog.Codex);
         newClaudeCodeButton.Click += async (_, _) => await NewRuntimeAsync(RuntimeCatalog.ClaudeCode);
         newOpenCodeButton.Click += async (_, _) => await NewRuntimeAsync(RuntimeCatalog.OpenCode);
@@ -517,12 +527,14 @@ internal sealed partial class MainForm : Form
         settingsButton.Click += async (_, _) => await EditSettingsAsync();
 
         buttons.Controls.Add(connectionButton);
+        buttons.Controls.Add(productionCutoverButton);
         buttons.Controls.Add(newCodexButton);
         buttons.Controls.Add(newClaudeCodeButton);
         buttons.Controls.Add(newOpenCodeButton);
         buttons.Controls.Add(approvalButton);
         buttons.Controls.Add(refreshButton);
         buttons.Controls.Add(settingsButton);
+        UpdateProductionCutoverButtonState();
         toolbar.Controls.Add(operationLabel, 0, 0);
         toolbar.Controls.Add(buttons, 1, 0);
         return toolbar;
@@ -1023,9 +1035,8 @@ internal sealed partial class MainForm : Form
     private async Task ConnectAsync()
     {
         if (operating) return;
-        if (startupRecoveryBlock is not null)
+        if (ApplyOwnershipBlockIfPresent())
         {
-            ApplyStartupRecoveryBlock(startupRecoveryBlock);
             return;
         }
         SetOperating(true, "正在启动桥接服务…");
@@ -1061,9 +1072,8 @@ internal sealed partial class MainForm : Form
     private async Task DisconnectAsync()
     {
         if (operating) return;
-        if (startupRecoveryBlock is not null)
+        if (ApplyOwnershipBlockIfPresent())
         {
-            ApplyStartupRecoveryBlock(startupRecoveryBlock);
             return;
         }
         SetOperating(true, "正在断开桥接服务…");
@@ -1101,15 +1111,108 @@ internal sealed partial class MainForm : Form
         }
     }
 
+    private async Task CutoverToDotNetAsync()
+    {
+        if (operating || ApplyOwnershipBlockIfPresent())
+        {
+            return;
+        }
+        if (!bridgeClient.IsProductionTarget || bridgeClient.IsDotNetProductionTarget)
+        {
+            MessageBox.Show(
+                this,
+                "当前持久化生产目标不是 Node Production，未执行切换。",
+                "无法切换生产 Host",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
+        if (lastStatus?.Ok is not true)
+        {
+            MessageBox.Show(
+                this,
+                "请先连接并认证当前 Node 生产 Host，再执行切换。",
+                "Node 生产 Host 未在线",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
+
+        var confirmation = MessageBox.Show(
+            this,
+            BridgeHostProductionCutoverResult.ConfirmationMessage,
+            "确认切换生产 Host",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+        if (confirmation is not DialogResult.Yes)
+        {
+            AppLog.Info("用户取消了桌面显式生产 Host 切换。");
+            return;
+        }
+
+        SetOperating(true, "正在安全切换生产 Host，请勿关闭程序…");
+        try
+        {
+            var result = await bridgeClient.CutoverProductionHostAsync(
+                lifetime.Token);
+            AppLog.Info($"桌面显式生产 Host 切换结果：{result.State}。");
+            if (result.RequiresOwnershipLock)
+            {
+                productionCutoverBlock = result;
+            }
+            else
+            {
+                await RefreshStatusAsync(force: true);
+                operationLabel.Text = result.UserMessage;
+            }
+
+            MessageBox.Show(
+                this,
+                result.UserMessage,
+                result.Completed
+                    ? "生产 Host 切换完成"
+                    : result.State is BridgeHostProductionCutoverState.RolledBack
+                        ? "生产 Host 已安全回退"
+                        : "生产 Host 切换未完成",
+                MessageBoxButtons.OK,
+                result.Completed
+                    ? MessageBoxIcon.Information
+                    : MessageBoxIcon.Warning);
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception error)
+        {
+            AppLog.Error("桌面显式生产 Host 切换失败", error);
+            productionCutoverBlock = new(
+                BridgeHostProductionCutoverState.Unavailable);
+            MessageBox.Show(
+                this,
+                productionCutoverBlock.UserMessage,
+                "生产 Host 切换失败",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+        finally
+        {
+            SetOperating(false);
+            if (productionCutoverBlock is not null)
+            {
+                ApplyProductionCutoverBlock(productionCutoverBlock);
+            }
+        }
+    }
+
     private async Task RefreshStatusAsync(bool force = false)
     {
         if ((refreshing || operating) && !force) return;
         refreshing = true;
         try
         {
-            if (startupRecoveryBlock is not null)
+            if (ApplyOwnershipBlockIfPresent())
             {
-                ApplyStartupRecoveryBlock(startupRecoveryBlock);
                 return;
             }
             var status = await bridgeClient.GetStatusAsync(
@@ -1327,6 +1430,7 @@ internal sealed partial class MainForm : Form
             !operating && bridgeClient.IsProductionTarget && status.PendingDesktopApprovals > 0;
         refreshButton.Enabled = !operating;
         settingsButton.Enabled = !operating && bridgeClient.IsProductionTarget;
+        UpdateProductionCutoverButtonState();
 
         sessionTabs.TabPages[0].Text = $"活跃会话 ({status.Sessions.Count})";
         sessionTabs.TabPages[1].Text = $"历史记录 ({status.HistorySessions.Count})";
@@ -1429,6 +1533,7 @@ internal sealed partial class MainForm : Form
         approvalButton.Enabled = false;
         refreshButton.Enabled = !operating;
         settingsButton.Enabled = !operating && bridgeClient.IsProductionTarget;
+        UpdateProductionCutoverButtonState();
         sessionTabs.TabPages[0].Text = "活跃会话";
         sessionTabs.TabPages[1].Text = "历史记录";
         sessionGrid.Rows.Clear();
@@ -1450,16 +1555,43 @@ internal sealed partial class MainForm : Form
     private void ApplyStartupRecoveryBlock(
         BridgeHostStartupRecoveryResult recovery)
     {
+        ApplyOwnershipBlock("恢复已阻止", recovery.UserMessage);
+    }
+
+    private void ApplyProductionCutoverBlock(
+        BridgeHostProductionCutoverResult result)
+    {
+        ApplyOwnershipBlock("切换已阻止", result.UserMessage);
+    }
+
+    private bool ApplyOwnershipBlockIfPresent()
+    {
+        if (startupRecoveryBlock is not null)
+        {
+            ApplyStartupRecoveryBlock(startupRecoveryBlock);
+            return true;
+        }
+        if (productionCutoverBlock is not null)
+        {
+            ApplyProductionCutoverBlock(productionCutoverBlock);
+            return true;
+        }
+        return false;
+    }
+
+    private void ApplyOwnershipBlock(string serviceText, string message)
+    {
         ApplyOfflineStatus();
         SetHeaderStatus("需要人工接管", Warning);
-        serviceValue.Text = "恢复已阻止";
+        serviceValue.Text = serviceText;
         connectionButton.Enabled = false;
+        productionCutoverButton.Enabled = false;
         newCodexButton.Enabled = false;
         newClaudeCodeButton.Enabled = false;
         newOpenCodeButton.Enabled = false;
         approvalButton.Enabled = false;
         settingsButton.Enabled = false;
-        operationLabel.Text = recovery.UserMessage;
+        operationLabel.Text = message;
     }
 
     private void SetHeaderStatus(string text, Color color)
@@ -1487,10 +1619,23 @@ internal sealed partial class MainForm : Form
         refreshButton.Enabled = !value;
         settingsButton.Enabled = !value && bridgeClient.IsProductionTarget;
         folderButton.Enabled = !value;
+        UpdateProductionCutoverButtonState();
         if (!string.IsNullOrWhiteSpace(message))
         {
             operationLabel.Text = message;
         }
+    }
+
+    private void UpdateProductionCutoverButtonState()
+    {
+        var state = BridgeHostProductionCutoverPresentation.GetButtonState(
+            bridgeClient.IsProductionTarget,
+            bridgeClient.IsDotNetProductionTarget,
+            lastStatus?.Ok is true,
+            operating,
+            startupRecoveryBlock is not null || productionCutoverBlock is not null);
+        productionCutoverButton.Visible = state.Visible;
+        productionCutoverButton.Enabled = state.Enabled;
     }
 
     private void UpdateSessionActionState()
