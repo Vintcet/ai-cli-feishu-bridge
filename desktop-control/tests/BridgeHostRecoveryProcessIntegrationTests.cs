@@ -82,6 +82,64 @@ public sealed class BridgeHostRecoveryProcessIntegrationTests
     }
 
     [TestMethod]
+    public async Task CommittedPersistentCutoverRestartsARealDotNetWithoutRewritingCheckpoint()
+    {
+        await using var environment = await IsolatedRecoveryEnvironment.CreateAsync();
+        var initialNodeProcessId = await environment.StartInitialFixtureAsync(
+            "node",
+            NodeInstanceName);
+
+        var cutover = await environment.CreatePersistentCoordinator().RunAsync(
+            NodeIdentity(initialNodeProcessId),
+            DotNetInstanceName);
+
+        Assert.AreEqual(BridgeHostPersistentCutoverState.Completed, cutover.State);
+        Assert.AreEqual(BridgeHostCutoverStage.Completed, cutover.DurableSnapshot?.Stage);
+        Assert.IsFalse(IsProcessAlive(initialNodeProcessId));
+        Assert.AreEqual(0, environment.NodeStarts);
+        Assert.AreEqual(1, environment.DotNetStarts);
+        Assert.AreEqual(1, environment.StartedProcessIds.Count);
+        var committedDotNetProcessId = environment.StartedProcessIds[0];
+        Assert.IsTrue(IsProcessAlive(committedDotNetProcessId));
+
+        var committedCheckpoint = await environment.ReadCheckpointAsync();
+        Assert.AreEqual(BridgeHostCutoverStage.Completed, committedCheckpoint.Stage);
+        Assert.AreEqual(committedDotNetProcessId, committedCheckpoint.DotNetProcessId);
+        var committedBytes = await File.ReadAllBytesAsync(environment.CheckpointPath);
+        await environment.AssertLiveLeaseAsync(
+            "dotnet",
+            DotNetInstanceName,
+            committedDotNetProcessId);
+
+        await environment.StopStartedFixtureAsync(
+            committedDotNetProcessId,
+            "dotnet");
+        Assert.IsFalse(IsProcessAlive(committedDotNetProcessId));
+
+        var recovery = await environment.Executor.RunAsync();
+
+        Assert.AreEqual(BridgeHostRecoveryExecutionState.Recovered, recovery.State);
+        Assert.AreEqual(
+            BridgeHostRecoveryDisposition.RestartDotNet,
+            recovery.Plan?.Disposition);
+        Assert.AreEqual(0, environment.NodeStarts);
+        Assert.AreEqual(2, environment.DotNetStarts);
+        Assert.AreEqual(2, environment.StartedProcessIds.Count);
+        var restartedDotNetProcessId = environment.StartedProcessIds[1];
+        Assert.IsTrue(IsProcessAlive(restartedDotNetProcessId));
+        CollectionAssert.AreEqual(
+            committedBytes,
+            await File.ReadAllBytesAsync(environment.CheckpointPath));
+        Assert.AreEqual(
+            BridgeHostCutoverStage.Completed,
+            (await environment.ReadCheckpointAsync()).Stage);
+        await environment.AssertLiveLeaseAsync(
+            "dotnet",
+            DotNetInstanceName,
+            restartedDotNetProcessId);
+    }
+
+    [TestMethod]
     public async Task OfflinePreCommitCheckpointRestartsARealNodeAndConvergesRollback()
     {
         await using var environment = await IsolatedRecoveryEnvironment.CreateAsync();
@@ -248,6 +306,9 @@ public sealed class BridgeHostRecoveryProcessIntegrationTests
         public string CheckpointPath =>
             Path.Combine(dataDirectory, BridgeHostCutoverCheckpointStore.CheckpointFileName);
 
+        public BridgeHostPersistentCutoverCoordinator CreatePersistentCoordinator() =>
+            new(dataDirectory, operations);
+
         public BridgeHostPersistentCutoverCoordinator CreatePersistentCoordinator(
             BridgeHostPersistentCutoverCoordinator.WriteCheckpointAsync writeCheckpoint) =>
             new(
@@ -256,6 +317,9 @@ public sealed class BridgeHostRecoveryProcessIntegrationTests
                 TimeProvider.System,
                 static () => "integration-persistent-cutover",
                 writeCheckpoint);
+
+        public Task StopStartedFixtureAsync(int processId, string hostKind) =>
+            StopFixtureAsync(processId, endpoint, hostKind);
 
         public static Task<IsolatedRecoveryEnvironment> CreateAsync()
         {
