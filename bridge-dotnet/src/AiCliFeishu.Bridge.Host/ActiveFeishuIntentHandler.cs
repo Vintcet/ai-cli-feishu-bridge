@@ -12,6 +12,7 @@ internal sealed class ActiveFeishuIntentHandler(
     IBridgeProductionStoreOwner storeOwner,
     IBridgePersistentBusinessStateOwner businessStateOwner,
     IBridgeActiveSessionAliasStateOwner sessionAliases,
+    IBridgeActiveSessionGroupStateOwner sessionGroups,
     IBridgeManagedRuntimeLaunchCoordinator runtimeLaunches,
     IBridgeRuntimeCommandGateway runtimeCommands,
     IBridgeActiveRuntimeRetryCoordinator runtimeRetries,
@@ -470,13 +471,70 @@ internal sealed class ActiveFeishuIntentHandler(
         }
 
         var updatedAlias = ExtensionString(update.Session, "alias");
+        var groupNameFailure = await SynchronizeSessionGroupNameAsync(
+            update.Session,
+            cancellationToken);
+        var response = updatedAlias is not null
+            ? $"已将 {ProjectLabel(update.Session)} 的别名设为 @{updatedAlias}。" +
+              $"以后可发送“@{updatedAlias} 回复内容”。"
+            : $"已清除 {ProjectLabel(update.Session)} 的别名。";
+        if (groupNameFailure is not null)
+        {
+            response += $"\n\n别名已保存，但飞书群名同步失败：{groupNameFailure}";
+        }
         return await RespondTextAsync(
             intent,
-            updatedAlias is not null
-                ? $"已将 {ProjectLabel(update.Session)} 的别名设为 @{updatedAlias}。" +
-                  $"以后可发送“@{updatedAlias} 回复内容”。"
-                : $"已清除 {ProjectLabel(update.Session)} 的别名。",
+            response,
             cancellationToken);
+    }
+
+    private async Task<string?> SynchronizeSessionGroupNameAsync(
+        SessionStoreRecord session,
+        CancellationToken cancellationToken)
+    {
+        var chatId = ExtensionString(session, "feishuChatId");
+        if (chatId is null)
+        {
+            return null;
+        }
+
+        var name = SessionGroupNameRules.Build(
+            session.Runtime,
+            ExtensionString(session, "alias"),
+            session.ProjectName,
+            SessionShortId(session),
+            ExtensionPositiveInt(session, "feishuChatOrdinal"));
+        if (string.Equals(
+                ExtensionString(session, "feishuChatName"),
+                name,
+                StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        try
+        {
+            await gateway.UpdateSessionGroupNameAsync(
+                chatId,
+                name,
+                cancellationToken);
+            var update = await sessionGroups.UpdateSessionGroupNameAsync(
+                session.SessionId,
+                chatId,
+                name,
+                cancellationToken);
+            return update.Succeeded
+                ? null
+                : update.Error ?? "状态保存失败，请稍后重试。";
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return "请稍后重试。";
+        }
     }
 
     private async Task<FeishuCallbackResult?> RespondTextAsync(
@@ -766,6 +824,17 @@ internal sealed class ActiveFeishuIntentHandler(
         property.ValueKind == JsonValueKind.String &&
         !string.IsNullOrWhiteSpace(property.GetString())
             ? property.GetString()!.Trim()
+            : null;
+
+    private static int? ExtensionPositiveInt(
+        ExtensibleStoreObject value,
+        string name) =>
+        value.ExtensionData is not null &&
+        value.ExtensionData.TryGetValue(name, out var property) &&
+        property.ValueKind == JsonValueKind.Number &&
+        property.TryGetInt32(out var number) &&
+        number > 0
+            ? number
             : null;
 
     private static string ShortId(string sessionId) =>

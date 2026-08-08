@@ -43,6 +43,22 @@ internal interface IBridgeActiveSessionAliasStateOwner
         CancellationToken cancellationToken = default);
 }
 
+internal sealed record BridgeSessionGroupNameUpdateResult(
+    SessionStoreRecord? Session,
+    string? Error)
+{
+    public bool Succeeded => Session is not null && Error is null;
+}
+
+internal interface IBridgeActiveSessionGroupStateOwner
+{
+    ValueTask<BridgeSessionGroupNameUpdateResult> UpdateSessionGroupNameAsync(
+        string sessionId,
+        string expectedChatId,
+        string name,
+        CancellationToken cancellationToken = default);
+}
+
 internal interface IBridgeActiveRuntimeStateSink
 {
     BridgeBusinessStateSnapshot Snapshot { get; }
@@ -239,6 +255,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IBridgeActiveApprovalStateOwner),
         typeof(IBridgeActiveInputStateOwner),
         typeof(IBridgeActiveSessionAliasStateOwner),
+        typeof(IBridgeActiveSessionGroupStateOwner),
         typeof(IBridgeActiveFileTransferCoordinator),
         typeof(IBridgeFeishuCredentialSource),
         typeof(IBridgeManagedTerminalRegistrationDirectory),
@@ -357,6 +374,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IBridgeActiveApprovalStateOwner),
         typeof(IBridgeActiveInputStateOwner),
         typeof(IBridgeActiveSessionAliasStateOwner),
+        typeof(IBridgeActiveSessionGroupStateOwner),
         typeof(IBridgeFeishuIntentHandler),
         typeof(IFeishuIntentSink),
         typeof(IBridgeActiveFileTransferCoordinator),

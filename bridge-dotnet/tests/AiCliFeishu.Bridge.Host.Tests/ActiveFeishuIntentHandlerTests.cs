@@ -307,6 +307,221 @@ public sealed class ActiveFeishuIntentHandlerTests
         StringAssert.Contains(fixture.Gateway.Replies[3].Text, "已清除");
         Assert.IsFalse(fixture.Store.Current.Sessions.Sessions["session-12345678"]
             .ExtensionData?.ContainsKey("alias") == true);
+        Assert.AreEqual(0, fixture.Gateway.RenamedGroups.Count);
+        Assert.AreEqual(0, fixture.SessionGroups.Calls.Count);
+    }
+
+    [TestMethod]
+    public async Task AliasUpdateSynchronizesBoundSessionGroupAfterAliasIsDurable()
+    {
+        var fixture = Fixture.Create(bound: true);
+        fixture.Store.AllowUpdates = true;
+        await BindSessionGroupAsync(
+            fixture,
+            "group-chat",
+            "OpenCode｜alpha",
+            ordinal: 2,
+            preserveFuture: true);
+
+        await fixture.Handler.HandleAsync(AliasIntent(
+            "别名 #12345678 新名称",
+            eventId: "event-group-rename"));
+
+        CollectionAssert.AreEqual(
+            new[] { ("group-chat", "OpenCode｜新名称") },
+            fixture.Gateway.RenamedGroups.ToArray());
+        Assert.AreEqual(1, fixture.SessionGroups.Calls.Count);
+        Assert.AreEqual("group-chat", fixture.SessionGroups.Calls[0].ExpectedChatId);
+        Assert.AreEqual("OpenCode｜新名称", fixture.SessionGroups.Calls[0].Name);
+        var session = fixture.Store.Current.Sessions.Sessions["session-12345678"];
+        Assert.AreEqual("新名称", session.ExtensionData!["alias"].GetString());
+        Assert.AreEqual(
+            "OpenCode｜新名称",
+            session.ExtensionData["feishuChatName"].GetString());
+        Assert.AreEqual("keep", session.ExtensionData["futureGroup"].GetString());
+        StringAssert.Contains(fixture.Gateway.Replies.Single().Text, "@新名称");
+    }
+
+    [TestMethod]
+    public async Task ClearingAliasRestoresProjectNameAndStoredOrdinal()
+    {
+        var fixture = Fixture.Create(bound: true);
+        fixture.Store.AllowUpdates = true;
+        await BindSessionGroupAsync(
+            fixture,
+            "group-chat",
+            "OpenCode｜alpha",
+            ordinal: 2);
+
+        await fixture.Handler.HandleAsync(AliasIntent(
+            "别名 #12345678 清除",
+            eventId: "event-group-clear"));
+
+        Assert.AreEqual(
+            ("group-chat", "OpenCode｜project-one（2）"),
+            fixture.Gateway.RenamedGroups.Single());
+        Assert.AreEqual(
+            "OpenCode｜project-one（2）",
+            fixture.Store.Current.Sessions.Sessions["session-12345678"]
+                .ExtensionData!["feishuChatName"].GetString());
+        StringAssert.Contains(fixture.Gateway.Replies.Single().Text, "已清除");
+    }
+
+    [TestMethod]
+    public async Task AliasUpdateSkipsFeishuWhenGroupAlreadyHasTargetName()
+    {
+        var fixture = Fixture.Create(bound: true);
+        fixture.Store.AllowUpdates = true;
+        await BindSessionGroupAsync(
+            fixture,
+            "group-chat",
+            "OpenCode｜新名称",
+            ordinal: 2);
+
+        await fixture.Handler.HandleAsync(AliasIntent(
+            "别名 #12345678 新名称",
+            eventId: "event-group-current"));
+
+        Assert.AreEqual(0, fixture.Gateway.RenamedGroups.Count);
+        Assert.AreEqual(0, fixture.SessionGroups.Calls.Count);
+        Assert.AreEqual(
+            "新名称",
+            fixture.Store.Current.Sessions.Sessions["session-12345678"]
+                .ExtensionData!["alias"].GetString());
+    }
+
+    [TestMethod]
+    public async Task FeishuRenameFailureKeepsDurableAliasAndRetryableStoredName()
+    {
+        var fixture = Fixture.Create(bound: true);
+        fixture.Store.AllowUpdates = true;
+        await BindSessionGroupAsync(
+            fixture,
+            "group-chat",
+            "OpenCode｜alpha",
+            ordinal: 1);
+        fixture.Gateway.GroupRenameError =
+            new HttpRequestException("synthetic rename failure");
+
+        await fixture.Handler.HandleAsync(AliasIntent(
+            "别名 #12345678 新名称",
+            eventId: "event-group-api-failure"));
+
+        var session = fixture.Store.Current.Sessions.Sessions["session-12345678"];
+        Assert.AreEqual("新名称", session.ExtensionData!["alias"].GetString());
+        Assert.AreEqual(
+            "OpenCode｜alpha",
+            session.ExtensionData["feishuChatName"].GetString());
+        Assert.AreEqual(1, fixture.Gateway.RenamedGroups.Count);
+        Assert.AreEqual(0, fixture.SessionGroups.Calls.Count);
+        StringAssert.Contains(
+            fixture.Gateway.Replies.Single().Text,
+            "别名已保存，但飞书群名同步失败");
+    }
+
+    [TestMethod]
+    public async Task GroupNameStateFailureRemainsRetryableAfterFeishuSucceeded()
+    {
+        var fixture = Fixture.Create(bound: true);
+        fixture.Store.AllowUpdates = true;
+        await BindSessionGroupAsync(
+            fixture,
+            "group-chat",
+            "OpenCode｜alpha",
+            ordinal: 1);
+        fixture.SessionGroups.UpdateError = new IOException("synthetic store failure");
+
+        await fixture.Handler.HandleAsync(AliasIntent(
+            "别名 #12345678 新名称",
+            eventId: "event-group-store-failure"));
+
+        Assert.AreEqual(1, fixture.Gateway.RenamedGroups.Count);
+        Assert.AreEqual(
+            "OpenCode｜alpha",
+            fixture.Store.Current.Sessions.Sessions["session-12345678"]
+                .ExtensionData!["feishuChatName"].GetString());
+        StringAssert.Contains(
+            fixture.Gateway.Replies.Single().Text,
+            "别名已保存，但飞书群名同步失败");
+
+        fixture.SessionGroups.UpdateError = null;
+        await fixture.Handler.HandleAsync(AliasIntent(
+            "别名 #12345678 新名称",
+            eventId: "event-group-store-retry"));
+
+        Assert.AreEqual(2, fixture.Gateway.RenamedGroups.Count);
+        Assert.AreEqual(
+            "OpenCode｜新名称",
+            fixture.Store.Current.Sessions.Sessions["session-12345678"]
+                .ExtensionData!["feishuChatName"].GetString());
+    }
+
+    [TestMethod]
+    public async Task GroupNameSynchronizationDoesNotSwallowCallerCancellation()
+    {
+        var fixture = Fixture.Create(bound: true);
+        fixture.Store.AllowUpdates = true;
+        await BindSessionGroupAsync(
+            fixture,
+            "group-chat",
+            "OpenCode｜alpha",
+            ordinal: 1);
+        using var cancellation = new CancellationTokenSource();
+        fixture.Gateway.AfterGroupRename = (_, _, _) =>
+        {
+            cancellation.Cancel();
+            return Task.CompletedTask;
+        };
+
+        await Assert.ThrowsExceptionAsync<OperationCanceledException>(() =>
+            fixture.Handler.HandleAsync(
+                AliasIntent(
+                    "别名 #12345678 新名称",
+                    eventId: "event-group-cancelled"),
+                cancellation.Token));
+
+        var session = fixture.Store.Current.Sessions.Sessions["session-12345678"];
+        Assert.AreEqual("新名称", session.ExtensionData!["alias"].GetString());
+        Assert.AreEqual(
+            "OpenCode｜alpha",
+            session.ExtensionData["feishuChatName"].GetString());
+        Assert.AreEqual(1, fixture.Gateway.RenamedGroups.Count);
+    }
+
+    [TestMethod]
+    public async Task ReplacedGroupBindingRejectsTheOldNameWrite()
+    {
+        var fixture = Fixture.Create(bound: true);
+        fixture.Store.AllowUpdates = true;
+        await BindSessionGroupAsync(
+            fixture,
+            "group-old",
+            "OpenCode｜alpha",
+            ordinal: 1);
+        fixture.Gateway.AfterGroupRename = (_, _, cancellationToken) =>
+            fixture.Store.UpdateAsync(
+                current => NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                    current,
+                    "session-12345678",
+                    new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                    {
+                        ["feishuChatId"] =
+                            JsonSerializer.SerializeToElement("group-new"),
+                    }),
+                cancellationToken).AsTask();
+
+        await fixture.Handler.HandleAsync(AliasIntent(
+            "别名 #12345678 新名称",
+            eventId: "event-group-rebound"));
+
+        var session = fixture.Store.Current.Sessions.Sessions["session-12345678"];
+        Assert.AreEqual("group-new", session.ExtensionData!["feishuChatId"].GetString());
+        Assert.AreEqual(
+            "OpenCode｜alpha",
+            session.ExtensionData["feishuChatName"].GetString());
+        StringAssert.Contains(
+            fixture.Gateway.Replies.Single().Text,
+            "会话群绑定已变化");
     }
 
     [TestMethod]
@@ -515,6 +730,26 @@ public sealed class ActiveFeishuIntentHandlerTests
             ["retryCycleId"] = "cycle-1",
         });
 
+    private static Task BindSessionGroupAsync(
+        Fixture fixture,
+        string chatId,
+        string chatName,
+        int ordinal,
+        bool preserveFuture = false) =>
+        fixture.Store.UpdateAsync(
+            current => NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                current,
+                "session-12345678",
+                new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement(chatId),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement(chatName),
+                    ["feishuChatOrdinal"] = JsonSerializer.SerializeToElement(ordinal),
+                    ["futureGroup"] = preserveFuture
+                        ? JsonSerializer.SerializeToElement("keep")
+                        : null,
+                })).AsTask();
+
     private static IReadOnlyDictionary<string, string> RuntimeParameters(
         string flowId,
         string runtime,
@@ -578,7 +813,8 @@ public sealed class ActiveFeishuIntentHandlerTests
         RecordingFeishuGateway Gateway,
         RecordingRuntimeCommandGateway RuntimeCommands,
         RecordingRuntimeRetryCoordinator RuntimeRetries,
-        RecordingSessionAliasStateOwner SessionAliases)
+        RecordingSessionAliasStateOwner SessionAliases,
+        RecordingSessionGroupStateOwner SessionGroups)
     {
         public static Fixture Create(
             bool bound,
@@ -597,6 +833,7 @@ public sealed class ActiveFeishuIntentHandlerTests
             var runtimeRetries = new RecordingRuntimeRetryCoordinator();
             var business = new RecordingBusinessStateOwner(BusinessSnapshot());
             var sessionAliases = new RecordingSessionAliasStateOwner(store);
+            var sessionGroups = new RecordingSessionGroupStateOwner(store);
             var launches = new RecordingLaunchCoordinator();
             var fileTransfers = new RecordingFileTransferCoordinator();
             var prompts = new ActiveFeishuPromptCoordinator(
@@ -628,6 +865,7 @@ public sealed class ActiveFeishuIntentHandlerTests
                     store,
                     business,
                     sessionAliases,
+                    sessionGroups,
                     launches,
                     runtimeCommands,
                     runtimeRetries,
@@ -640,7 +878,8 @@ public sealed class ActiveFeishuIntentHandlerTests
                 gateway,
                 runtimeCommands,
                 runtimeRetries,
-                sessionAliases);
+                sessionAliases,
+                sessionGroups);
         }
     }
 
@@ -877,6 +1116,65 @@ public sealed class ActiveFeishuIntentHandlerTests
         }
     }
 
+    private sealed class RecordingSessionGroupStateOwner(
+        RecordingStoreOwner store) : IBridgeActiveSessionGroupStateOwner
+    {
+        public List<(string SessionId, string ExpectedChatId, string Name)> Calls
+        { get; } = [];
+        public Exception? UpdateError { get; set; }
+
+        public async ValueTask<BridgeSessionGroupNameUpdateResult>
+            UpdateSessionGroupNameAsync(
+                string sessionId,
+                string expectedChatId,
+                string name,
+                CancellationToken cancellationToken = default)
+        {
+            Calls.Add((sessionId, expectedChatId, name));
+            if (UpdateError is not null)
+            {
+                throw UpdateError;
+            }
+
+            BridgeSessionGroupNameUpdateResult? result = null;
+            await store.UpdateAsync(
+                current =>
+                {
+                    if (!current.Sessions.Sessions.TryGetValue(sessionId, out var session))
+                    {
+                        result = new(null, "会话不存在或已经失效。");
+                        return current;
+                    }
+                    var chatId = session.ExtensionData is not null &&
+                        session.ExtensionData.TryGetValue("feishuChatId", out var value) &&
+                        value.ValueKind == JsonValueKind.String
+                            ? value.GetString()
+                            : null;
+                    if (!string.Equals(
+                            chatId,
+                            expectedChatId,
+                            StringComparison.Ordinal))
+                    {
+                        result = new(null, "会话群绑定已变化，请重试。");
+                        return current;
+                    }
+
+                    var updated = NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                        current,
+                        sessionId,
+                        new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                        {
+                            ["feishuChatName"] =
+                                JsonSerializer.SerializeToElement(name),
+                        });
+                    result = new(updated.Sessions.Sessions[sessionId], null);
+                    return updated;
+                },
+                cancellationToken);
+            return result!;
+        }
+    }
+
     private sealed class RejectingApprovalStateOwner(
         BridgeBusinessStateSnapshot snapshot) : IBridgeActiveApprovalStateOwner
     {
@@ -1061,8 +1359,13 @@ public sealed class ActiveFeishuIntentHandlerTests
         public List<(string MessageId, string Text)> Replies { get; } = [];
         public List<(string ChatId, FeishuCardView Card, string? IdempotencyKey)> Cards
         { get; } = [];
+        public List<(string ChatId, string Name)> RenamedGroups { get; } = [];
         public int ReplyFailuresRemaining { get; set; }
-        public int TotalOutbound => SentTexts.Count + Replies.Count + Cards.Count;
+        public Exception? GroupRenameError { get; set; }
+        public Func<string, string, CancellationToken, Task>? AfterGroupRename
+        { get; set; }
+        public int TotalOutbound =>
+            SentTexts.Count + Replies.Count + Cards.Count + RenamedGroups.Count;
 
         public Task<string> SendTextAsync(
             string chatId,
@@ -1110,11 +1413,22 @@ public sealed class ActiveFeishuIntentHandlerTests
             CancellationToken cancellationToken = default) =>
             throw new AssertFailedException("全局只读意图不应创建会话群。");
 
-        public Task UpdateSessionGroupNameAsync(
+        public async Task UpdateSessionGroupNameAsync(
             string chatId,
             string name,
-            CancellationToken cancellationToken = default) =>
-            throw new AssertFailedException("全局只读意图不应修改会话群。");
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            RenamedGroups.Add((chatId, name));
+            if (GroupRenameError is not null)
+            {
+                throw GroupRenameError;
+            }
+            if (AfterGroupRename is not null)
+            {
+                await AfterGroupRename(chatId, name, cancellationToken);
+            }
+        }
 
         public Task DeleteSessionGroupAsync(
             string chatId,

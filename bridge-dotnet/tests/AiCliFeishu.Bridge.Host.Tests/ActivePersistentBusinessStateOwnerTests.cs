@@ -690,6 +690,126 @@ public sealed class ActivePersistentBusinessStateOwnerTests
     }
 
     [TestMethod]
+    public async Task SessionGroupNameUpdateIsAtomicAndRetainsUnknownExtensions()
+    {
+        var store = new RecordingStoreOwner(AliasSnapshot(
+            AliasSession(
+                "session-target",
+                SessionStatuses.Waiting,
+                alias: "新名称",
+                extensions: new()
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-1"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("old"),
+                    ["futureSession"] = JsonSerializer.SerializeToElement("keep"),
+                })));
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+
+        var result = await owner.UpdateSessionGroupNameAsync(
+            "session-target",
+            "chat-1",
+            "Codex｜新名称");
+
+        Assert.IsTrue(result.Succeeded);
+        Assert.AreEqual(
+            "Codex｜新名称",
+            result.Session!.ExtensionData!["feishuChatName"].GetString());
+        Assert.AreEqual(
+            "keep",
+            result.Session.ExtensionData["futureSession"].GetString());
+        Assert.AreEqual(
+            "新名称",
+            result.Session.ExtensionData["alias"].GetString());
+        Assert.AreEqual(
+            "chat-1",
+            store.Current.Sessions.Sessions["session-target"]
+                .ExtensionData!["feishuChatId"].GetString());
+    }
+
+    [TestMethod]
+    public async Task SessionGroupNameUpdateRejectsAReplacedBinding()
+    {
+        var store = new RecordingStoreOwner(AliasSnapshot(
+            AliasSession(
+                "session-target",
+                SessionStatuses.Waiting,
+                extensions: new()
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-new"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("old"),
+                })));
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+
+        var result = await owner.UpdateSessionGroupNameAsync(
+            "session-target",
+            "chat-old",
+            "Codex｜新名称");
+
+        Assert.IsFalse(result.Succeeded);
+        StringAssert.Contains(result.Error!, "绑定已变化");
+        Assert.AreEqual(0, store.Updates);
+        Assert.AreEqual(
+            "old",
+            store.Current.Sessions.Sessions["session-target"]
+                .ExtensionData!["feishuChatName"].GetString());
+    }
+
+    [TestMethod]
+    public async Task SessionGroupNameUpdateDoesNotWriteWhenTheNameIsAlreadyCurrent()
+    {
+        var store = new RecordingStoreOwner(AliasSnapshot(
+            AliasSession(
+                "session-target",
+                SessionStatuses.Waiting,
+                extensions: new()
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-1"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("Codex｜项目"),
+                })));
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+
+        var result = await owner.UpdateSessionGroupNameAsync(
+            "session-target",
+            "chat-1",
+            "Codex｜项目");
+
+        Assert.IsTrue(result.Succeeded);
+        Assert.AreEqual(0, store.Updates);
+    }
+
+    [TestMethod]
+    public async Task FailedSessionGroupNameWriteDoesNotPublishMutation()
+    {
+        var store = new RecordingStoreOwner(AliasSnapshot(
+            AliasSession(
+                "session-target",
+                SessionStatuses.Waiting,
+                extensions: new()
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-1"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("old"),
+                })));
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+        store.UpdateError = new IOException("group name write failed");
+
+        await Assert.ThrowsExceptionAsync<IOException>(() =>
+            owner.UpdateSessionGroupNameAsync(
+                "session-target",
+                "chat-1",
+                "Codex｜新名称").AsTask());
+
+        Assert.AreEqual(
+            "old",
+            store.Current.Sessions.Sessions["session-target"]
+                .ExtensionData!["feishuChatName"].GetString());
+        Assert.AreEqual(0, owner.Snapshot.Revision);
+    }
+
+    [TestMethod]
     public async Task RejectsPassiveOptionsAndRequiresAnOpenProductionStore()
     {
         var closedStore = new RecordingStoreOwner(SnapshotFromMemory());

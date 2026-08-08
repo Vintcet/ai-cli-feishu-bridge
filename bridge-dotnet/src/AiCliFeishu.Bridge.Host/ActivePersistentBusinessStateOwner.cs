@@ -13,6 +13,7 @@ internal sealed class ActivePersistentBusinessStateOwner(
       IBridgeControlBusinessStateSource,
       IBridgeActiveRuntimeStateSink,
       IBridgeActiveSessionAliasStateOwner,
+      IBridgeActiveSessionGroupStateOwner,
       IBridgeActiveApprovalStateOwner,
       IBridgeActiveInputStateOwner,
       IBridgeHostSubsystem,
@@ -164,6 +165,90 @@ internal sealed class ActivePersistentBusinessStateOwner(
                 cancellationToken);
             return result ?? throw new InvalidOperationException(
                 "会话别名更新没有产生结果。 ");
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public async ValueTask<BridgeSessionGroupNameUpdateResult>
+        UpdateSessionGroupNameAsync(
+            string sessionId,
+            string expectedChatId,
+            string name,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedChatId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        if (name.Length > SessionGroupNameRules.MaximumLength)
+        {
+            return new(
+                null,
+                $"飞书群名称最多 {SessionGroupNameRules.MaximumLength} 个字符。");
+        }
+
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            _ = RequireInitialized();
+            var observed = await storeOwner.ReadAsync(cancellationToken);
+            var rejection = SessionGroupNameUpdateRejection(
+                observed,
+                sessionId,
+                expectedChatId);
+            if (rejection is not null)
+            {
+                return rejection;
+            }
+            var observedSession = observed.Sessions.Sessions[sessionId];
+            if (string.Equals(
+                    ExtensionString(observedSession, "feishuChatName"),
+                    name,
+                    StringComparison.Ordinal))
+            {
+                return new(observedSession, null);
+            }
+
+            BridgeSessionGroupNameUpdateResult? result = null;
+            await storeOwner.UpdateAsync(
+                store =>
+                {
+                    var currentRejection = SessionGroupNameUpdateRejection(
+                        store,
+                        sessionId,
+                        expectedChatId);
+                    if (currentRejection is not null)
+                    {
+                        result = currentRejection;
+                        return store;
+                    }
+
+                    var current = store.Sessions.Sessions[sessionId];
+                    if (string.Equals(
+                            ExtensionString(current, "feishuChatName"),
+                            name,
+                            StringComparison.Ordinal))
+                    {
+                        result = new(current, null);
+                        return store;
+                    }
+
+                    var updated = NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                        store,
+                        sessionId,
+                        new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                        {
+                            ["feishuChatName"] =
+                                JsonSerializer.SerializeToElement(name),
+                        });
+                    result = new(updated.Sessions.Sessions[sessionId], null);
+                    return updated;
+                },
+                cancellationToken);
+            return result ?? throw new InvalidOperationException(
+                "会话群名称更新没有产生结果。 ");
         }
         finally
         {
@@ -909,6 +994,26 @@ internal sealed class ActivePersistentBusinessStateOwner(
                 ExtensionString(candidate, "alias") is { } currentAlias &&
                 SessionAliasRules.Key(currentAlias) == aliasKey);
         return conflict is null ? null : new(null, conflict, null);
+    }
+
+    private static BridgeSessionGroupNameUpdateResult?
+        SessionGroupNameUpdateRejection(
+            NodeStoreSnapshot store,
+            string sessionId,
+            string expectedChatId)
+    {
+        if (!store.Sessions.Sessions.TryGetValue(sessionId, out var session))
+        {
+            return new(null, "会话不存在或已经失效。");
+        }
+        if (!string.Equals(
+                ExtensionString(session, "feishuChatId"),
+                expectedChatId,
+                StringComparison.Ordinal))
+        {
+            return new(null, "会话群绑定已变化，请重试。");
+        }
+        return null;
     }
 
     private static bool HasNonEmptyExtension(
