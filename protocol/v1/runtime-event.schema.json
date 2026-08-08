@@ -57,7 +57,22 @@
             "eventType": { "const": "turn.started" },
             "payload": {
               "type": "object",
-              "properties": { "turnId": { "type": "string" } },
+              "properties": {
+                "turnId": { "type": "string" },
+                "summary": { "type": "string" },
+                "activityKind": {
+                  "enum": [
+                    "tool.started",
+                    "tool.completed",
+                    "tool.failed",
+                    "context.compacting",
+                    "context.compacted",
+                    "prompt.submitted"
+                  ]
+                },
+                "toolName": { "type": "string" },
+                "detail": { "type": "string" }
+              },
               "additionalProperties": false
             }
           }
@@ -69,7 +84,19 @@
               "type": "object",
               "properties": {
                 "turnId": { "type": "string" },
-                "summary": { "type": "string", "minLength": 1 }
+                "summary": { "type": "string", "minLength": 1 },
+                "activityKind": {
+                  "enum": [
+                    "tool.started",
+                    "tool.completed",
+                    "tool.failed",
+                    "context.compacting",
+                    "context.compacted",
+                    "prompt.submitted"
+                  ]
+                },
+                "toolName": { "type": "string" },
+                "detail": { "type": "string" }
               },
               "required": ["summary"],
               "additionalProperties": false
@@ -97,7 +124,20 @@
               "properties": {
                 "turnId": { "type": "string" },
                 "error": { "type": "string", "minLength": 1 },
-                "code": { "type": "string" }
+                "code": { "type": "string" },
+                "summary": { "type": "string" },
+                "activityKind": {
+                  "enum": [
+                    "tool.started",
+                    "tool.completed",
+                    "tool.failed",
+                    "context.compacting",
+                    "context.compacted",
+                    "prompt.submitted"
+                  ]
+                },
+                "toolName": { "type": "string" },
+                "detail": { "type": "string" }
               },
               "required": ["error"],
               "additionalProperties": false

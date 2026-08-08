@@ -186,6 +186,69 @@ public sealed class ManagedRuntimeHookNormalizerTests
     }
 
     [TestMethod]
+    public void ActivityHooksUseStructuredRuntimeActivityFields()
+    {
+        var normalizer = Normalizer();
+        using var prompt = JsonDocument.Parse("""
+            {
+              "hook_event_name": "UserPromptSubmit",
+              "runtime": "codex",
+              "session_id": "session-activity",
+              "turn_id": "turn-activity",
+              "cwd": "C:/repo",
+              "prompt": "开始"
+            }
+            """);
+        using var tool = JsonDocument.Parse("""
+            {
+              "hook_event_name": "PreToolUse",
+              "runtime": "codex",
+              "session_id": "session-activity",
+              "turn_id": "turn-activity",
+              "cwd": "C:/repo",
+              "tool_name": "shell_command",
+              "tool_preview": "git status"
+            }
+            """);
+        using var failure = JsonDocument.Parse("""
+            {
+              "hook_event_name": "PostToolUseFailure",
+              "runtime": "codex",
+              "session_id": "session-activity",
+              "turn_id": "turn-activity",
+              "cwd": "C:/repo",
+              "tool_name": "shell_command",
+              "tool_response_preview": "permission denied"
+            }
+            """);
+
+        var promptEvent = normalizer.Normalize(prompt.RootElement, "trace-prompt");
+        var toolEvent = normalizer.Normalize(tool.RootElement, "trace-tool");
+        var failureEvent = normalizer.Normalize(failure.RootElement, "trace-failure");
+
+        Assert.IsNotNull(promptEvent);
+        Assert.AreEqual(RuntimeEventTypes.TurnStarted, promptEvent.EventType);
+        Assert.AreEqual(
+            RuntimeActivityKinds.PromptSubmitted,
+            promptEvent.Payload.GetProperty("activityKind").GetString());
+        Assert.IsNotNull(toolEvent);
+        Assert.AreEqual(RuntimeActivityKinds.ToolStarted,
+            toolEvent.Payload.GetProperty("activityKind").GetString());
+        Assert.AreEqual("shell_command",
+            toolEvent.Payload.GetProperty("toolName").GetString());
+        Assert.AreEqual("git status",
+            toolEvent.Payload.GetProperty("detail").GetString());
+        Assert.IsNotNull(failureEvent);
+        Assert.AreEqual(RuntimeEventTypes.TurnFailed, failureEvent.EventType);
+        Assert.AreEqual(RuntimeActivityKinds.ToolFailed,
+            failureEvent.Payload.GetProperty("activityKind").GetString());
+        Assert.AreEqual("permission denied",
+            failureEvent.Payload.GetProperty("error").GetString());
+        Assert.IsTrue(BridgeProtocolValidator.Validate(toolEvent).IsValid);
+        Assert.IsTrue(BridgeProtocolValidator.Validate(failureEvent).IsValid);
+    }
+
+    [TestMethod]
     public void DuplicateHookIsIgnoredUntilItsFingerprintIsEvicted()
     {
         var normalizer = new ManagedRuntimeHookNormalizer(

@@ -7,13 +7,50 @@ import {
 } from "./envelope-validation.js";
 import type { BridgeProtocolVersion } from "./protocol-version.js";
 
+export type RuntimeActivityKind =
+  | "tool.started"
+  | "tool.completed"
+  | "tool.failed"
+  | "context.compacting"
+  | "context.compacted"
+  | "prompt.submitted";
+
+export const runtimeActivityKinds: readonly RuntimeActivityKind[] = [
+  "tool.started",
+  "tool.completed",
+  "tool.failed",
+  "context.compacting",
+  "context.compacted",
+  "prompt.submitted",
+];
+
 export interface RuntimeEventPayloadMap {
   "session.started": { model?: string };
   "session.ended": { reason?: string };
-  "turn.started": { turnId?: string };
-  "turn.activity": { turnId?: string; summary: string };
+  "turn.started": {
+    turnId?: string;
+    summary?: string;
+    activityKind?: RuntimeActivityKind;
+    toolName?: string;
+    detail?: string;
+  };
+  "turn.activity": {
+    turnId?: string;
+    summary: string;
+    activityKind?: RuntimeActivityKind;
+    toolName?: string;
+    detail?: string;
+  };
   "turn.completed": { turnId?: string; message?: string };
-  "turn.failed": { turnId?: string; error: string; code?: string };
+  "turn.failed": {
+    turnId?: string;
+    error: string;
+    code?: string;
+    summary?: string;
+    activityKind?: RuntimeActivityKind;
+    toolName?: string;
+    detail?: string;
+  };
   "approval.requested": {
     requestId: string;
     title: string;
@@ -97,11 +134,20 @@ export function isRuntimeEvent(value: unknown): value is RuntimeEvent {
     case "runtime.disconnected":
       return isOptionalString(payload.reason);
     case "turn.started":
-      return isOptionalString(payload.turnId);
+      return (
+        isOptionalString(payload.turnId) &&
+        isOptionalString(payload.summary) &&
+        isOptionalActivityKind(payload.activityKind) &&
+        isOptionalString(payload.toolName) &&
+        isOptionalString(payload.detail)
+      );
     case "turn.activity":
       return (
         isOptionalString(payload.turnId) &&
-        isNonEmptyString(payload.summary)
+        isNonEmptyString(payload.summary) &&
+        isOptionalActivityKind(payload.activityKind) &&
+        isOptionalString(payload.toolName) &&
+        isOptionalString(payload.detail)
       );
     case "turn.completed":
       return (
@@ -111,7 +157,11 @@ export function isRuntimeEvent(value: unknown): value is RuntimeEvent {
       return (
         isOptionalString(payload.turnId) &&
         isNonEmptyString(payload.error) &&
-        isOptionalString(payload.code)
+        isOptionalString(payload.code) &&
+        isOptionalString(payload.summary) &&
+        isOptionalActivityKind(payload.activityKind) &&
+        isOptionalString(payload.toolName) &&
+        isOptionalString(payload.detail)
       );
     case "approval.requested":
       return (
@@ -162,4 +212,12 @@ function isRuntimeQuestion(value: unknown): boolean {
 
 function isTimestamp(value: unknown): boolean {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function isOptionalActivityKind(
+  value: unknown,
+): value is RuntimeActivityKind | undefined {
+  return value === undefined ||
+    (typeof value === "string" &&
+      runtimeActivityKinds.includes(value as RuntimeActivityKind));
 }

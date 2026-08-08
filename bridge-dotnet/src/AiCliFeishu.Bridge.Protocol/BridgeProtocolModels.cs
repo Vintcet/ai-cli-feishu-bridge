@@ -138,3 +138,30 @@ public static class BridgeProtocolJson
             SerializerOptions) ?? throw new JsonException("运行时事件不能为空。");
     }
 }
+
+/// <summary>
+/// Stable, CLI-neutral labels for the small amount of structured activity that
+/// can be shown in a Feishu progress card.  Adapters may omit the label when a
+/// runtime only provides a human-readable summary; the summary remains the
+/// required compatibility field.
+/// </summary>
+public static class RuntimeActivityKinds
+{
+    public const string ToolStarted = "tool.started";
+    public const string ToolCompleted = "tool.completed";
+    public const string ToolFailed = "tool.failed";
+    public const string ContextCompacting = "context.compacting";
+    public const string ContextCompacted = "context.compacted";
+    public const string PromptSubmitted = "prompt.submitted";
+
+    public static readonly IReadOnlySet<string> All = new HashSet<string>(
+        [
+            ToolStarted,
+            ToolCompleted,
+            ToolFailed,
+            ContextCompacting,
+            ContextCompacted,
+            PromptSubmitted,
+        ],
+        StringComparer.Ordinal);
+}

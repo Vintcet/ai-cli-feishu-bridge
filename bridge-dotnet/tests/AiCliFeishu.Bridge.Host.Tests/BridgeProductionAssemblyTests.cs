@@ -436,7 +436,7 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(typeof(ActiveProductionStoreOwner), storeOwner.ImplementationType);
         var subsystems = services.Where(descriptor =>
             descriptor.ServiceType == typeof(IBridgeHostSubsystem)).ToArray();
-        Assert.AreEqual(9, subsystems.Length);
+        Assert.AreEqual(10, subsystems.Length);
         Assert.IsTrue(subsystems.All(descriptor =>
             descriptor.ImplementationFactory is not null));
         var hostedServices = services.Where(descriptor =>
@@ -683,6 +683,8 @@ public sealed class BridgeProductionAssemblyTests
             descriptor.ImplementationFactory is not null));
         Assert.IsNotNull(services.Single(descriptor => descriptor.ServiceType ==
             typeof(ActiveRuntimeRetryCoordinator)).ImplementationFactory);
+        Assert.IsNotNull(services.Single(descriptor => descriptor.ServiceType ==
+            typeof(ActiveRuntimeActivityCoordinator)).ImplementationFactory);
         Assert.IsNotNull(services.Single(descriptor => descriptor.ServiceType ==
             typeof(IBridgeActiveRuntimeStateSink)).ImplementationFactory);
         Assert.IsNotNull(services.Single(descriptor => descriptor.ServiceType ==
@@ -962,6 +964,10 @@ public sealed class BridgeProductionAssemblyTests
         services.AddSingleton<IBridgeActiveRuntimeStateSink>(provider =>
             (IBridgeActiveRuntimeStateSink)provider
                 .GetRequiredService<IBridgePersistentBusinessStateOwner>());
+        services.AddSingleton<ActiveRuntimeActivityCoordinator>(provider =>
+            ActivatorUtilities.CreateInstance<ActiveRuntimeActivityCoordinator>(provider));
+        services.AddSingleton<IBridgeHostSubsystem>(provider =>
+            provider.GetRequiredService<ActiveRuntimeActivityCoordinator>());
         services.AddSingleton<ActiveRuntimeRetryCoordinator>(provider =>
             ActivatorUtilities.CreateInstance<ActiveRuntimeRetryCoordinator>(provider));
         services.AddSingleton<IBridgeActiveRuntimeRetryCoordinator>(provider =>

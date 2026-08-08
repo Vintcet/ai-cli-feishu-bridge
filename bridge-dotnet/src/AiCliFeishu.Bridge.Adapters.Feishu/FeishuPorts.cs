@@ -131,6 +131,12 @@ public interface IFeishuCardRenderer
     IReadOnlyList<FeishuCardView> RuntimeCompletion(
         FeishuSessionView session,
         string message);
+
+    FeishuCardView RuntimeActivity(
+        FeishuSessionView session,
+        IReadOnlyList<FeishuActivityEventView> events,
+        string startedAt,
+        bool completed = false);
 }
 
 public interface IFeishuCardPatchLedger

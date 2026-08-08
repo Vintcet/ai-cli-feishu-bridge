@@ -85,6 +85,64 @@ public sealed class ProtocolContractTests
         StringAssert.Contains(string.Join("\n", result.Errors), "session 必须是对象");
     }
 
+    [TestMethod]
+    public void StructuredRuntimeActivityEventIsValid()
+    {
+        var runtimeEvent = BridgeProtocolJson.DeserializeEvent("""
+            {
+              "protocolVersion": 1,
+              "eventId": "event-activity-1",
+              "eventType": "turn.activity",
+              "occurredAt": "2026-08-06T01:02:03.000Z",
+              "runtime": "codex",
+              "session": { "externalId": "session-1", "cwd": "C:/repo" },
+              "traceId": "trace-activity-1",
+              "correlationId": "turn-1",
+              "payload": {
+                "turnId": "turn-1",
+                "summary": "正在调用命令行",
+                "activityKind": "tool.started",
+                "toolName": "shell_command",
+                "detail": "git status"
+              }
+            }
+            """);
+
+        var result = BridgeProtocolValidator.Validate(runtimeEvent);
+
+        Assert.IsTrue(result.IsValid, string.Join(Environment.NewLine, result.Errors));
+        Assert.AreEqual(
+            RuntimeActivityKinds.ToolStarted,
+            runtimeEvent.Payload.GetProperty("activityKind").GetString());
+    }
+
+    [TestMethod]
+    public void UnknownRuntimeActivityKindIsRejected()
+    {
+        var runtimeEvent = BridgeProtocolJson.DeserializeEvent("""
+            {
+              "protocolVersion": 1,
+              "eventId": "event-activity-invalid",
+              "eventType": "turn.activity",
+              "occurredAt": "2026-08-06T01:02:03.000Z",
+              "runtime": "codex",
+              "session": { "externalId": "session-1" },
+              "traceId": "trace-activity-invalid",
+              "payload": {
+                "summary": "活动",
+                "activityKind": "private.tool"
+              }
+            }
+            """);
+
+        var result = BridgeProtocolValidator.Validate(runtimeEvent);
+
+        Assert.IsFalse(result.IsValid);
+        StringAssert.Contains(
+            string.Join("\n", result.Errors),
+            "activityKind");
+    }
+
     private static string ReadExample(string name)
     {
         return File.ReadAllText(

@@ -60,6 +60,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
     private readonly Func<IBridgeRuntimeCommandGateway> runtimeCommands;
     private readonly IFeishuGateway gateway;
     private readonly IFeishuCardRenderer renderer;
+    private readonly ActiveRuntimeActivityCoordinator? activity;
     private readonly TimeProvider clock;
     private readonly TimeSpan? retryDelayOverride;
     private readonly Func<int, int> selectJitter;
@@ -83,7 +84,8 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         IFeishuCardRenderer renderer,
         TimeProvider? timeProvider = null,
         TimeSpan? retryDelayOverride = null,
-        Func<int, int>? jitterSelector = null)
+        Func<int, int>? jitterSelector = null,
+        ActiveRuntimeActivityCoordinator? activity = null)
         : this(
             options,
             stateSink,
@@ -93,7 +95,8 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             renderer,
             timeProvider,
             retryDelayOverride,
-            jitterSelector)
+            jitterSelector,
+            activity)
     {
         ArgumentNullException.ThrowIfNull(runtimeCommands);
     }
@@ -107,7 +110,8 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         IFeishuCardRenderer renderer,
         TimeProvider? timeProvider = null,
         TimeSpan? retryDelayOverride = null,
-        Func<int, int>? jitterSelector = null)
+        Func<int, int>? jitterSelector = null,
+        ActiveRuntimeActivityCoordinator? activity = null)
     {
         this.options = options;
         this.stateSink = stateSink;
@@ -116,6 +120,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             throw new ArgumentNullException(nameof(runtimeCommands));
         this.gateway = gateway;
         this.renderer = renderer;
+        this.activity = activity;
         clock = timeProvider ?? TimeProvider.System;
         this.retryDelayOverride = retryDelayOverride;
         selectJitter = jitterSelector ?? (maximum => Random.Shared.Next(maximum + 1));
@@ -165,6 +170,11 @@ internal sealed class ActiveRuntimeRetryCoordinator :
                 return;
             }
             started = true;
+        }
+
+        if (activity is not null)
+        {
+            await activity.StartAsync(cancellationToken);
         }
 
         var store = await storeOwner.ReadAsync(cancellationToken);
@@ -264,6 +274,17 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         {
             // Workers contain their own failure boundaries; shutdown only joins them.
         }
+        if (activity is not null)
+        {
+            try
+            {
+                await activity.StopAsync(CancellationToken.None);
+            }
+            catch
+            {
+                // Activity delivery is best effort and must not block Host shutdown.
+            }
+        }
         lock (sync)
         {
             cycles.Clear();
@@ -287,12 +308,25 @@ internal sealed class ActiveRuntimeRetryCoordinator :
 
         switch (runtimeEvent.EventType)
         {
+            case RuntimeEventTypes.TurnStarted:
+            case RuntimeEventTypes.TurnActivity:
+                await RecordActivityAsync(runtimeEvent, cancellationToken);
+                break;
             case RuntimeEventTypes.TurnFailed:
+                await RecordActivityAsync(runtimeEvent, cancellationToken);
+                await FinishActivityAsync(
+                    runtimeEvent,
+                    "本轮发生错误",
+                    cancellationToken);
                 await ProcessFailureAsync(
                     Failure(runtimeEvent, failureGeneration),
                     cancellationToken);
                 break;
             case RuntimeEventTypes.TurnCompleted:
+                await FinishActivityAsync(
+                    runtimeEvent,
+                    "本轮处理完成",
+                    cancellationToken);
                 Reset(runtimeEvent.Session!.ExternalId);
                 await ProcessCompletionNotificationAsync(
                     Completion(runtimeEvent),
@@ -300,8 +334,66 @@ internal sealed class ActiveRuntimeRetryCoordinator :
                 break;
             case RuntimeEventTypes.SessionEnded:
             case RuntimeEventTypes.RuntimeDisconnected:
+                await FinishActivityAsync(
+                    runtimeEvent,
+                    "会话已结束",
+                    cancellationToken);
                 Reset(runtimeEvent.Session!.ExternalId);
                 break;
+        }
+    }
+
+    private async Task RecordActivityAsync(
+        RuntimeEventEnvelope runtimeEvent,
+        CancellationToken cancellationToken)
+    {
+        if (activity is null)
+        {
+            return;
+        }
+        try
+        {
+            await activity.RecordAsync(runtimeEvent, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // Activity cards are an optional notification side channel. A
+            // renderer, Store or Feishu failure must not change Runtime
+            // state handling or suppress the completion/error notification.
+        }
+    }
+
+    private async Task FinishActivityAsync(
+        RuntimeEventEnvelope runtimeEvent,
+        string label,
+        CancellationToken cancellationToken)
+    {
+        if (activity is null || runtimeEvent.Session is null)
+        {
+            return;
+        }
+        var turnId = OptionalString(runtimeEvent.Payload, "turnId") ??
+            runtimeEvent.CorrelationId;
+        try
+        {
+            await activity.FinishAsync(
+                runtimeEvent.Session.ExternalId,
+                label,
+                turnId,
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // See RecordActivityAsync: progress delivery is deliberately
+            // best effort and cannot become a Runtime failure boundary.
         }
     }
 

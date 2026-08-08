@@ -139,6 +139,11 @@ public sealed record FeishuSessionView(
     string Cwd,
     bool ManagedByAssistant = false);
 
+public sealed record FeishuActivityEventView(
+    string At,
+    string Label,
+    string? Detail = null);
+
 public sealed record FeishuApprovalView(
     string RequestId,
     string ToolName,

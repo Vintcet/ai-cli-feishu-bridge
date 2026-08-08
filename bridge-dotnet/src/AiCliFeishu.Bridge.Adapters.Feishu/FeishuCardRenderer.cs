@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Globalization;
 using System.Text.RegularExpressions;
 using AiCliFeishu.Bridge.Core;
 
@@ -438,6 +439,61 @@ public sealed partial class FeishuCardRenderer : IFeishuCardRenderer
         }).ToArray();
     }
 
+    public FeishuCardView RuntimeActivity(
+        FeishuSessionView session,
+        IReadOnlyList<FeishuActivityEventView> events,
+        string startedAt,
+        bool completed = false)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(events);
+        if (string.IsNullOrWhiteSpace(startedAt) ||
+            !DateTimeOffset.TryParse(startedAt, CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind, out _))
+        {
+            throw new ArgumentException("活动卡片开始时间无效。", nameof(startedAt));
+        }
+
+        var runtime = RuntimeName(session.Runtime);
+        var elements = new List<JsonNode?>
+        {
+            Markdown(
+                $"**会话：** {session.Label}\n" +
+                $"**开始：** {ActivityTime(startedAt)}\n" +
+                $"**目录：** {session.Cwd}"),
+            new JsonObject { ["tag"] = "hr" },
+        };
+        foreach (var activity in events.TakeLast(6))
+        {
+            var label = RedactSensitiveText(activity.Label).Trim();
+            if (label.Length == 0)
+            {
+                label = "活动更新";
+            }
+            elements.Add(Markdown(
+                $"**{ActivityTime(activity.At)}　{Truncate(label, 240)}**"));
+            if (!string.IsNullOrWhiteSpace(activity.Detail))
+            {
+                var detail = Truncate(
+                    RedactSensitiveText(activity.Detail),
+                    500);
+                elements.AddRange(FeishuMarkdownCards.ToElements(detail).Take(2));
+            }
+        }
+        if (events.Count == 0)
+        {
+            elements.Add(Markdown("正在准备任务…"));
+        }
+        if (!completed)
+        {
+            elements.Add(Note("同一轮只保留一张进度卡，工具执行与上下文压缩会在这里更新。"));
+        }
+        return Card(
+            completed ? "green" : "blue",
+            completed ? $"{runtime} 本轮处理完成" : $"{runtime} 正在处理",
+            elements);
+    }
+
     private static FeishuCardView Card(
         string template,
         string title,
@@ -600,6 +656,19 @@ public sealed partial class FeishuCardRenderer : IFeishuCardRenderer
     {
         var text = string.IsNullOrWhiteSpace(value) ? "（没有可展示的参数）" : value.Trim();
         return text.Length <= length ? text : string.Concat(text.AsSpan(0, length - 1), "…");
+    }
+
+    private static string ActivityTime(string? value)
+    {
+        if (DateTimeOffset.TryParse(
+                value,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind,
+                out var timestamp))
+        {
+            return timestamp.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture);
+        }
+        return "--:--:--";
     }
 
     private static IReadOnlyList<string> SplitError(string? error)

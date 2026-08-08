@@ -138,17 +138,16 @@ public sealed class ManagedRuntimeHookNormalizer(
                 NormalizeInput(hook, occurredAt, inputLifetime),
             "UserPromptSubmit" => Event(
                 RuntimeEventTypes.TurnStarted,
-                OptionalObject(("turnId", turnId))),
+                OptionalObject(
+                    ("turnId", turnId),
+                    ("summary", "已提交新任务"),
+                    ("activityKind", RuntimeActivityKinds.PromptSubmitted))),
             "PreToolUse" or "PostToolUse" or "PreCompact" or "PostCompact" => Event(
                 RuntimeEventTypes.TurnActivity,
-                OptionalObject(
-                    ("turnId", turnId),
-                    ("summary", ActivitySummary(eventName, hook)))),
+                ActivityPayload(eventName, hook, turnId)),
             "PostToolUseFailure" => Event(
                 RuntimeEventTypes.TurnFailed,
-                OptionalObject(
-                    ("turnId", turnId),
-                    ("error", OptionalString(hook, "tool_response_preview") ?? "工具执行失败"))),
+                FailurePayload(hook, turnId)),
             "Stop" => Event(
                 RuntimeEventTypes.TurnCompleted,
                 OptionalObject(
@@ -156,6 +155,50 @@ public sealed class ManagedRuntimeHookNormalizer(
                     ("message", OptionalString(hook, "last_assistant_message")))),
             _ => null,
         };
+    }
+
+    private static JsonElement ActivityPayload(
+        string eventName,
+        JsonElement hook,
+        string? turnId)
+    {
+        var toolName = OptionalString(hook, "tool_name");
+        var detail = eventName == "PreToolUse"
+            ? OptionalString(hook, "tool_preview")
+            : OptionalString(hook, "tool_response_preview");
+        var (kind, summary) = eventName switch
+        {
+            "PreToolUse" =>
+                (RuntimeActivityKinds.ToolStarted,
+                    $"正在调用 {toolName ?? "工具"}"),
+            "PostToolUse" =>
+                (RuntimeActivityKinds.ToolCompleted,
+                    $"{toolName ?? "工具"} 已完成"),
+            "PreCompact" =>
+                (RuntimeActivityKinds.ContextCompacting, "正在压缩上下文"),
+            "PostCompact" =>
+                (RuntimeActivityKinds.ContextCompacted, "上下文压缩完成"),
+            _ => throw new InvalidDataException($"不支持的活动 Hook {eventName}。"),
+        };
+        return OptionalObject(
+            ("turnId", turnId),
+            ("summary", summary),
+            ("activityKind", kind),
+            ("toolName", toolName),
+            ("detail", detail));
+    }
+
+    private static JsonElement FailurePayload(JsonElement hook, string? turnId)
+    {
+        var toolName = OptionalString(hook, "tool_name");
+        var detail = OptionalString(hook, "tool_response_preview") ??
+            "工具执行失败";
+        return OptionalObject(
+            ("turnId", turnId),
+            ("error", detail),
+            ("activityKind", RuntimeActivityKinds.ToolFailed),
+            ("toolName", toolName),
+            ("detail", detail));
     }
 
     private static NormalizedHook? NormalizeApproval(
@@ -251,12 +294,6 @@ public sealed class ManagedRuntimeHookNormalizer(
                 expiresAt = (occurredAt + actualLifetime).ToString("O"),
             }),
             requestId);
-    }
-
-    private static string ActivitySummary(string eventName, JsonElement hook)
-    {
-        var toolName = OptionalString(hook, "tool_name");
-        return toolName is null ? eventName : $"{eventName}: {toolName}";
     }
 
     private static NormalizedHook Event(string eventType, JsonElement payload) =>

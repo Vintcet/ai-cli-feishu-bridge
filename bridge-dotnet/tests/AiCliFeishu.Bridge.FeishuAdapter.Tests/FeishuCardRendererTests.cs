@@ -128,6 +128,56 @@ public sealed class FeishuCardRendererTests
         Assert.IsFalse(json.Contains("super-secret", StringComparison.Ordinal));
     }
 
+    [TestMethod]
+    public void ActivityCardRendersProgressDetailsAndRedactsSecrets()
+    {
+        var renderer = new FeishuCardRenderer();
+        var card = renderer.RuntimeActivity(
+            Session(managed: false),
+            [
+                new(
+                    "2026-08-06T01:02:03Z",
+                    "正在调用命令行",
+                    "{\"command\":\"git status\",\"API_TOKEN\":\"secret-value\"}"),
+                new("2026-08-06T01:02:04Z", "命令行 已完成", "输出正常"),
+            ],
+            "2026-08-06T01:02:00Z");
+        var json = Json(card);
+
+        StringAssert.Contains(json, "Codex 正在处理");
+        StringAssert.Contains(json, "会话：");
+        StringAssert.Contains(json, "开始：");
+        StringAssert.Contains(json, "目录：");
+        StringAssert.Contains(json, "正在调用命令行");
+        StringAssert.Contains(json, "输出正常");
+        StringAssert.Contains(json, "API_TOKEN");
+        Assert.IsFalse(json.Contains("secret-value", StringComparison.Ordinal));
+        StringAssert.Contains(json, "同一轮只保留一张进度卡");
+    }
+
+    [TestMethod]
+    public void CompletedActivityCardIsGreenAndDropsActiveFooter()
+    {
+        var renderer = new FeishuCardRenderer();
+        var events = Enumerable.Range(1, 8)
+            .Select(index => new FeishuActivityEventView(
+                $"2026-08-06T01:02:{index:00}Z",
+                $"活动 {index}"))
+            .ToArray();
+        var card = renderer.RuntimeActivity(
+            Session(managed: true),
+            events,
+            "2026-08-06T01:02:00Z",
+            completed: true);
+        var json = Json(card);
+
+        StringAssert.Contains(json, "Codex 本轮处理完成");
+        StringAssert.Contains(json, "\"template\":\"green\"");
+        StringAssert.Contains(json, "活动 8");
+        Assert.IsFalse(json.Contains("活动 1", StringComparison.Ordinal));
+        Assert.IsFalse(json.Contains("同一轮只保留一张进度卡", StringComparison.Ordinal));
+    }
+
     private static FeishuSessionView Session(bool managed) => new(
         "session-renderer-1",
         "codex",

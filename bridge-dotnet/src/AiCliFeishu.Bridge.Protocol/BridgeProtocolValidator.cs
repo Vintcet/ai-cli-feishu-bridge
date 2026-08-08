@@ -155,10 +155,17 @@ public static class BridgeProtocolValidator
                 break;
             case RuntimeEventTypes.TurnStarted:
                 OptionalKind(payload, "turnId", JsonValueKind.String, errors);
+                OptionalKind(payload, "summary", JsonValueKind.String, errors);
+                OptionalEnum(payload, "activityKind", RuntimeActivityKinds.All, errors);
+                OptionalKind(payload, "toolName", JsonValueKind.String, errors);
+                OptionalKind(payload, "detail", JsonValueKind.String, errors);
                 break;
             case RuntimeEventTypes.TurnActivity:
                 OptionalKind(payload, "turnId", JsonValueKind.String, errors);
                 RequiredString(payload, "summary", errors);
+                OptionalEnum(payload, "activityKind", RuntimeActivityKinds.All, errors);
+                OptionalKind(payload, "toolName", JsonValueKind.String, errors);
+                OptionalKind(payload, "detail", JsonValueKind.String, errors);
                 break;
             case RuntimeEventTypes.TurnCompleted:
                 OptionalKind(payload, "turnId", JsonValueKind.String, errors);
@@ -168,6 +175,10 @@ public static class BridgeProtocolValidator
                 OptionalKind(payload, "turnId", JsonValueKind.String, errors);
                 RequiredString(payload, "error", errors);
                 OptionalKind(payload, "code", JsonValueKind.String, errors);
+                OptionalKind(payload, "summary", JsonValueKind.String, errors);
+                OptionalEnum(payload, "activityKind", RuntimeActivityKinds.All, errors);
+                OptionalKind(payload, "toolName", JsonValueKind.String, errors);
+                OptionalKind(payload, "detail", JsonValueKind.String, errors);
                 break;
             case RuntimeEventTypes.ApprovalRequested:
                 RequiredString(payload, "requestId", errors);
@@ -277,6 +288,28 @@ public static class BridgeProtocolValidator
         List<string> errors)
     {
         if (!owner.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String)
+        {
+            errors.Add($"payload.{name} 必须是字符串。");
+            return;
+        }
+        var text = value.GetString() ?? string.Empty;
+        if (!allowed.Contains(text))
+        {
+            errors.Add($"payload.{name} 的值 {text} 不受支持。");
+        }
+    }
+
+    private static void OptionalEnum(
+        JsonElement owner,
+        string name,
+        IReadOnlySet<string> allowed,
+        List<string> errors)
+    {
+        if (!owner.TryGetProperty(name, out var value))
+        {
+            return;
+        }
+        if (value.ValueKind != JsonValueKind.String)
         {
             errors.Add($"payload.{name} 必须是字符串。");
             return;

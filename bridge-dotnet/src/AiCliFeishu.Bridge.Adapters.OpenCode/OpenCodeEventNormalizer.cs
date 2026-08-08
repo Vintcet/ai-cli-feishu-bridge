@@ -86,7 +86,9 @@ public sealed class OpenCodeEventNormalizer(
             "session.compacted" => Event(
                 RuntimeEventTypes.TurnActivity,
                 sessionId,
-                OptionalObject(("summary", "会话上下文已压缩"))),
+                OptionalObject(
+                    ("summary", "上下文压缩完成"),
+                    ("activityKind", RuntimeActivityKinds.ContextCompacted))),
             "session.status" => NormalizeStatus(properties),
             "permission.asked" or "permission.v2.asked" or "permission.updated" =>
                 NormalizePermissionRequested(properties, occurredAt, approvalLifetime),
@@ -259,17 +261,31 @@ public sealed class OpenCodeEventNormalizer(
         var tool = OptionalString(part.Value, "tool") ?? "tool";
         var summary = status switch
         {
-            "pending" or "running" => $"正在执行 {tool}",
-            "completed" => $"已完成 {tool}",
+            "pending" or "running" => $"正在调用 {tool}",
+            "completed" => $"{tool} 已完成",
             "error" => $"{tool} 执行失败",
             _ => null,
         };
+        var activityKind = status switch
+        {
+            "pending" or "running" => RuntimeActivityKinds.ToolStarted,
+            "completed" => RuntimeActivityKinds.ToolCompleted,
+            "error" => RuntimeActivityKinds.ToolFailed,
+            _ => null,
+        };
+        var detail = status is "pending" or "running"
+            ? Preview(state.Value, "input")
+            : Preview(state.Value, "output") ?? Preview(state.Value, "error");
         return summary is null
             ? null
             : Event(
                 RuntimeEventTypes.TurnActivity,
                 SessionId(properties) ?? OptionalString(part.Value, "sessionID"),
-                OptionalObject(("summary", summary)));
+                OptionalObject(
+                    ("summary", summary),
+                    ("activityKind", activityKind),
+                    ("toolName", tool),
+                    ("detail", detail)));
     }
 
     private static JsonElement UnwrapData(JsonElement properties)
@@ -330,6 +346,26 @@ public sealed class OpenCodeEventNormalizer(
                 (ObjectProperty(error, "data") is { } data ? OptionalString(data, "message") : null);
         }
         return null;
+    }
+
+    private static string? Preview(JsonElement owner, string name)
+    {
+        if (!owner.TryGetProperty(name, out var value) ||
+            value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+        var text = value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : value.GetRawText();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+        text = text.Trim();
+        return text.Length <= 800
+            ? text
+            : $"{text[..780]}…（已截断）";
     }
 
     private static NormalizedEvent Event(

@@ -127,6 +127,62 @@ public sealed class OpenCodeSseAndNormalizerTests
     }
 
     [TestMethod]
+    public void ToolPartUpdatesExposeStructuredActivityAndPreview()
+    {
+        var normalizer = Normalizer();
+        var started = normalizer.Normalize(new OpenCodeRawEvent(
+            "message.part.updated",
+            System.Text.Json.JsonSerializer.SerializeToElement(new
+            {
+                sessionID = "session-tool",
+                part = new
+                {
+                    id = "part-1",
+                    type = "tool",
+                    tool = "shell_command",
+                    state = new
+                    {
+                        status = "running",
+                        input = new { command = "git status" },
+                    },
+                },
+            })), "trace-tool-start");
+        var completed = normalizer.Normalize(new OpenCodeRawEvent(
+            "message.part.updated",
+            System.Text.Json.JsonSerializer.SerializeToElement(new
+            {
+                sessionID = "session-tool",
+                part = new
+                {
+                    id = "part-2",
+                    type = "tool",
+                    tool = "shell_command",
+                    state = new
+                    {
+                        status = "completed",
+                        output = "ok",
+                    },
+                },
+            })), "trace-tool-complete");
+
+        Assert.IsNotNull(started);
+        Assert.AreEqual(RuntimeEventTypes.TurnActivity, started.EventType);
+        Assert.AreEqual(RuntimeActivityKinds.ToolStarted,
+            started.Payload.GetProperty("activityKind").GetString());
+        Assert.AreEqual("shell_command",
+            started.Payload.GetProperty("toolName").GetString());
+        StringAssert.Contains(
+            started.Payload.GetProperty("detail").GetString()!,
+            "git status");
+        Assert.IsNotNull(completed);
+        Assert.AreEqual(RuntimeActivityKinds.ToolCompleted,
+            completed.Payload.GetProperty("activityKind").GetString());
+        Assert.AreEqual("ok", completed.Payload.GetProperty("detail").GetString());
+        Assert.IsTrue(BridgeProtocolValidator.Validate(started).IsValid);
+        Assert.IsTrue(BridgeProtocolValidator.Validate(completed).IsValid);
+    }
+
+    [TestMethod]
     public void DuplicateFramesRemainSeparateInputsButUnknownOrInvalidEventsAreIgnored()
     {
         var parser = new OpenCodeSseParser();
