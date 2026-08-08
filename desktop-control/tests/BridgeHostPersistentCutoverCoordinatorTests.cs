@@ -644,6 +644,25 @@ public sealed class BridgeHostPersistentCutoverCoordinatorTests
             CancellationToken cancellationToken) =>
             throw new InvalidOperationException("Persistent coordinator must use callback launch.");
 
+        public ValueTask<int> StartDotNetActiveAuthorizedAsync(
+            string instanceName,
+            string operationId,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Persistent coordinator must use callback launch.");
+
+        public ValueTask<int> StartDotNetActiveAndBindAuthorizedAsync(
+            string instanceName,
+            string operationId,
+            BridgeHostProcessStartedCallback processStarted,
+            CancellationToken cancellationToken)
+        {
+            Assert.AreEqual("persistent-operation", operationId);
+            return StartDotNetActiveAndBindAsync(
+                instanceName,
+                processStarted,
+                cancellationToken);
+        }
+
         public async ValueTask<int> StartDotNetActiveAndBindAsync(
             string instanceName,
             BridgeHostProcessStartedCallback processStarted,

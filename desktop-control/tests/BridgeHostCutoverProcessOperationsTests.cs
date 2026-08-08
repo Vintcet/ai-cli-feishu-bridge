@@ -265,6 +265,53 @@ public sealed class BridgeHostCutoverProcessOperationsTests
     }
 
     [TestMethod]
+    public async Task AuthorizedDotNetStartAppendsExactCutoverOperation()
+    {
+        ProcessStartInfo? recorded = null;
+        var options = Options(
+            new StubStoreHandoffInspector(),
+            startProcess: startInfo =>
+            {
+                recorded = startInfo;
+                return Process.GetCurrentProcess();
+            });
+        using var operations = new BridgeHostCutoverProcessOperations(options);
+
+        var processId = await operations.StartDotNetActiveAuthorizedAsync(
+            DotNetInstanceName,
+            "operation-a",
+            default);
+
+        Assert.AreEqual(Environment.ProcessId, processId);
+        Assert.IsNotNull(recorded);
+        CollectionAssert.AreEqual(
+            new[] { "--cutover-operation", "operation-a" },
+            recorded.ArgumentList.ToArray());
+    }
+
+    [TestMethod]
+    public async Task AuthorizedDotNetStartRejectsInvalidOperationBeforeProcessCreation()
+    {
+        var started = false;
+        var options = Options(
+            new StubStoreHandoffInspector(),
+            startProcess: _ =>
+            {
+                started = true;
+                return Process.GetCurrentProcess();
+            });
+        using var operations = new BridgeHostCutoverProcessOperations(options);
+
+        await Assert.ThrowsExceptionAsync<ArgumentException>(() =>
+            operations.StartDotNetActiveAuthorizedAsync(
+                DotNetInstanceName,
+                "invalid operation",
+                default).AsTask());
+
+        Assert.IsFalse(started);
+    }
+
+    [TestMethod]
     public async Task PersistentStartPropagatesBindingFailureAfterProcessCreation()
     {
         var options = Options(

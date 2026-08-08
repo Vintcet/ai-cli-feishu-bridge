@@ -4,9 +4,23 @@ internal delegate ValueTask BridgeHostProcessStartedCallback(
     int processId,
     CancellationToken cancellationToken);
 
+internal interface IBridgeHostAuthorizedDotNetOperations
+{
+    ValueTask<int> StartDotNetActiveAuthorizedAsync(
+        string instanceName,
+        string operationId,
+        CancellationToken cancellationToken);
+}
+
 internal interface IBridgeHostPersistentCutoverOperations :
     IBridgeHostRecoveryOperations
 {
+    ValueTask<int> StartDotNetActiveAndBindAuthorizedAsync(
+        string instanceName,
+        string operationId,
+        BridgeHostProcessStartedCallback processStarted,
+        CancellationToken cancellationToken);
+
     ValueTask<int> StartDotNetActiveAndBindAsync(
         string instanceName,
         BridgeHostProcessStartedCallback processStarted,
@@ -207,8 +221,9 @@ internal sealed class BridgeHostPersistentCutoverCoordinator
             }
 
             var returnedDotNetProcessId =
-                await operations.StartDotNetActiveAndBindAsync(
+                await operations.StartDotNetActiveAndBindAuthorizedAsync(
                     context.DotNetInstanceName,
+                    context.OperationId,
                     BindDotNetProcessAsync,
                     CancellationToken.None);
             if (!launchCallbackInvoked ||
@@ -535,6 +550,8 @@ internal sealed class BridgeHostPersistentCutoverCoordinator
         public BridgeCutoverHostIdentity ExpectedNode => expectedNode;
 
         public string DotNetInstanceName => dotNetInstanceName;
+
+        public string OperationId => operationId;
 
         public async ValueTask ApplyAndPersistAsync(
             BridgeHostCutoverEvent @event)

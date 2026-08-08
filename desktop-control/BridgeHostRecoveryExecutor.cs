@@ -2,7 +2,9 @@ using AiCliFeishu.Bridge.Adapters.Storage;
 
 namespace AiCliFeishuControl;
 
-internal interface IBridgeHostRecoveryOperations : IBridgeHostCutoverOperations
+internal interface IBridgeHostRecoveryOperations :
+    IBridgeHostCutoverOperations,
+    IBridgeHostAuthorizedDotNetOperations
 {
     ValueTask RequestExpectedDotNetStopAsync(
         BridgeCutoverHostIdentity expectedDotNet,
@@ -248,8 +250,9 @@ internal sealed class BridgeHostRecoveryExecutor
 
         cancellationToken.ThrowIfCancellationRequested();
         markOwnershipSideEffectsStarted();
-        var processId = await operations.StartDotNetActiveAsync(
+        var processId = await operations.StartDotNetActiveAuthorizedAsync(
             checkpoint.ExpectedDotNetInstanceName,
+            checkpoint.OperationId,
             CancellationToken.None);
         await VerifyRecoveredDotNetAsync(
             processId,

@@ -127,6 +127,30 @@ internal sealed class BridgeHostCutoverProcessOperations :
             Start(options.CreateDotNetStartInfo(instanceName)));
     }
 
+    public ValueTask<int> StartDotNetActiveAuthorizedAsync(
+        string instanceName,
+        string operationId,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ValidateOperationId(operationId);
+        return ValueTask.FromResult(
+            Start(CreateAuthorizedDotNetStartInfo(instanceName, operationId)));
+    }
+
+    public ValueTask<int> StartDotNetActiveAndBindAuthorizedAsync(
+        string instanceName,
+        string operationId,
+        BridgeHostProcessStartedCallback processStarted,
+        CancellationToken cancellationToken)
+    {
+        ValidateOperationId(operationId);
+        return StartAndBindAsync(
+            CreateAuthorizedDotNetStartInfo(instanceName, operationId),
+            processStarted,
+            cancellationToken);
+    }
+
     public ValueTask<int> StartDotNetActiveAndBindAsync(
         string instanceName,
         BridgeHostProcessStartedCallback processStarted,
@@ -490,6 +514,26 @@ internal sealed class BridgeHostCutoverProcessOperations :
         var processId = Start(startInfo);
         await processStarted(processId, cancellationToken);
         return processId;
+    }
+
+    private ProcessStartInfo CreateAuthorizedDotNetStartInfo(
+        string instanceName,
+        string operationId)
+    {
+        var startInfo = options.CreateDotNetStartInfo(instanceName);
+        startInfo.ArgumentList.Add("--cutover-operation");
+        startInfo.ArgumentList.Add(operationId);
+        return startInfo;
+    }
+
+    private static void ValidateOperationId(string operationId)
+    {
+        if (!BridgeHostCutoverCheckpointValidator.IsValidOperationId(operationId))
+        {
+            throw new ArgumentException(
+                "Active 启动 operationId 无效。",
+                nameof(operationId));
+        }
     }
 
     private static bool IsProcessAlive(int processId)

@@ -764,6 +764,15 @@ public sealed class BridgeHostRecoveryExecutorTests
             return ValueTask.FromResult(92002);
         }
 
+        public ValueTask<int> StartDotNetActiveAuthorizedAsync(
+            string instanceName,
+            string operationId,
+            CancellationToken cancellationToken)
+        {
+            Assert.AreEqual("operation-a", operationId);
+            return StartDotNetActiveAsync(instanceName, cancellationToken);
+        }
+
         public ValueTask<BridgeCutoverHostIdentity> VerifyDotNetActiveAsync(
             int expectedProcessId,
             string expectedInstanceName,
