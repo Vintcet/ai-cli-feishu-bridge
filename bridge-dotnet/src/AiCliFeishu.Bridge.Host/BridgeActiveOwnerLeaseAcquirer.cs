@@ -242,12 +242,14 @@ internal sealed class ActiveOwnerLeaseAcquirer : IBridgeActiveOwnerLeaseLifecycl
 
 internal sealed class ActiveOwnerLeaseHostedService(
     IBridgeActiveOwnerLeaseLifecycle lease,
-    BridgeHealthRegistry health) : IHostedService
+    BridgeHealthRegistry health,
+    BridgeActiveStartupAuthorization? startupAuthorization = null) : IHostedService
 {
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         try
         {
+            startupAuthorization?.Confirm();
             await lease.AcquireAsync(cancellationToken);
             health.Report("production-owner", "ready", "active-owner-dotnet-held");
         }

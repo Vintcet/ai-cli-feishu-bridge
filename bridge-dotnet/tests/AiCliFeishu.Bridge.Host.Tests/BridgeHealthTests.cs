@@ -27,4 +27,14 @@ public sealed class BridgeHealthTests
 
         Assert.IsFalse(health.Snapshot().Ok);
     }
+
+    [TestMethod]
+    public void HealthyBackgroundComponentKeepsReadyHostHealthy()
+    {
+        var health = new BridgeHealthRegistry(BridgeHostOptions.Passive(Path.GetTempPath()));
+        health.Report("background-directory", "healthy");
+        health.SetLifecycle(BridgeHostLifecycleState.Ready);
+
+        Assert.IsTrue(health.Snapshot().Ok);
+    }
 }

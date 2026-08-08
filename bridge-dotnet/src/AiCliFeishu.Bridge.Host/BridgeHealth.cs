@@ -64,7 +64,8 @@ public sealed class BridgeHealthRegistry(
         lock (sync)
         {
             var ok = lifecycle is BridgeHostLifecycleState.Ready &&
-                components.Values.All(component => component.Status is "ready" or "passive");
+                components.Values.All(component =>
+                    component.Status is "ready" or "healthy" or "passive");
             var version = Assembly.GetEntryAssembly()?.GetName().Version?.ToString() ?? "0.0.0.0";
             return new(
                 ok,

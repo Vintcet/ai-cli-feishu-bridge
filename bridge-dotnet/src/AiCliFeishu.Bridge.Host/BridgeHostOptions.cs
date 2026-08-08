@@ -17,6 +17,8 @@ public sealed record BridgeHostOptions(
 {
     public const int DefaultPassivePort = 8876;
 
+    public string? CutoverOperationId { get; init; }
+
     public static BridgeHostOptions Passive(string dataDirectory, int port = DefaultPassivePort) =>
         new(
             Path.GetFullPath(dataDirectory),
@@ -44,10 +46,17 @@ public sealed record BridgeHostOptions(
         {
             throw new InvalidOperationException("Bridge Host 实例名只能包含字母、数字、连字符和下划线。");
         }
-        if (OwnershipMode is BridgeOwnershipMode.Active)
+        if (OwnershipMode is BridgeOwnershipMode.Active &&
+            !IsAsciiToken(CutoverOperationId, maximumLength: 128))
         {
             throw new InvalidOperationException(
-                "C# Bridge Host 的 Active Owner 切换尚未启用；Node 必须继续作为唯一生产执行者。");
+                "C# Bridge Host 的 Active Owner 启动必须绑定有效的持久化切换 operationId。");
+        }
+        if (OwnershipMode is BridgeOwnershipMode.Passive &&
+            CutoverOperationId is not null)
+        {
+            throw new InvalidOperationException(
+                "Passive Bridge Host 不能携带 Active 切换 operationId。");
         }
         return this with { DataDirectory = Path.GetFullPath(DataDirectory) };
     }
@@ -60,6 +69,7 @@ public sealed record BridgeHostOptions(
         var port = DefaultPassivePort;
         var ownership = BridgeOwnershipMode.Passive;
         var instanceName = "default";
+        string? cutoverOperationId = null;
 
         for (var index = 0; index < args.Length; index++)
         {
@@ -93,6 +103,9 @@ public sealed record BridgeHostOptions(
                 case "--instance":
                     instanceName = NextValue();
                     break;
+                case "--cutover-operation":
+                    cutoverOperationId = NextValue();
+                    break;
                 case "--ownership":
                     ownership = NextValue().ToLowerInvariant() switch
                     {
@@ -112,6 +125,16 @@ public sealed record BridgeHostOptions(
             address,
             port,
             ownership,
-            instanceName).Validate();
+            instanceName)
+        {
+            CutoverOperationId = cutoverOperationId,
+        }.Validate();
     }
+
+    private static bool IsAsciiToken(string? value, int maximumLength) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        value.Length <= maximumLength &&
+        value.All(character =>
+            character is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or
+                >= '0' and <= '9' or '-' or '_');
 }

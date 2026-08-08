@@ -26,4 +26,20 @@
           Link="OwnershipExamples\active-owner-dotnet.json"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <Target Name="PublishActiveBridgeHostForTests"
+          AfterTargets="Build"
+          Condition="'$(OS)' == 'Windows_NT' and '$(DesignTimeBuild)' != 'true'">
+    <PropertyGroup>
+      <ActiveBridgeHostPublishDirectory>$(MSBuildProjectDirectory)\obj\active-host-publish\</ActiveBridgeHostPublishDirectory>
+      <ActiveBridgeHostExecutable>$(ActiveBridgeHostPublishDirectory)AiCliFeishuBridgeHost.exe</ActiveBridgeHostExecutable>
+    </PropertyGroup>
+    <MSBuild Projects="..\..\src\AiCliFeishu.Bridge.Host\AiCliFeishu.Bridge.Host.csproj"
+             Targets="Publish"
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=win-x64;PublishDir=$(ActiveBridgeHostPublishDirectory);PublishSingleFile=true;SelfContained=false;DebugType=none;DebugSymbols=false" />
+    <Error Condition="!Exists('$(ActiveBridgeHostExecutable)')"
+           Text="Active Host integration publish did not produce $(ActiveBridgeHostExecutable)." />
+    <Copy SourceFiles="$(ActiveBridgeHostExecutable)"
+          DestinationFolder="$(OutDir)active-host\" />
+  </Target>
 </Project>

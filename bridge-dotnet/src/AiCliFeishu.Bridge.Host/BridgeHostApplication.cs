@@ -15,6 +15,9 @@ public static class BridgeHostApplication
         Action<IServiceCollection>? configureServices = null)
     {
         options = options.Validate();
+        var activeAuthorization = options.OwnershipMode is BridgeOwnershipMode.Active
+            ? BridgeActiveStartupGate.Authorize(options)
+            : null;
         var builder = WebApplication.CreateSlimBuilder(args ?? []);
         builder.WebHost.ConfigureKestrel(server =>
         {
@@ -25,7 +28,7 @@ public static class BridgeHostApplication
             });
         });
 
-        AddInfrastructure(builder.Services, options);
+        AddInfrastructure(builder.Services, options, activeAuthorization);
         AddOwnershipAssembly(builder.Services, options);
         configureServices?.Invoke(builder.Services);
         _ = BridgeProductionAssemblyPreflight.Validate(options, builder.Services);
@@ -37,9 +40,14 @@ public static class BridgeHostApplication
 
     private static void AddInfrastructure(
         IServiceCollection services,
-        BridgeHostOptions options)
+        BridgeHostOptions options,
+        BridgeActiveStartupAuthorization? activeAuthorization)
     {
         services.AddSingleton(options);
+        if (activeAuthorization is not null)
+        {
+            services.AddSingleton(activeAuthorization);
+        }
         services.AddSingleton<BridgeHealthRegistry>();
         services.AddSingleton<IBridgeInstanceLease, FileBridgeInstanceLease>();
         services.AddSingleton(services =>
