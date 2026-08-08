@@ -309,6 +309,297 @@ public sealed class ActiveSessionGroupCoordinatorTests
     }
 
     [TestMethod]
+    public async Task StartupDeletesOnlyGroupsInactiveForSevenDays()
+    {
+        var oldAt = Origin.AddDays(-8);
+        var recentCreatedAt = Origin.AddDays(-2);
+        var store = new RecordingStoreOwner(Snapshot(
+            ownerOpenId: "owner",
+            Session(
+                "session-cleanup-old",
+                oldAt,
+                extensions: new()
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-old"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("old"),
+                    ["feishuChatCreatedAt"] =
+                        JsonSerializer.SerializeToElement(oldAt.ToString("O")),
+                    ["feishuChatOrdinal"] = JsonSerializer.SerializeToElement(1),
+                    ["feishuChatError"] = JsonSerializer.SerializeToElement("old error"),
+                    ["feishuChatErrorAt"] =
+                        JsonSerializer.SerializeToElement(oldAt.ToString("O")),
+                },
+                status: SessionStatuses.Ended),
+            Session(
+                "session-cleanup-recent",
+                oldAt,
+                extensions: new()
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-recent"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("recent"),
+                    ["feishuChatCreatedAt"] =
+                        JsonSerializer.SerializeToElement(recentCreatedAt.ToString("O")),
+                    ["feishuChatOrdinal"] = JsonSerializer.SerializeToElement(2),
+                },
+                status: SessionStatuses.Ended)));
+        var gateway = new RecordingGateway();
+        var (state, coordinator) = Owners(store, gateway);
+        await state.StartAsync(CancellationToken.None);
+
+        await coordinator.StartAsync(CancellationToken.None);
+        var cleanupLoop = coordinator.Completion;
+
+        CollectionAssert.AreEqual(new[] { "chat-old" }, gateway.Deleted.ToArray());
+        Assert.IsNull(ExtensionString(
+            store.Current,
+            "session-cleanup-old",
+            "feishuChatId"));
+        Assert.IsNull(ExtensionString(
+            store.Current,
+            "session-cleanup-old",
+            "feishuChatError"));
+        Assert.AreEqual(1, Ordinal(store.Current, "session-cleanup-old"));
+        Assert.AreEqual(
+            "chat-recent",
+            ExtensionString(
+                store.Current,
+                "session-cleanup-recent",
+                "feishuChatId"));
+        Assert.IsNotNull(cleanupLoop);
+        Assert.IsFalse(cleanupLoop.IsCompleted);
+
+        await coordinator.StopAsync(CancellationToken.None);
+        Assert.IsTrue(cleanupLoop.IsCompleted);
+        coordinator.Dispose();
+    }
+
+    [TestMethod]
+    public async Task DeleteFailureLeavesTheInactiveBindingForRetry()
+    {
+        var store = new RecordingStoreOwner(Snapshot(ownerOpenId: "owner"));
+        var gateway = new RecordingGateway
+        {
+            DeleteError = new HttpRequestException("missing delete chat permission"),
+        };
+        var (state, coordinator) = Owners(store, gateway);
+        await state.StartAsync(CancellationToken.None);
+        await coordinator.StartAsync(CancellationToken.None);
+        store.Replace(Snapshot(
+            ownerOpenId: "owner",
+            Session(
+                "session-cleanup-failed",
+                Origin.AddDays(-8),
+                extensions: new()
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-failed"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("failed"),
+                    ["feishuChatCreatedAt"] =
+                        JsonSerializer.SerializeToElement(Origin.AddDays(-8).ToString("O")),
+                },
+                status: SessionStatuses.Ended)));
+
+        var result = await coordinator.CleanupAsync(Origin);
+
+        Assert.AreEqual(0, result.Deleted);
+        Assert.AreEqual(1, result.Failed);
+        CollectionAssert.AreEqual(
+            new[] { "chat-failed" },
+            gateway.DeleteAttempts.ToArray());
+        Assert.AreEqual(0, gateway.Deleted.Count);
+        Assert.AreEqual(
+            "chat-failed",
+            ExtensionString(
+                store.Current,
+                "session-cleanup-failed",
+                "feishuChatId"));
+
+        await coordinator.StopAsync(CancellationToken.None);
+        coordinator.Dispose();
+    }
+
+    [TestMethod]
+    public async Task StoreClearFailureKeepsTheDeletedBindingVisibleAsFailed()
+    {
+        var oldAt = Origin.AddDays(-8);
+        var store = new RecordingStoreOwner(Snapshot(ownerOpenId: "owner"));
+        var gateway = new RecordingGateway();
+        var (state, coordinator) = Owners(store, gateway);
+        await state.StartAsync(CancellationToken.None);
+        await coordinator.StartAsync(CancellationToken.None);
+        store.Replace(Snapshot(
+            ownerOpenId: "owner",
+            Session(
+                "session-cleanup-store-failed",
+                oldAt,
+                extensions: new()
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-store-failed"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("store-failed"),
+                    ["feishuChatCreatedAt"] =
+                        JsonSerializer.SerializeToElement(oldAt.ToString("O")),
+                },
+                status: SessionStatuses.Ended)));
+        store.UpdateError = new IOException("session group clear write failed");
+
+        var result = await coordinator.CleanupAsync(Origin);
+
+        Assert.AreEqual(0, result.Deleted);
+        Assert.AreEqual(1, result.Failed);
+        CollectionAssert.AreEqual(
+            new[] { "chat-store-failed" },
+            gateway.Deleted.ToArray());
+        Assert.AreEqual(
+            "chat-store-failed",
+            ExtensionString(
+                store.Current,
+                "session-cleanup-store-failed",
+                "feishuChatId"));
+
+        await coordinator.StopAsync(CancellationToken.None);
+        coordinator.Dispose();
+    }
+
+    [TestMethod]
+    public async Task ReplacementBindingSurvivesAnOldGroupDelete()
+    {
+        var oldAt = Origin.AddDays(-8);
+        var store = new RecordingStoreOwner(Snapshot(ownerOpenId: "owner"));
+        var gateway = new RecordingGateway();
+        gateway.OnDeleted = _ => store.Replace(Snapshot(
+            ownerOpenId: "owner",
+            Session(
+                "session-cleanup-race",
+                Origin,
+                extensions: new()
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-new"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("new"),
+                    ["feishuChatCreatedAt"] =
+                        JsonSerializer.SerializeToElement(Origin.ToString("O")),
+                },
+                status: SessionStatuses.Ended)));
+        var (state, coordinator) = Owners(store, gateway);
+        await state.StartAsync(CancellationToken.None);
+        await coordinator.StartAsync(CancellationToken.None);
+        store.Replace(Snapshot(
+            ownerOpenId: "owner",
+            Session(
+                "session-cleanup-race",
+                oldAt,
+                extensions: new()
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-old"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("old"),
+                    ["feishuChatCreatedAt"] =
+                        JsonSerializer.SerializeToElement(oldAt.ToString("O")),
+                },
+                status: SessionStatuses.Ended)));
+
+        var result = await coordinator.CleanupAsync(Origin);
+
+        Assert.AreEqual(1, result.Deleted);
+        Assert.AreEqual(0, result.Failed);
+        CollectionAssert.AreEqual(new[] { "chat-old" }, gateway.Deleted.ToArray());
+        Assert.AreEqual(
+            "chat-new",
+            ExtensionString(
+                store.Current,
+                "session-cleanup-race",
+                "feishuChatId"));
+        Assert.AreEqual(
+            "new",
+            ExtensionString(
+                store.Current,
+                "session-cleanup-race",
+                "feishuChatName"));
+
+        await coordinator.StopAsync(CancellationToken.None);
+        coordinator.Dispose();
+    }
+
+    [TestMethod]
+    public async Task ActivityRefreshedDuringCleanupSkipsTheLaterCandidate()
+    {
+        var firstAt = Origin.AddDays(-9);
+        var secondAt = Origin.AddDays(-8);
+        var store = new RecordingStoreOwner(Snapshot(ownerOpenId: "owner"));
+        var gateway = new RecordingGateway();
+        gateway.OnDeleted = chatId =>
+        {
+            if (chatId != "chat-first")
+            {
+                return;
+            }
+            store.Replace(Snapshot(
+                ownerOpenId: "owner",
+                Session(
+                    "session-cleanup-first",
+                    firstAt,
+                    extensions: new()
+                    {
+                        ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-first"),
+                        ["feishuChatName"] = JsonSerializer.SerializeToElement("first"),
+                        ["feishuChatCreatedAt"] =
+                            JsonSerializer.SerializeToElement(firstAt.ToString("O")),
+                    },
+                    status: SessionStatuses.Ended),
+                Session(
+                    "session-cleanup-second",
+                    Origin,
+                    extensions: new()
+                    {
+                        ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-second"),
+                        ["feishuChatName"] = JsonSerializer.SerializeToElement("second"),
+                        ["feishuChatCreatedAt"] =
+                            JsonSerializer.SerializeToElement(secondAt.ToString("O")),
+                    },
+                    status: SessionStatuses.Ended)));
+        };
+        var (state, coordinator) = Owners(store, gateway);
+        await state.StartAsync(CancellationToken.None);
+        await coordinator.StartAsync(CancellationToken.None);
+        store.Replace(Snapshot(
+            ownerOpenId: "owner",
+            Session(
+                "session-cleanup-first",
+                firstAt,
+                extensions: new()
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-first"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("first"),
+                    ["feishuChatCreatedAt"] =
+                        JsonSerializer.SerializeToElement(firstAt.ToString("O")),
+                },
+                status: SessionStatuses.Ended),
+            Session(
+                "session-cleanup-second",
+                secondAt,
+                extensions: new()
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-second"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("second"),
+                    ["feishuChatCreatedAt"] =
+                        JsonSerializer.SerializeToElement(secondAt.ToString("O")),
+                },
+                status: SessionStatuses.Ended)));
+
+        var result = await coordinator.CleanupAsync(Origin);
+
+        Assert.AreEqual(1, result.Deleted);
+        Assert.AreEqual(0, result.Failed);
+        CollectionAssert.AreEqual(new[] { "chat-first" }, gateway.Deleted.ToArray());
+        Assert.AreEqual(
+            "chat-second",
+            ExtensionString(
+                store.Current,
+                "session-cleanup-second",
+                "feishuChatId"));
+
+        await coordinator.StopAsync(CancellationToken.None);
+        coordinator.Dispose();
+    }
+
+    [TestMethod]
     public async Task ConcurrentEnsureCallsShareOneRemoteCreate()
     {
         var store = new RecordingStoreOwner(Snapshot(ownerOpenId: "owner"));
@@ -506,7 +797,8 @@ public sealed class ActiveSessionGroupCoordinatorTests
         string sessionId,
         DateTimeOffset openedAt,
         Dictionary<string, JsonElement>? extensions = null,
-        string runtime = RuntimeNames.Codex)
+        string runtime = RuntimeNames.Codex,
+        string status = SessionStatuses.Waiting)
     {
         var values = extensions is null
             ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -519,10 +811,13 @@ public sealed class ActiveSessionGroupCoordinatorTests
             ShortId = sessionId[^Math.Min(8, sessionId.Length)..],
             Cwd = "K:/workspace/project",
             ProjectName = "project",
-            Status = SessionStatuses.Waiting,
+            Status = status,
             Runtime = runtime,
             OpenedAt = openedAt.ToString("O"),
             LastSeenAt = openedAt.ToString("O"),
+            EndedAt = status == SessionStatuses.Ended
+                ? openedAt.ToString("O")
+                : null,
             ExtensionData = values,
         };
     }
@@ -570,6 +865,7 @@ public sealed class ActiveSessionGroupCoordinatorTests
             0);
 
         public Func<NodeStoreSnapshot, NodeStoreSnapshot>? BeforeUpdate { get; set; }
+        public Exception? UpdateError { get; set; }
 
         public void Replace(NodeStoreSnapshot value)
         {
@@ -597,6 +893,10 @@ public sealed class ActiveSessionGroupCoordinatorTests
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (UpdateError is not null)
+            {
+                return ValueTask.FromException(UpdateError);
+            }
             lock (sync)
             {
                 var beforeUpdate = BeforeUpdate;
@@ -618,13 +918,16 @@ public sealed class ActiveSessionGroupCoordinatorTests
     {
         public List<(string OwnerOpenId, string Name, string Description)> Created { get; } = [];
         public List<(string ChatId, string Name)> Renamed { get; } = [];
+        public List<string> DeleteAttempts { get; } = [];
         public List<string> Deleted { get; } = [];
         public List<(string ChatId, string Text)> Welcome { get; } = [];
         public Exception? CreateError { get; set; }
+        public Exception? DeleteError { get; set; }
         public TaskCompletionSource CreateStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource? CreateRelease { get; set; }
         public Action<FeishuSessionGroup>? OnCreated { get; set; }
+        public Action<string>? OnDeleted { get; set; }
         public int CreateAttempts { get; private set; }
 
         public Task<string> SendTextAsync(
@@ -692,7 +995,13 @@ public sealed class ActiveSessionGroupCoordinatorTests
             string chatId,
             CancellationToken cancellationToken = default)
         {
+            DeleteAttempts.Add(chatId);
+            if (DeleteError is not null)
+            {
+                throw DeleteError;
+            }
             Deleted.Add(chatId);
+            OnDeleted?.Invoke(chatId);
             return Task.CompletedTask;
         }
 

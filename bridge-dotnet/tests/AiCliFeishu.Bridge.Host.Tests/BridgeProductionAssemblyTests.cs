@@ -1369,6 +1369,15 @@ public sealed class BridgeProductionAssemblyTests
                 "recording owner"));
 
         public ValueTask<BridgeSessionGroupNameUpdateResult>
+            ClearSessionGroupAsync(
+                string sessionId,
+                string expectedChatId,
+                CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new BridgeSessionGroupNameUpdateResult(
+                null,
+                "recording owner"));
+
+        public ValueTask<BridgeSessionGroupNameUpdateResult>
             UpdateSessionGroupNameAsync(
                 string sessionId,
                 string expectedChatId,

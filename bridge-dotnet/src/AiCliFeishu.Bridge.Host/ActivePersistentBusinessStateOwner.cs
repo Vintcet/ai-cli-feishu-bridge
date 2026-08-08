@@ -464,6 +464,66 @@ internal sealed class ActivePersistentBusinessStateOwner(
     }
 
     public async ValueTask<BridgeSessionGroupNameUpdateResult>
+        ClearSessionGroupAsync(
+            string sessionId,
+            string expectedChatId,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedChatId);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            _ = RequireInitialized();
+            var observed = await storeOwner.ReadAsync(cancellationToken);
+            var rejection = SessionGroupNameUpdateRejection(
+                observed,
+                sessionId,
+                expectedChatId);
+            if (rejection is not null)
+            {
+                return rejection;
+            }
+
+            BridgeSessionGroupNameUpdateResult? result = null;
+            await storeOwner.UpdateAsync(
+                store =>
+                {
+                    var currentRejection = SessionGroupNameUpdateRejection(
+                        store,
+                        sessionId,
+                        expectedChatId);
+                    if (currentRejection is not null)
+                    {
+                        result = currentRejection;
+                        return store;
+                    }
+
+                    var updated = NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                        store,
+                        sessionId,
+                        new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                        {
+                            ["feishuChatId"] = null,
+                            ["feishuChatName"] = null,
+                            ["feishuChatCreatedAt"] = null,
+                            ["feishuChatError"] = null,
+                            ["feishuChatErrorAt"] = null,
+                        });
+                    result = new(updated.Sessions.Sessions[sessionId], null);
+                    return updated;
+                },
+                cancellationToken);
+            return result ?? throw new InvalidOperationException(
+                "会话群解绑更新没有产生结果。 ");
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public async ValueTask<BridgeSessionGroupNameUpdateResult>
         UpdateSessionGroupNameAsync(
             string sessionId,
             string expectedChatId,

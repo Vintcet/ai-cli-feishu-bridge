@@ -86,6 +86,11 @@ internal interface IBridgeActiveSessionGroupStateOwner
         string expectedOwnerOpenId,
         CancellationToken cancellationToken = default);
 
+    ValueTask<BridgeSessionGroupNameUpdateResult> ClearSessionGroupAsync(
+        string sessionId,
+        string expectedChatId,
+        CancellationToken cancellationToken = default);
+
     ValueTask<BridgeSessionGroupNameUpdateResult> UpdateSessionGroupNameAsync(
         string sessionId,
         string expectedChatId,

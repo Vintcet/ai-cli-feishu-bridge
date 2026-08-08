@@ -830,6 +830,84 @@ public sealed class ActivePersistentBusinessStateOwnerTests
         Assert.AreEqual(0, owner.Snapshot.Revision);
     }
 
+    [TestMethod]
+    public async Task SessionGroupClearRemovesBindingStateAndRetainsOrdinal()
+    {
+        var store = new RecordingStoreOwner(AliasSnapshot(
+            AliasSession(
+                "session-target",
+                SessionStatuses.Ended,
+                extensions: new()
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-old"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("old"),
+                    ["feishuChatCreatedAt"] =
+                        JsonSerializer.SerializeToElement(Origin.AddDays(-8).ToString("O")),
+                    ["feishuChatOrdinal"] = JsonSerializer.SerializeToElement(3),
+                    ["feishuChatError"] = JsonSerializer.SerializeToElement("old error"),
+                    ["feishuChatErrorAt"] =
+                        JsonSerializer.SerializeToElement(Origin.ToString("O")),
+                    ["futureSession"] = JsonSerializer.SerializeToElement("keep"),
+                })));
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+
+        var result = await owner.ClearSessionGroupAsync(
+            "session-target",
+            "chat-old");
+
+        Assert.IsTrue(result.Succeeded);
+        var extensions = result.Session!.ExtensionData!;
+        Assert.IsFalse(extensions.ContainsKey("feishuChatId"));
+        Assert.IsFalse(extensions.ContainsKey("feishuChatName"));
+        Assert.IsFalse(extensions.ContainsKey("feishuChatCreatedAt"));
+        Assert.IsFalse(extensions.ContainsKey("feishuChatError"));
+        Assert.IsFalse(extensions.ContainsKey("feishuChatErrorAt"));
+        Assert.AreEqual(3, extensions["feishuChatOrdinal"].GetInt32());
+        Assert.AreEqual("keep", extensions["futureSession"].GetString());
+    }
+
+    [TestMethod]
+    public async Task SessionGroupClearRejectsAReplacementBindingDuringWrite()
+    {
+        var store = new RecordingStoreOwner(AliasSnapshot(
+            AliasSession(
+                "session-target",
+                SessionStatuses.Ended,
+                extensions: new()
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-old"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("old"),
+                })))
+        {
+            BeforeUpdate = current => NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                current,
+                "session-target",
+                new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-new"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("new"),
+                }),
+        };
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+
+        var result = await owner.ClearSessionGroupAsync(
+            "session-target",
+            "chat-old");
+
+        Assert.IsFalse(result.Succeeded);
+        StringAssert.Contains(result.Error!, "绑定已变化");
+        Assert.AreEqual(
+            "chat-new",
+            store.Current.Sessions.Sessions["session-target"]
+                .ExtensionData!["feishuChatId"].GetString());
+        Assert.AreEqual(
+            "new",
+            store.Current.Sessions.Sessions["session-target"]
+                .ExtensionData!["feishuChatName"].GetString());
+    }
+
     [DataTestMethod]
     [DataRow("owner", "管理员绑定已变化")]
     [DataRow("ordinal", "序号已变化")]

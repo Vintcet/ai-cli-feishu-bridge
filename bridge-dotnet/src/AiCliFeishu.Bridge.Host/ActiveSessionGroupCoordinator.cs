@@ -7,6 +7,10 @@ using AiCliFeishu.Bridge.Protocol;
 
 namespace AiCliFeishu.Bridge.Host;
 
+internal sealed record BridgeSessionGroupCleanupResult(
+    int Deleted,
+    int Failed);
+
 /// <summary>
 /// Owns assistant-created Feishu session groups in the reserved Active graph.
 /// Group ordinals and every binding/error transition are committed through the
@@ -18,12 +22,14 @@ internal sealed class ActiveSessionGroupCoordinator :
     IBridgeActiveSessionGroupCoordinator,
     IBridgeHostSubsystem,
     IBridgeHostSubsystemHealth,
+    IBridgeBackgroundSubsystem,
     IDisposable
 {
     private const int MaximumErrorLength = 500;
     private const string DefaultRetryError =
         "飞书群创建失败，请检查应用权限后重试。";
     private static readonly TimeSpan DefaultInactiveAge = TimeSpan.FromDays(7);
+    private static readonly TimeSpan DefaultCleanupInterval = TimeSpan.FromHours(1);
     private readonly object sync = new();
     private readonly BridgeHostOptions options;
     private readonly IBridgeProductionStoreOwner storeOwner;
@@ -31,14 +37,19 @@ internal sealed class ActiveSessionGroupCoordinator :
     private readonly IFeishuGateway gateway;
     private readonly TimeProvider clock;
     private readonly TimeSpan inactiveAge;
+    private readonly TimeSpan cleanupInterval;
+    private readonly SemaphoreSlim cleanupGate = new(1, 1);
     private readonly CancellationTokenSource lifetime = new();
     private readonly Dictionary<string, Task<SessionStoreRecord?>> creates =
         new(StringComparer.Ordinal);
     private readonly HashSet<Task> workers = [];
     private bool started;
     private bool disposed;
+    private Task? cleanupLoop;
     private int created;
     private int renamed;
+    private int deletedGroups;
+    private int cleanupRuns;
     private int failures;
 
     public ActiveSessionGroupCoordinator(
@@ -47,7 +58,8 @@ internal sealed class ActiveSessionGroupCoordinator :
         IBridgeActiveSessionGroupStateOwner stateOwner,
         IFeishuGateway gateway,
         TimeProvider? timeProvider = null,
-        TimeSpan? inactiveAge = null)
+        TimeSpan? inactiveAge = null,
+        TimeSpan? cleanupInterval = null)
     {
         this.options = options ?? throw new ArgumentNullException(nameof(options));
         this.storeOwner = storeOwner ?? throw new ArgumentNullException(nameof(storeOwner));
@@ -55,11 +67,18 @@ internal sealed class ActiveSessionGroupCoordinator :
         this.gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
         clock = timeProvider ?? TimeProvider.System;
         this.inactiveAge = inactiveAge ?? DefaultInactiveAge;
+        this.cleanupInterval = cleanupInterval ?? DefaultCleanupInterval;
         if (this.inactiveAge <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(inactiveAge),
                 "会话群不活跃期限必须大于零。");
+        }
+        if (this.cleanupInterval <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(cleanupInterval),
+                "会话群清理周期必须大于零。");
         }
     }
 
@@ -75,7 +94,19 @@ internal sealed class ActiveSessionGroupCoordinator :
                     Name,
                     started ? "ready" : "starting",
                     $"pending={creates.Count} workers={workers.Count} " +
-                    $"created={created} renamed={renamed} failed={failures}");
+                    $"created={created} renamed={renamed} deleted={deletedGroups} " +
+                    $"cleanupRuns={cleanupRuns} failed={failures}");
+            }
+        }
+    }
+
+    public Task? Completion
+    {
+        get
+        {
+            lock (sync)
+            {
+                return cleanupLoop;
             }
         }
     }
@@ -97,6 +128,12 @@ internal sealed class ActiveSessionGroupCoordinator :
         try
         {
             await InitializeAsync(cancellationToken);
+            _ = await CleanupAsync(clock.GetUtcNow(), cancellationToken);
+            lock (sync)
+            {
+                EnsureStartedLocked();
+                cleanupLoop = RunCleanupLoopAsync(lifetime.Token);
+            }
         }
         catch
         {
@@ -120,7 +157,9 @@ internal sealed class ActiveSessionGroupCoordinator :
             }
             started = false;
             lifetime.Cancel();
-            pending = workers.ToArray();
+            pending = cleanupLoop is null
+                ? workers.ToArray()
+                : workers.Append(cleanupLoop).Distinct().ToArray();
         }
         try
         {
@@ -136,6 +175,7 @@ internal sealed class ActiveSessionGroupCoordinator :
         {
             creates.Clear();
             workers.Clear();
+            cleanupLoop = null;
         }
     }
 
@@ -231,6 +271,80 @@ internal sealed class ActiveSessionGroupCoordinator :
             updated is null
                 ? DefaultRetryError
                 : ExtensionString(updated, "feishuChatError") ?? DefaultRetryError);
+    }
+
+    internal async ValueTask<BridgeSessionGroupCleanupResult> CleanupAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        EnsureStarted();
+        await cleanupGate.WaitAsync(cancellationToken);
+        try
+        {
+            var store = await storeOwner.ReadAsync(cancellationToken);
+            var candidates = store.Sessions.Sessions.Values
+                .Where(session => ExtensionBoolean(session, "managedByAssistant"))
+                .Select(session => new SessionGroupCleanupCandidate(
+                    session.SessionId,
+                    ExtensionString(session, "feishuChatId") ?? string.Empty,
+                    SessionGroupActivityTime(session)))
+                .Where(candidate =>
+                    candidate.ChatId.Length > 0 &&
+                    now - candidate.ActivityAt >= inactiveAge)
+                .OrderBy(candidate => candidate.ActivityAt)
+                .ThenBy(candidate => candidate.SessionId, StringComparer.Ordinal)
+                .ToArray();
+            lock (sync)
+            {
+                cleanupRuns++;
+            }
+
+            var deleted = 0;
+            var failed = 0;
+            foreach (var candidate in candidates)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                store = await storeOwner.ReadAsync(cancellationToken);
+                if (!IsCurrentCleanupCandidate(store, candidate, now))
+                {
+                    continue;
+                }
+                try
+                {
+                    await gateway.DeleteSessionGroupAsync(
+                        candidate.ChatId,
+                        cancellationToken);
+                    _ = await stateOwner.ClearSessionGroupAsync(
+                        candidate.SessionId,
+                        candidate.ChatId,
+                        CancellationToken.None);
+                    deleted++;
+                    lock (sync)
+                    {
+                        deletedGroups++;
+                    }
+                }
+                catch (OperationCanceledException) when (
+                    cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch
+                {
+                    failed++;
+                    lock (sync)
+                    {
+                        failures++;
+                    }
+                }
+            }
+            return new(deleted, failed);
+        }
+        finally
+        {
+            cleanupGate.Release();
+        }
     }
 
     private async ValueTask<SessionStoreRecord?> EnsureCoreAsync(
@@ -554,8 +668,41 @@ internal sealed class ActiveSessionGroupCoordinator :
         }
         catch
         {
-            // The Store remains unbound. A later cleanup/audit slice can surface
-            // an API-side orphan, but this coordinator must never bind stale data.
+            // The Store remains unbound. A later remote-group audit can surface
+            // the API-side orphan, but this coordinator must never bind stale data.
+        }
+    }
+
+    private async Task RunCleanupLoopAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(cleanupInterval, clock);
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                try
+                {
+                    _ = await CleanupAsync(clock.GetUtcNow(), cancellationToken);
+                }
+                catch (OperationCanceledException) when (
+                    cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch
+                {
+                    lock (sync)
+                    {
+                        failures++;
+                    }
+                }
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new InvalidOperationException(
+                "会话群清理循环在停止信号前意外结束。");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
         }
     }
 
@@ -714,6 +861,18 @@ internal sealed class ActiveSessionGroupCoordinator :
         return lastSeenAt >= createdAt ? lastSeenAt : createdAt;
     }
 
+    private bool IsCurrentCleanupCandidate(
+        NodeStoreSnapshot store,
+        SessionGroupCleanupCandidate candidate,
+        DateTimeOffset now) =>
+        store.Sessions.Sessions.TryGetValue(candidate.SessionId, out var session) &&
+        ExtensionBoolean(session, "managedByAssistant") &&
+        string.Equals(
+            ExtensionString(session, "feishuChatId"),
+            candidate.ChatId,
+            StringComparison.Ordinal) &&
+        now - SessionGroupActivityTime(session) >= inactiveAge;
+
     private static string TruncateError(Exception error)
     {
         var detail = string.IsNullOrWhiteSpace(error.Message)
@@ -769,4 +928,9 @@ internal sealed class ActiveSessionGroupCoordinator :
         number > 0
             ? number
             : null;
+
+    private sealed record SessionGroupCleanupCandidate(
+        string SessionId,
+        string ChatId,
+        DateTimeOffset ActivityAt);
 }
