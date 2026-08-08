@@ -131,6 +131,9 @@ public static class BridgeHostApplication
             (IBridgeHostSubsystem)services.GetRequiredService<IBridgeProductionStoreOwner>());
         services.AddSingleton<IBridgePersistentBusinessStateOwner,
             ActivePersistentBusinessStateOwner>();
+        services.AddSingleton<IBridgeActiveSessionAliasStateOwner>(services =>
+            (IBridgeActiveSessionAliasStateOwner)services
+                .GetRequiredService<IBridgePersistentBusinessStateOwner>());
         services.AddSingleton<IBridgeControlBusinessStateSource>(services =>
             (IBridgeControlBusinessStateSource)services
                 .GetRequiredService<IBridgePersistentBusinessStateOwner>());

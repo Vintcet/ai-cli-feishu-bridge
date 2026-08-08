@@ -26,6 +26,23 @@ internal interface IBridgePersistentBusinessStateOwner
     BridgeBusinessStateSnapshot Snapshot { get; }
 }
 
+internal sealed record BridgeSessionAliasUpdateResult(
+    SessionStoreRecord? Session,
+    SessionStoreRecord? Conflict,
+    string? Error)
+{
+    public bool Succeeded =>
+        Session is not null && Conflict is null && Error is null;
+}
+
+internal interface IBridgeActiveSessionAliasStateOwner
+{
+    ValueTask<BridgeSessionAliasUpdateResult> UpdateSessionAliasAsync(
+        string sessionId,
+        string? alias,
+        CancellationToken cancellationToken = default);
+}
+
 internal interface IBridgeActiveRuntimeStateSink
 {
     BridgeBusinessStateSnapshot Snapshot { get; }
@@ -221,6 +238,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IBridgeActiveRuntimeRetryCoordinator),
         typeof(IBridgeActiveApprovalStateOwner),
         typeof(IBridgeActiveInputStateOwner),
+        typeof(IBridgeActiveSessionAliasStateOwner),
         typeof(IBridgeActiveFileTransferCoordinator),
         typeof(IBridgeFeishuCredentialSource),
         typeof(IBridgeManagedTerminalRegistrationDirectory),
@@ -338,6 +356,7 @@ internal static class BridgeProductionAssemblyPreflight
     [
         typeof(IBridgeActiveApprovalStateOwner),
         typeof(IBridgeActiveInputStateOwner),
+        typeof(IBridgeActiveSessionAliasStateOwner),
         typeof(IBridgeFeishuIntentHandler),
         typeof(IFeishuIntentSink),
         typeof(IBridgeActiveFileTransferCoordinator),

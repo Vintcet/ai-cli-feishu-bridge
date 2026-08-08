@@ -281,6 +281,75 @@ public sealed class ActiveFeishuIntentHandlerTests
     }
 
     [TestMethod]
+    public async Task PrivateAliasCommandsSetRenameQueryAndClearThroughStateOwner()
+    {
+        var fixture = Fixture.Create(bound: true);
+        fixture.Store.AllowUpdates = true;
+
+        await fixture.Handler.HandleAsync(AliasIntent("别名 #12345678 主项目"));
+        await fixture.Handler.HandleAsync(AliasIntent(
+            "别名 @主项目",
+            eventId: "event-alias-query"));
+        await fixture.Handler.HandleAsync(AliasIntent(
+            "别名 @主项目 新名称",
+            eventId: "event-alias-rename"));
+        await fixture.Handler.HandleAsync(AliasIntent(
+            "别名 #12345678 清除",
+            eventId: "event-alias-clear"));
+
+        Assert.AreEqual(3, fixture.SessionAliases.Calls.Count);
+        Assert.AreEqual("主项目", fixture.SessionAliases.Calls[0].Alias);
+        Assert.AreEqual("新名称", fixture.SessionAliases.Calls[1].Alias);
+        Assert.IsNull(fixture.SessionAliases.Calls[2].Alias);
+        StringAssert.Contains(fixture.Gateway.Replies[0].Text, "@主项目");
+        StringAssert.Contains(fixture.Gateway.Replies[1].Text, "别名是 @主项目");
+        StringAssert.Contains(fixture.Gateway.Replies[2].Text, "@新名称");
+        StringAssert.Contains(fixture.Gateway.Replies[3].Text, "已清除");
+        Assert.IsFalse(fixture.Store.Current.Sessions.Sessions["session-12345678"]
+            .ExtensionData?.ContainsKey("alias") == true);
+    }
+
+    [TestMethod]
+    public async Task AliasCommandReturnsValidationConflictAndPrivateChatErrors()
+    {
+        var fixture = Fixture.Create(bound: true);
+        fixture.Store.AllowUpdates = true;
+
+        await fixture.Handler.HandleAsync(AliasIntent(
+            "别名 #12345678 two words",
+            eventId: "event-invalid-alias"));
+        fixture.SessionAliases.NextResult = new(
+            null,
+            new SessionStoreRecord
+            {
+                SessionId = "history-87654321",
+                ShortId = "87654321",
+                ProjectName = "history-project",
+                Cwd = "K:\\workspace\\history-project",
+                Status = SessionStatuses.Ended,
+                LastSeenAt = "2026-08-07T00:00:00.000Z",
+            },
+            null);
+        await fixture.Handler.HandleAsync(AliasIntent(
+            "别名 #12345678 保留名",
+            eventId: "event-conflict-alias"));
+        await fixture.Handler.HandleAsync(AliasIntent(
+            "别名 #12345678 群内名",
+            chatType: "group",
+            eventId: "event-group-alias"));
+        await fixture.Handler.HandleAsync(AliasIntent(
+            "别名 #bad 设置",
+            eventId: "event-malformed-alias"));
+
+        StringAssert.Contains(fixture.Gateway.Replies[0].Text, "不能包含空格");
+        StringAssert.Contains(fixture.Gateway.Replies[1].Text, "已被会话");
+        StringAssert.Contains(fixture.Gateway.Replies[1].Text, "#87654321");
+        StringAssert.Contains(fixture.Gateway.Replies[2].Text, "只能在机器人私聊");
+        StringAssert.Contains(fixture.Gateway.Replies[3].Text, "别名 #短ID 名称");
+        Assert.AreEqual(2, fixture.SessionAliases.Calls.Count);
+    }
+
+    [TestMethod]
     public async Task UnboundOperatorCannotUseGlobalControls()
     {
         var fixture = Fixture.Create(bound: false);
@@ -417,7 +486,20 @@ public sealed class ActiveFeishuIntentHandlerTests
             "card-message-1",
             "card",
             "trace-1",
-            Parameters: RuntimeParameters(flowId, runtime, projectName));
+        Parameters: RuntimeParameters(flowId, runtime, projectName));
+
+    private static FeishuIntent AliasIntent(
+        string text,
+        string chatType = "p2p",
+        string eventId = "event-alias") => new(
+        eventId,
+        FeishuIntentTypes.CommandAliases,
+        "owner-1",
+        "chat-1",
+        $"message-{eventId}",
+        chatType,
+        $"trace-{eventId}",
+        Text: text);
 
     private static FeishuIntent RetryIntent() => new(
         "event-retry",
@@ -495,7 +577,8 @@ public sealed class ActiveFeishuIntentHandlerTests
         RecordingStoreOwner Store,
         RecordingFeishuGateway Gateway,
         RecordingRuntimeCommandGateway RuntimeCommands,
-        RecordingRuntimeRetryCoordinator RuntimeRetries)
+        RecordingRuntimeRetryCoordinator RuntimeRetries,
+        RecordingSessionAliasStateOwner SessionAliases)
     {
         public static Fixture Create(
             bool bound,
@@ -513,6 +596,7 @@ public sealed class ActiveFeishuIntentHandlerTests
             var runtimeCommands = new RecordingRuntimeCommandGateway();
             var runtimeRetries = new RecordingRuntimeRetryCoordinator();
             var business = new RecordingBusinessStateOwner(BusinessSnapshot());
+            var sessionAliases = new RecordingSessionAliasStateOwner(store);
             var launches = new RecordingLaunchCoordinator();
             var fileTransfers = new RecordingFileTransferCoordinator();
             var prompts = new ActiveFeishuPromptCoordinator(
@@ -543,6 +627,7 @@ public sealed class ActiveFeishuIntentHandlerTests
                     options,
                     store,
                     business,
+                    sessionAliases,
                     launches,
                     runtimeCommands,
                     runtimeRetries,
@@ -554,7 +639,8 @@ public sealed class ActiveFeishuIntentHandlerTests
                 store,
                 gateway,
                 runtimeCommands,
-                runtimeRetries);
+                runtimeRetries,
+                sessionAliases);
         }
     }
 
@@ -690,7 +776,12 @@ public sealed class ActiveFeishuIntentHandlerTests
     private sealed class RecordingStoreOwner(NodeStoreSnapshot store) :
         IBridgeProductionStoreOwner
     {
+        private NodeStoreSnapshot current = store;
+
         public int Reads { get; private set; }
+        public int Updates { get; private set; }
+        public bool AllowUpdates { get; set; }
+        public NodeStoreSnapshot Current => current;
 
         public BridgeProductionStoreSnapshot Snapshot => new(
             BridgeProductionStoreState.Open,
@@ -705,7 +796,7 @@ public sealed class ActiveFeishuIntentHandlerTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             Reads++;
-            return ValueTask.FromResult(store);
+            return ValueTask.FromResult(current);
         }
 
         public ValueTask FlushAsync(CancellationToken cancellationToken = default) =>
@@ -713,8 +804,17 @@ public sealed class ActiveFeishuIntentHandlerTests
 
         public ValueTask UpdateAsync(
             Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
-            CancellationToken cancellationToken = default) =>
-            throw new AssertFailedException("只读意图不应写入生产 Store。");
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!AllowUpdates)
+            {
+                throw new AssertFailedException("只读意图不应写入生产 Store。");
+            }
+            Updates++;
+            current = update(current);
+            return ValueTask.CompletedTask;
+        }
 
         public ValueTask CloseAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
@@ -724,6 +824,57 @@ public sealed class ActiveFeishuIntentHandlerTests
         BridgeBusinessStateSnapshot snapshot) : IBridgePersistentBusinessStateOwner
     {
         public BridgeBusinessStateSnapshot Snapshot { get; } = snapshot;
+    }
+
+    private sealed class RecordingSessionAliasStateOwner(
+        RecordingStoreOwner store) : IBridgeActiveSessionAliasStateOwner
+    {
+        public List<(string SessionId, string? Alias)> Calls { get; } = [];
+        public BridgeSessionAliasUpdateResult? NextResult { get; set; }
+
+        public async ValueTask<BridgeSessionAliasUpdateResult> UpdateSessionAliasAsync(
+            string sessionId,
+            string? alias,
+            CancellationToken cancellationToken = default)
+        {
+            Calls.Add((sessionId, alias));
+            if (NextResult is { } next)
+            {
+                NextResult = null;
+                return next;
+            }
+            if (alias is not null &&
+                SessionAliasRules.ValidationError(alias) is { } validationError)
+            {
+                return new(null, null, validationError);
+            }
+            var normalizedAlias = alias is null
+                ? null
+                : SessionAliasRules.Normalize(alias);
+            BridgeSessionAliasUpdateResult? result = null;
+            await store.UpdateAsync(
+                current =>
+                {
+                    if (!current.Sessions.Sessions.TryGetValue(sessionId, out var session))
+                    {
+                        result = new(null, null, "会话不存在或已经失效。");
+                        return current;
+                    }
+                    var updated = NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                        current,
+                        sessionId,
+                        new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                        {
+                            ["alias"] = normalizedAlias is null
+                                ? null
+                                : JsonSerializer.SerializeToElement(normalizedAlias),
+                        });
+                    result = new(updated.Sessions.Sessions[sessionId], null, null);
+                    return updated;
+                },
+                cancellationToken);
+            return result!;
+        }
     }
 
     private sealed class RejectingApprovalStateOwner(

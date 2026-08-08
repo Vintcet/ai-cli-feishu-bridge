@@ -41,6 +41,7 @@ public sealed class FeishuEventNormalizerTests
     [DataRow("/状态", FeishuIntentTypes.CommandStatus)]
     [DataRow("/会话管理", FeishuIntentTypes.CommandSessions)]
     [DataRow("/会话别名", FeishuIntentTypes.CommandAliases)]
+    [DataRow("别名 #9b45397b 主项目", FeishuIntentTypes.CommandAliases)]
     [DataRow("/帮助", FeishuIntentTypes.CommandHelp)]
     [DataRow("请继续", FeishuIntentTypes.MessagePrompt)]
     public void TextCommandsNormalizeToStandardIntent(string text, string expected)

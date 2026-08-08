@@ -518,6 +518,178 @@ public sealed class ActivePersistentBusinessStateOwnerTests
     }
 
     [TestMethod]
+    public async Task SessionAliasUpdateIsAtomicAndRetainsUnknownExtensions()
+    {
+        var store = new RecordingStoreOwner(AliasSnapshot(
+            AliasSession(
+                "session-target",
+                SessionStatuses.Waiting,
+                extensions: new()
+                {
+                    ["futureSession"] = JsonSerializer.SerializeToElement("keep"),
+                })));
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+
+        var result = await owner.UpdateSessionAliasAsync(
+            "session-target",
+            "  主项目  ");
+
+        Assert.IsTrue(result.Succeeded);
+        Assert.AreEqual(
+            "主项目",
+            result.Session!.ExtensionData!["alias"].GetString());
+        Assert.AreEqual(
+            "keep",
+            result.Session.ExtensionData["futureSession"].GetString());
+        Assert.AreEqual(
+            "主项目",
+            store.Current.Sessions.Sessions["session-target"]
+                .ExtensionData!["alias"].GetString());
+        Assert.AreEqual(0, owner.Snapshot.Revision);
+    }
+
+    [TestMethod]
+    public async Task SessionAliasUpdateReservesVisibleHistoryAndIgnoresHiddenHistory()
+    {
+        var store = new RecordingStoreOwner(AliasSnapshot(
+            AliasSession("session-target", SessionStatuses.Waiting),
+            AliasSession(
+                "session-visible-history",
+                SessionStatuses.Ended,
+                alias: "保留名",
+                extensions: new()
+                {
+                    ["historyEligible"] = JsonSerializer.SerializeToElement(true),
+                }),
+            AliasSession(
+                "session-hidden-history",
+                SessionStatuses.Ended,
+                alias: "隐藏名",
+                extensions: new()
+                {
+                    ["historyEligible"] = JsonSerializer.SerializeToElement(true),
+                    ["historyHiddenAt"] = JsonSerializer.SerializeToElement(
+                        Origin.ToString("O")),
+                }),
+            AliasSession(
+                "session-not-history",
+                SessionStatuses.Ended,
+                alias: "非历史名")));
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+
+        var visibleConflict = await owner.UpdateSessionAliasAsync(
+            "session-target",
+            "保留名");
+        Assert.AreEqual(0, store.Updates);
+        var hiddenReuse = await owner.UpdateSessionAliasAsync(
+            "session-target",
+            "隐藏名");
+        var nonHistoryReuse = await owner.UpdateSessionAliasAsync(
+            "session-target",
+            "非历史名");
+
+        Assert.IsNotNull(visibleConflict.Conflict);
+        Assert.IsFalse(visibleConflict.Succeeded);
+        Assert.IsTrue(hiddenReuse.Succeeded);
+        Assert.IsTrue(nonHistoryReuse.Succeeded);
+        Assert.AreEqual(
+            "非历史名",
+            store.Current.Sessions.Sessions["session-target"]
+                .ExtensionData!["alias"].GetString());
+    }
+
+    [TestMethod]
+    public async Task VisibleHistoryAliasCanChangeWithoutLosingFeishuBinding()
+    {
+        var store = new RecordingStoreOwner(AliasSnapshot(
+            AliasSession(
+                "session-history",
+                SessionStatuses.Ended,
+                alias: "旧名称",
+                extensions: new()
+                {
+                    ["historyEligible"] = JsonSerializer.SerializeToElement(true),
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-history"),
+                }),
+            AliasSession(
+                "session-hidden",
+                SessionStatuses.Ended,
+                extensions: new()
+                {
+                    ["historyEligible"] = JsonSerializer.SerializeToElement(true),
+                    ["historyHiddenAt"] = JsonSerializer.SerializeToElement(
+                        Origin.ToString("O")),
+                })));
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+
+        var renamed = await owner.UpdateSessionAliasAsync(
+            "session-history",
+            "归档会话");
+        var cleared = await owner.UpdateSessionAliasAsync(
+            "session-history",
+            null);
+        var hidden = await owner.UpdateSessionAliasAsync(
+            "session-hidden",
+            "不可见");
+
+        Assert.IsTrue(renamed.Succeeded);
+        Assert.IsTrue(cleared.Succeeded);
+        Assert.IsFalse(hidden.Succeeded);
+        Assert.AreEqual(
+            "chat-history",
+            store.Current.Sessions.Sessions["session-history"]
+                .ExtensionData!["feishuChatId"].GetString());
+        Assert.IsFalse(store.Current.Sessions.Sessions["session-history"]
+            .ExtensionData!.ContainsKey("alias"));
+    }
+
+    [TestMethod]
+    public async Task InvalidOrFailedSessionAliasUpdateDoesNotPublishMutation()
+    {
+        var store = new RecordingStoreOwner(AliasSnapshot(
+            AliasSession("session-target", SessionStatuses.Waiting)));
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+
+        var invalid = await owner.UpdateSessionAliasAsync(
+            "session-target",
+            "two words");
+        Assert.IsFalse(invalid.Succeeded);
+        Assert.IsNotNull(invalid.Error);
+        Assert.IsFalse(store.Current.Sessions.Sessions["session-target"]
+            .ExtensionData?.ContainsKey("alias") == true);
+
+        store.UpdateError = new IOException("alias write failed");
+        await Assert.ThrowsExceptionAsync<IOException>(() =>
+            owner.UpdateSessionAliasAsync("session-target", "will-fail").AsTask());
+        Assert.IsFalse(store.Current.Sessions.Sessions["session-target"]
+            .ExtensionData?.ContainsKey("alias") == true);
+        Assert.AreEqual(0, owner.Snapshot.Revision);
+    }
+
+    [TestMethod]
+    public async Task ConcurrentSessionAliasUpdatesHaveOneWinner()
+    {
+        var store = new RecordingStoreOwner(AliasSnapshot(
+            AliasSession("session-one", SessionStatuses.Waiting),
+            AliasSession("session-two", SessionStatuses.Waiting)));
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+
+        var results = await Task.WhenAll(
+            owner.UpdateSessionAliasAsync("session-one", "同一名称").AsTask(),
+            owner.UpdateSessionAliasAsync("session-two", "同一名称").AsTask());
+
+        Assert.AreEqual(1, results.Count(result => result.Succeeded));
+        Assert.AreEqual(1, store.Current.Sessions.Sessions.Values.Count(session =>
+            session.ExtensionData?.TryGetValue("alias", out var value) == true &&
+            value.GetString() == "同一名称"));
+    }
+
+    [TestMethod]
     public async Task RejectsPassiveOptionsAndRequiresAnOpenProductionStore()
     {
         var closedStore = new RecordingStoreOwner(SnapshotFromMemory());
@@ -630,6 +802,54 @@ public sealed class ActivePersistentBusinessStateOwnerTests
         new SettingsStoreDocument(),
         new ControlTokenStoreDocument());
 
+    private static NodeStoreSnapshot AliasSnapshot(
+        params SessionStoreRecord[] sessions) => new(
+        new BindingStoreDocument(),
+        new SessionStoreDocument
+        {
+            Sessions = sessions.ToDictionary(
+                session => session.SessionId,
+                StringComparer.Ordinal),
+        },
+        new RouteStoreDocument(),
+        new ApprovalStoreDocument(),
+        new SettingsStoreDocument(),
+        new ControlTokenStoreDocument());
+
+    private static SessionStoreRecord AliasSession(
+        string sessionId,
+        string status,
+        string? alias = null,
+        Dictionary<string, JsonElement>? extensions = null) => new()
+        {
+            SessionId = sessionId,
+            ShortId = sessionId[^Math.Min(8, sessionId.Length)..],
+            Cwd = $"K:/workspace/{sessionId}",
+            ProjectName = sessionId,
+            Runtime = RuntimeNames.Codex,
+            Status = status,
+            OpenedAt = Origin.ToString("O"),
+            LastSeenAt = Origin.AddMinutes(1).ToString("O"),
+            EndedAt = status == SessionStatuses.Ended
+                ? Origin.AddMinutes(2).ToString("O")
+                : null,
+            ExtensionData = AddAliasExtension(extensions, alias),
+        };
+
+    private static Dictionary<string, JsonElement>? AddAliasExtension(
+        Dictionary<string, JsonElement>? extensions,
+        string? alias)
+    {
+        var result = extensions is null
+            ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            : new Dictionary<string, JsonElement>(extensions, StringComparer.Ordinal);
+        if (alias is not null)
+        {
+            result["alias"] = JsonSerializer.SerializeToElement(alias);
+        }
+        return result.Count == 0 ? null : result;
+    }
+
     private sealed class RecordingStoreOwner(NodeStoreSnapshot store)
         : IBridgeProductionStoreOwner
     {
@@ -637,6 +857,8 @@ public sealed class ActivePersistentBusinessStateOwnerTests
 
         public bool IsOpen { get; set; } = true;
         public Exception? UpdateError { get; set; }
+        public NodeStoreSnapshot Current => current;
+        public int Updates { get; private set; }
         public BridgeProductionStoreSnapshot Snapshot => new(
             IsOpen ? BridgeProductionStoreState.Open : BridgeProductionStoreState.NotOpened,
             null,
@@ -663,6 +885,7 @@ public sealed class ActivePersistentBusinessStateOwnerTests
             {
                 return ValueTask.FromException(UpdateError);
             }
+            Updates++;
             current = update(current);
             return ValueTask.CompletedTask;
         }

@@ -12,6 +12,7 @@ internal sealed class ActivePersistentBusinessStateOwner(
     : IBridgePersistentBusinessStateOwner,
       IBridgeControlBusinessStateSource,
       IBridgeActiveRuntimeStateSink,
+      IBridgeActiveSessionAliasStateOwner,
       IBridgeActiveApprovalStateOwner,
       IBridgeActiveInputStateOwner,
       IBridgeHostSubsystem,
@@ -98,6 +99,76 @@ internal sealed class ActivePersistentBusinessStateOwner(
         // refresh must not re-read the files and overwrite newer runtime state.
         cancellationToken.ThrowIfCancellationRequested();
         return Task.CompletedTask;
+    }
+
+    public async ValueTask<BridgeSessionAliasUpdateResult> UpdateSessionAliasAsync(
+        string sessionId,
+        string? alias,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        string? normalizedAlias = null;
+        if (alias is not null)
+        {
+            var validationError = SessionAliasRules.ValidationError(alias);
+            if (validationError is not null)
+            {
+                return new(null, null, validationError);
+            }
+            normalizedAlias = SessionAliasRules.Normalize(alias);
+        }
+
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            _ = RequireInitialized();
+            var observed = await storeOwner.ReadAsync(cancellationToken);
+            var rejection = AliasUpdateRejection(
+                observed,
+                sessionId,
+                normalizedAlias);
+            if (rejection is not null)
+            {
+                return rejection;
+            }
+
+            BridgeSessionAliasUpdateResult? result = null;
+            await storeOwner.UpdateAsync(
+                store =>
+                {
+                    var currentRejection = AliasUpdateRejection(
+                        store,
+                        sessionId,
+                        normalizedAlias);
+                    if (currentRejection is not null)
+                    {
+                        result = currentRejection;
+                        return store;
+                    }
+
+                    var updated = NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                        store,
+                        sessionId,
+                        new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                        {
+                            ["alias"] = normalizedAlias is null
+                                ? null
+                                : JsonSerializer.SerializeToElement(normalizedAlias),
+                        });
+                    result = new(
+                        updated.Sessions.Sessions[sessionId],
+                        null,
+                        null);
+                    return updated;
+                },
+                cancellationToken);
+            return result ?? throw new InvalidOperationException(
+                "会话别名更新没有产生结果。 ");
+        }
+        finally
+        {
+            writeGate.Release();
+        }
     }
 
     public async ValueTask<BridgeApprovalClaim?> TryClaimApprovalAsync(
@@ -792,6 +863,81 @@ internal sealed class ActivePersistentBusinessStateOwner(
 
     private static DateTimeOffset Latest(params DateTimeOffset[] values) =>
         values.Max();
+
+    private static bool IsAliasReserved(SessionStoreRecord session)
+    {
+        if (!string.Equals(
+                session.Status,
+                SessionStatuses.Ended,
+                StringComparison.Ordinal))
+        {
+            return true;
+        }
+        if (session.SessionId.StartsWith(
+                "managed-terminal-",
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+        return ExtensionBoolean(session, "historyEligible") &&
+            !HasNonEmptyExtension(session, "historyHiddenAt");
+    }
+
+    private static BridgeSessionAliasUpdateResult? AliasUpdateRejection(
+        NodeStoreSnapshot store,
+        string sessionId,
+        string? normalizedAlias)
+    {
+        if (!store.Sessions.Sessions.TryGetValue(sessionId, out var session) ||
+            !IsAliasReserved(session))
+        {
+            return new(null, null, "会话不存在或已经失效。");
+        }
+        if (normalizedAlias is null)
+        {
+            return null;
+        }
+
+        var aliasKey = SessionAliasRules.Key(normalizedAlias);
+        var conflict = store.Sessions.Sessions.Values
+            .Where(IsAliasReserved)
+            .FirstOrDefault(candidate =>
+                !string.Equals(
+                    candidate.SessionId,
+                    sessionId,
+                    StringComparison.Ordinal) &&
+                ExtensionString(candidate, "alias") is { } currentAlias &&
+                SessionAliasRules.Key(currentAlias) == aliasKey);
+        return conflict is null ? null : new(null, conflict, null);
+    }
+
+    private static bool HasNonEmptyExtension(
+        ExtensibleStoreObject value,
+        string name) =>
+        value.ExtensionData is not null &&
+        value.ExtensionData.Any(item =>
+            string.Equals(item.Key, name, StringComparison.OrdinalIgnoreCase) &&
+            item.Value.ValueKind == JsonValueKind.String &&
+            !string.IsNullOrWhiteSpace(item.Value.GetString()));
+
+    private static bool ExtensionBoolean(
+        ExtensibleStoreObject value,
+        string name) =>
+        value.ExtensionData is not null &&
+        value.ExtensionData.Any(item =>
+            string.Equals(item.Key, name, StringComparison.OrdinalIgnoreCase) &&
+            item.Value.ValueKind is JsonValueKind.True);
+
+    private static string? ExtensionString(
+        ExtensibleStoreObject value,
+        string name) =>
+        value.ExtensionData is not null &&
+        value.ExtensionData.FirstOrDefault(item =>
+            string.Equals(item.Key, name, StringComparison.OrdinalIgnoreCase))
+            is { Value.ValueKind: JsonValueKind.String } item &&
+        !string.IsNullOrWhiteSpace(item.Value.GetString())
+            ? item.Value.GetString()!.Trim()
+            : null;
 
     private static NodeStoreSessionExtensionPatch? SessionExtensionPatch(
         RuntimeEventEnvelope runtimeEvent)

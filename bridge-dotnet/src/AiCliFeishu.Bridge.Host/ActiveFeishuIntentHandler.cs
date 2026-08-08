@@ -11,6 +11,7 @@ internal sealed class ActiveFeishuIntentHandler(
     BridgeHostOptions options,
     IBridgeProductionStoreOwner storeOwner,
     IBridgePersistentBusinessStateOwner businessStateOwner,
+    IBridgeActiveSessionAliasStateOwner sessionAliases,
     IBridgeManagedRuntimeLaunchCoordinator runtimeLaunches,
     IBridgeRuntimeCommandGateway runtimeCommands,
     IBridgeActiveRuntimeRetryCoordinator runtimeRetries,
@@ -21,6 +22,7 @@ internal sealed class ActiveFeishuIntentHandler(
     ActiveFeishuInputCoordinator inputs) : IBridgeFeishuIntentHandler
 {
     private const int MaximumListedSessions = 50;
+    private const int MaximumListedAliases = 20;
     private const int MaximumRememberedNewFlows = 500;
     private readonly object newFlowSync = new();
     private readonly Dictionary<string, RuntimeNewFlowEntry> newFlows =
@@ -117,9 +119,9 @@ internal sealed class ActiveFeishuIntentHandler(
                 intent,
                 SessionsText(store.Sessions),
                 cancellationToken),
-            FeishuIntentTypes.CommandAliases => await RespondTextAsync(
+            FeishuIntentTypes.CommandAliases => await HandleAliasesAsync(
                 intent,
-                AliasesText(store.Sessions),
+                store,
                 cancellationToken),
             FeishuIntentTypes.CommandHelp => await RespondTextAsync(
                 intent,
@@ -379,6 +381,104 @@ internal sealed class ActiveFeishuIntentHandler(
         return null;
     }
 
+    private async Task<FeishuCallbackResult?> HandleAliasesAsync(
+        FeishuIntent intent,
+        NodeStoreSnapshot store,
+        CancellationToken cancellationToken)
+    {
+        var text = intent.Text?.Trim();
+        if (string.IsNullOrWhiteSpace(text) ||
+            text == "/" ||
+            FeishuAliasCommandParser.IsListCommand(text))
+        {
+            return await RespondTextAsync(
+                intent,
+                AliasesText(store.Sessions),
+                cancellationToken);
+        }
+
+        var command = FeishuAliasCommandParser.Parse(text);
+        if (command is null || command.TargetKind is null || command.Target is null)
+        {
+            return await RespondTextAsync(
+                intent,
+                FeishuAliasCommandParser.Usage(),
+                cancellationToken);
+        }
+        if (!string.Equals(intent.ChatType, "p2p", StringComparison.Ordinal))
+        {
+            return await RespondTextAsync(
+                intent,
+                "会话别名管理只能在机器人私聊中使用。",
+                cancellationToken);
+        }
+
+        var activeSessions = store.Sessions.Sessions.Values
+            .Where(IsActive)
+            .ToArray();
+        var matches = command.TargetKind is FeishuAliasTargetKind.ShortId
+            ? activeSessions
+                .Where(session => MatchesShortId(session, command.Target))
+                .ToArray()
+            : activeSessions
+                .Where(session => MatchesAlias(session, command.Target))
+                .ToArray();
+        var address = command.TargetKind is FeishuAliasTargetKind.ShortId
+            ? $"#{command.Target}"
+            : $"@{command.Target}";
+        if (matches.Length != 1)
+        {
+            return await RespondTextAsync(
+                intent,
+                matches.Length == 0
+                    ? $"没有找到 {address} 对应的活跃会话。发送“会话”查看列表。"
+                    : $"{address} 匹配到多个会话，请换用完整短 ID。",
+                cancellationToken);
+        }
+
+        var session = matches[0];
+        if (command.Alias is null)
+        {
+            var currentAlias = ExtensionString(session, "alias");
+            return await RespondTextAsync(
+                intent,
+                currentAlias is not null
+                    ? $"会话 {ProjectLabel(session)} 的别名是 @{currentAlias}。"
+                    : $"会话 {ProjectLabel(session)} 尚未设置别名。",
+                cancellationToken);
+        }
+
+        var clear = IsAliasClearWord(command.Alias);
+        var update = await sessionAliases.UpdateSessionAliasAsync(
+            session.SessionId,
+            clear ? null : command.Alias,
+            cancellationToken);
+        if (update.Conflict is not null)
+        {
+            return await RespondTextAsync(
+                intent,
+                $"别名 @{SessionAliasRules.Normalize(command.Alias)} 已被会话 " +
+                $"{ProjectLabel(update.Conflict)} 使用。",
+                cancellationToken);
+        }
+        if (!update.Succeeded || update.Session is null)
+        {
+            return await RespondTextAsync(
+                intent,
+                update.Error ?? "设置别名失败。",
+                cancellationToken);
+        }
+
+        var updatedAlias = ExtensionString(update.Session, "alias");
+        return await RespondTextAsync(
+            intent,
+            updatedAlias is not null
+                ? $"已将 {ProjectLabel(update.Session)} 的别名设为 @{updatedAlias}。" +
+                  $"以后可发送“@{updatedAlias} 回复内容”。"
+                : $"已清除 {ProjectLabel(update.Session)} 的别名。",
+            cancellationToken);
+    }
+
     private async Task<FeishuCallbackResult?> RespondTextAsync(
         FeishuIntent intent,
         string text,
@@ -469,30 +569,34 @@ internal sealed class ActiveFeishuIntentHandler(
 
     private static string AliasesText(SessionStoreDocument document)
     {
-        var aliases = document.Sessions.Values
-            .Where(session => !string.Equals(
-                session.Status,
-                SessionStatuses.Ended,
-                StringComparison.Ordinal))
-            .Select(session => (Session: session, Alias: ExtensionString(session, "alias")))
-            .Where(item => item.Alias is not null)
-            .OrderBy(item => item.Alias, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(item => item.Session.SessionId, StringComparer.Ordinal)
+        var sessions = document.Sessions.Values
+            .Where(IsActive)
+            .OrderByDescending(session => Timestamp(session.LastSeenAt))
+            .ThenBy(session => session.SessionId, StringComparer.Ordinal)
+            .Take(MaximumListedAliases)
             .ToArray();
-        if (aliases.Length == 0)
+        if (sessions.Length == 0)
         {
-            return "当前活跃会话没有设置别名。请在电脑端的会话列表中设置。";
+            return $"当前没有可设置别名的活跃会话。\n\n" +
+                FeishuAliasCommandParser.Usage();
         }
-        return "会话别名：\n" + string.Join(
+        var lines = sessions.Select((session, index) =>
+        {
+            var alias = ExtensionString(session, "alias");
+            var address = alias is null ? "（未设置）" : $"@{alias}";
+            return $"{index + 1}. {address} · #{SessionShortId(session)} · " +
+                ProjectName(session);
+        });
+        return "当前会话别名：\n" + string.Join(
             '\n',
-            aliases.Select(item =>
-                $"@{item.Alias} -> {SessionLabel(item.Session)}"));
+            lines) + "\n\n" + FeishuAliasCommandParser.Usage();
     }
 
     private static string HelpText() =>
         "一级命令：\n/新建 - 新建会话\n/会话 - 会话管理\n/状态 - 查看状态\n" +
         "/工作区 - 查看工作区\n/别名 - 会话别名\n/帮助 - 全部功能\n\n" +
-        "发送 /新建 后，从卡片选择 Codex、Claude Code 或 OpenCode。";
+        "发送 /新建 后，从卡片选择 Codex、Claude Code 或 OpenCode。\n" +
+        "在机器人私聊发送“别名 #短ID 名称”可设置会话别名。";
 
     private static bool IsBoundOwner(BindingStoreDocument bindings, string openId) =>
         !string.IsNullOrWhiteSpace(openId) &&
@@ -666,6 +770,44 @@ internal sealed class ActiveFeishuIntentHandler(
 
     private static string ShortId(string sessionId) =>
         sessionId.Length <= 8 ? sessionId : sessionId[^8..];
+
+    private static string ProjectLabel(SessionStoreRecord session) =>
+        $"{ProjectName(session)} #{SessionShortId(session)}";
+
+    private static string SessionShortId(SessionStoreRecord session) =>
+        string.IsNullOrWhiteSpace(session.ShortId)
+            ? ShortId(session.SessionId)
+            : session.ShortId.Trim();
+
+    private static string ProjectName(SessionStoreRecord session) =>
+        session.ProjectName ??
+        (string.IsNullOrWhiteSpace(session.Cwd) ? "未知项目" : session.Cwd);
+
+    private static bool IsActive(SessionStoreRecord session) =>
+        !string.Equals(session.Status, SessionStatuses.Ended, StringComparison.Ordinal);
+
+    private static bool MatchesShortId(SessionStoreRecord session, string token)
+    {
+        var compact = new string(session.SessionId
+            .Where(character => character is >= 'a' and <= 'z' or
+                >= 'A' and <= 'Z' or
+                >= '0' and <= '9')
+            .ToArray());
+        return compact.EndsWith(token, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool MatchesAlias(SessionStoreRecord session, string alias) =>
+        ExtensionString(session, "alias") is { } stored &&
+        string.Equals(
+            SessionAliasRules.Key(stored),
+            SessionAliasRules.Key(alias),
+            StringComparison.Ordinal);
+
+    private static bool IsAliasClearWord(string value) =>
+        value.Trim().Equals("清除", StringComparison.Ordinal) ||
+        value.Trim().Equals("删除", StringComparison.Ordinal) ||
+        value.Trim().Equals("clear", StringComparison.OrdinalIgnoreCase) ||
+        value.Trim().Equals("none", StringComparison.OrdinalIgnoreCase);
 
     private static DateTimeOffset Timestamp(string value) =>
         DateTimeOffset.TryParse(value, out var timestamp)

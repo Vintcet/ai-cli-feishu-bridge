@@ -575,6 +575,9 @@ public sealed class BridgeProductionAssemblyTests
         var controlBusiness = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgeControlBusinessStateSource));
         Assert.IsNotNull(controlBusiness.ImplementationFactory);
+        var sessionAliasState = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IBridgeActiveSessionAliasStateOwner));
+        Assert.IsNotNull(sessionAliasState.ImplementationFactory);
         Assert.AreEqual(
             typeof(BridgeControlStatusReader),
             services.Single(descriptor =>
@@ -594,6 +597,9 @@ public sealed class BridgeProductionAssemblyTests
             Assert.AreSame(
                 persistentBusiness,
                 controlBusiness.ImplementationFactory(provider));
+            Assert.AreSame(
+                persistentBusiness,
+                sessionAliasState.ImplementationFactory(provider));
         }
         Assert.IsNotNull(services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgeActiveApprovalStateOwner))
@@ -938,6 +944,24 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void ActivePreflightRejectsSessionAliasStatePortThatCanOwnAnotherInstance()
+    {
+        var options = ActiveOptions();
+        var services = CompleteActiveServices();
+        services.RemoveAll<IBridgeActiveSessionAliasStateOwner>();
+        services.AddSingleton<IBridgeActiveSessionAliasStateOwner,
+            RecordingPersistentBusinessStateOwner>();
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeProductionAssemblyPreflight.Validate(options, services));
+
+        StringAssert.Contains(
+            error.Message,
+            nameof(IBridgeActiveSessionAliasStateOwner));
+        StringAssert.Contains(error.Message, "组合根工厂");
+    }
+
+    [TestMethod]
     public void ActivePreflightRejectsFeishuIntentSinkThatCanOwnAnotherInstance()
     {
         var options = ActiveOptions();
@@ -1090,6 +1114,9 @@ public sealed class BridgeProductionAssemblyTests
         services.AddSingleton<IBridgeActiveInputStateOwner>(provider =>
             (IBridgeActiveInputStateOwner)provider
                 .GetRequiredService<IBridgePersistentBusinessStateOwner>());
+        services.AddSingleton<IBridgeActiveSessionAliasStateOwner>(provider =>
+            (IBridgeActiveSessionAliasStateOwner)provider
+                .GetRequiredService<IBridgePersistentBusinessStateOwner>());
         services.AddSingleton<ActiveFeishuFileTransferCoordinator>();
         services.AddSingleton<IBridgeActiveFileTransferCoordinator>(provider =>
             provider.GetRequiredService<ActiveFeishuFileTransferCoordinator>());
@@ -1213,7 +1240,8 @@ public sealed class BridgeProductionAssemblyTests
           IBridgeControlBusinessStateSource,
           IBridgeActiveRuntimeStateSink,
           IBridgeActiveApprovalStateOwner,
-          IBridgeActiveInputStateOwner
+          IBridgeActiveInputStateOwner,
+          IBridgeActiveSessionAliasStateOwner
     {
         public BridgeBusinessStateSnapshot Snapshot { get; } =
             BridgeBusinessStateSnapshot.NotInitialized;
@@ -1227,6 +1255,15 @@ public sealed class BridgeProductionAssemblyTests
         public Task HandleAsync(
             RuntimeEventEnvelope runtimeEvent,
             CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public ValueTask<BridgeSessionAliasUpdateResult> UpdateSessionAliasAsync(
+            string sessionId,
+            string? alias,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new BridgeSessionAliasUpdateResult(
+                null,
+                null,
+                "recording owner"));
 
         public ValueTask<BridgeApprovalClaim?> TryClaimApprovalAsync(
             string requestId,
