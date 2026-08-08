@@ -128,6 +128,10 @@ internal sealed record BridgeApprovalClaim(
     ApprovalState Approval,
     SessionState Session);
 
+internal sealed record BridgeApprovalDelivery(
+    ApprovalState Approval,
+    SessionState Session);
+
 internal interface IBridgeActiveApprovalStateOwner
 {
     BridgeBusinessStateSnapshot Snapshot { get; }
@@ -139,6 +143,14 @@ internal interface IBridgeActiveApprovalStateOwner
 
     ValueTask ReleaseApprovalClaimAsync(
         string requestId,
+        CancellationToken cancellationToken = default);
+
+    ValueTask<BridgeApprovalDelivery?> RecordApprovalDeliveryAsync(
+        string requestId,
+        string sessionId,
+        string messageId,
+        string chatId,
+        DateTimeOffset createdAt,
         CancellationToken cancellationToken = default);
 
     ValueTask<BridgeApprovalClaim?> ResolveClaimedApprovalAsync(

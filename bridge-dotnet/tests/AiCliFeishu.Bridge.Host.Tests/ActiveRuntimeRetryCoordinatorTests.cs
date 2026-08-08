@@ -13,6 +13,49 @@ namespace AiCliFeishu.Bridge.Host.Tests;
 public sealed class ActiveRuntimeRetryCoordinatorTests
 {
     [TestMethod]
+    public async Task ApprovalNotificationRunsOnlyAfterStatePersistenceAndIsBestEffort()
+    {
+        var actions = new ConcurrentQueue<string>();
+        var notifier = new RecordingApprovalNotifier(actions);
+        await using var fixture = await RetryFixture.CreateAsync(
+            actions: actions,
+            approvalNotifications: notifier);
+
+        await fixture.Coordinator.HandleAsync(Event(
+            "approval-requested",
+            RuntimeEventTypes.ApprovalRequested,
+            "turn-approval",
+            new
+            {
+                requestId = "approval-1",
+                title = "shell_command",
+                expiresAt = DateTimeOffset.UtcNow.AddMinutes(20).ToString("O"),
+            }));
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "state:approval.requested",
+                $"approval:approval-1:{SessionId}",
+            },
+            actions.ToArray());
+
+        notifier.Error = new InvalidOperationException("synthetic delivery failure");
+        await fixture.Coordinator.HandleAsync(Event(
+            "approval-requested-failed-delivery",
+            RuntimeEventTypes.ApprovalRequested,
+            "turn-approval-2",
+            new
+            {
+                requestId = "approval-2",
+                title = "shell_command",
+                expiresAt = DateTimeOffset.UtcNow.AddMinutes(20).ToString("O"),
+            }));
+
+        Assert.IsTrue(fixture.State.Completed);
+    }
+
+    [TestMethod]
     public async Task SessionStartSchedulesGroupOnlyAfterStatePersistence()
     {
         var actions = new ConcurrentQueue<string>();
@@ -867,7 +910,8 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             TimeSpan? retryDelay = null,
             Exception? stateError = null,
             IBridgeActiveSessionGroupCoordinator? sessionGroups = null,
-            ConcurrentQueue<string>? actions = null)
+            ConcurrentQueue<string>? actions = null,
+            IBridgeActiveApprovalNotifier? approvalNotifications = null)
         {
             actions ??= new ConcurrentQueue<string>();
             store ??= new RecordingStoreOwner(StoreSnapshot(
@@ -898,7 +942,8 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
                 retryDelayOverride: retryDelay ?? TimeSpan.FromSeconds(5),
                 jitterSelector: _ => 0,
                 fileTransfers: fileTransfers,
-                sessionGroups: sessionGroups);
+                sessionGroups: sessionGroups,
+                approvalNotifications: approvalNotifications);
             await coordinator.StartAsync(CancellationToken.None);
             return new(
                 coordinator,
@@ -945,6 +990,24 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
                 throw Error;
             }
             Completed = true;
+        }
+    }
+
+    private sealed class RecordingApprovalNotifier(ConcurrentQueue<string> actions) :
+        IBridgeActiveApprovalNotifier
+    {
+        public Exception? Error { get; set; }
+
+        public Task NotifyPendingAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            actions.Enqueue($"approval:{requestId}:{sessionId}");
+            return Error is null
+                ? Task.CompletedTask
+                : Task.FromException(Error);
         }
     }
 

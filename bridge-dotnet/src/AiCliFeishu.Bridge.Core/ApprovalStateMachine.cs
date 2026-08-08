@@ -87,6 +87,30 @@ public static class ApprovalStateMachine
         return state with { Requests = requests };
     }
 
+    public static ApprovalRegistryState AssociateMessage(
+        ApprovalRegistryState state,
+        string requestId,
+        string messageId)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(messageId);
+        if (!state.Requests.TryGetValue(requestId, out var approval))
+        {
+            throw new InvalidOperationException($"审批 {requestId} 不存在。 ");
+        }
+        if (approval.MessageIds.Contains(messageId, StringComparer.Ordinal))
+        {
+            return state;
+        }
+        var requests = CopyRequests(state.Requests);
+        requests[requestId] = approval with
+        {
+            MessageIds = [.. approval.MessageIds, messageId],
+        };
+        return state with { Requests = requests };
+    }
+
     public static StateTransition<ApprovalRegistryState, bool> Claim(
         ApprovalRegistryState state,
         string requestId)

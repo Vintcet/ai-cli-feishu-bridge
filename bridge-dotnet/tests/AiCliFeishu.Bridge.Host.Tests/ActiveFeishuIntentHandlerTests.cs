@@ -1238,6 +1238,15 @@ public sealed class ActiveFeishuIntentHandlerTests
             CancellationToken cancellationToken = default) =>
             throw new AssertFailedException("意图处理器测试不应进入审批协调器。");
 
+        public ValueTask<BridgeApprovalDelivery?> RecordApprovalDeliveryAsync(
+            string requestId,
+            string sessionId,
+            string messageId,
+            string chatId,
+            DateTimeOffset createdAt,
+            CancellationToken cancellationToken = default) =>
+            throw new AssertFailedException("意图处理器测试不应进入审批协调器。");
+
         public ValueTask<BridgeApprovalClaim?> ResolveClaimedApprovalAsync(
             string requestId,
             string sessionId,

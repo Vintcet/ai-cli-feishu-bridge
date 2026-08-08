@@ -484,6 +484,15 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
             return ValueTask.CompletedTask;
         }
 
+        public ValueTask<BridgeApprovalDelivery?> RecordApprovalDeliveryAsync(
+            string requestId,
+            string sessionId,
+            string messageId,
+            string chatId,
+            DateTimeOffset createdAt,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<BridgeApprovalDelivery?>(null);
+
         public ValueTask<BridgeApprovalClaim?> ResolveClaimedApprovalAsync(
             string requestId,
             string sessionId,

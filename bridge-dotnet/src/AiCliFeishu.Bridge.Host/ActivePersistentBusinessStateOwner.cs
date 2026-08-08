@@ -662,6 +662,65 @@ internal sealed class ActivePersistentBusinessStateOwner(
         }
     }
 
+    public async ValueTask<BridgeApprovalDelivery?> RecordApprovalDeliveryAsync(
+        string requestId,
+        string sessionId,
+        string messageId,
+        string chatId,
+        DateTimeOffset createdAt,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(messageId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(chatId);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            var current = RequireInitialized();
+            if (!current.Approvals.Requests.TryGetValue(requestId, out var approval) ||
+                !string.Equals(approval.SessionId, sessionId, StringComparison.Ordinal) ||
+                !current.Sessions.Sessions.TryGetValue(sessionId, out var session))
+            {
+                return null;
+            }
+
+            var approvals = ApprovalStateMachine.AssociateMessage(
+                current.Approvals,
+                requestId,
+                messageId);
+            var changed = !ReferenceEquals(approvals, current.Approvals);
+            var next = changed
+                ? current with
+                {
+                    Revision = current.Revision + 1,
+                    Approvals = approvals,
+                }
+                : current;
+            await storeOwner.UpdateAsync(
+                store => AddApprovalRoute(
+                    NodeStoreBusinessStateMerger.Merge(
+                        store,
+                        next.Sessions,
+                        next.Approvals),
+                    requestId,
+                    sessionId,
+                    messageId,
+                    chatId,
+                    createdAt),
+                cancellationToken);
+            if (changed)
+            {
+                Volatile.Write(ref snapshot, next);
+            }
+            return new(next.Approvals.Requests[requestId], session);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
     public async ValueTask<BridgeApprovalClaim?> ResolveClaimedApprovalAsync(
         string requestId,
         string sessionId,
@@ -1221,6 +1280,54 @@ internal sealed class ActivePersistentBusinessStateOwner(
                 sessionExtensionPatch,
                 approvalExtensionPatch),
             cancellationToken);
+    }
+
+    private static NodeStoreSnapshot AddApprovalRoute(
+        NodeStoreSnapshot store,
+        string requestId,
+        string sessionId,
+        string messageId,
+        string chatId,
+        DateTimeOffset createdAt)
+    {
+        if (store.Routes.Messages.TryGetValue(messageId, out var existing))
+        {
+            if (!string.Equals(existing.SessionId, sessionId, StringComparison.Ordinal) ||
+                !string.Equals(existing.RequestId, requestId, StringComparison.Ordinal) ||
+                !string.Equals(existing.ChatId, chatId, StringComparison.Ordinal) ||
+                !string.Equals(existing.Kind, "approval", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"消息 {messageId} 已绑定到其他业务路由。 ");
+            }
+            return store;
+        }
+
+        var messages = new Dictionary<string, MessageRouteStoreRecord>(
+            store.Routes.Messages,
+            StringComparer.Ordinal)
+        {
+            [messageId] = new()
+            {
+                MessageId = messageId,
+                SessionId = sessionId,
+                RequestId = requestId,
+                ChatId = chatId,
+                Kind = "approval",
+                CreatedAt = createdAt.ToUniversalTime().ToString(
+                    "O",
+                    CultureInfo.InvariantCulture),
+            },
+        };
+        return store with
+        {
+            Routes = new()
+            {
+                Messages = messages,
+                ProcessedInbound = store.Routes.ProcessedInbound,
+                ExtensionData = store.Routes.ExtensionData,
+            },
+        };
     }
 
     private static bool TryClaimedApproval(

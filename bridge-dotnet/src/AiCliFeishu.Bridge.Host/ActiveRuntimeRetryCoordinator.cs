@@ -63,6 +63,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
     private readonly ActiveRuntimeActivityCoordinator? activity;
     private readonly IBridgeActiveFileTransferCoordinator? fileTransfers;
     private readonly IBridgeActiveSessionGroupCoordinator? sessionGroups;
+    private readonly IBridgeActiveApprovalNotifier? approvalNotifications;
     private readonly TimeProvider clock;
     private readonly TimeSpan? retryDelayOverride;
     private readonly Func<int, int> selectJitter;
@@ -89,7 +90,8 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         Func<int, int>? jitterSelector = null,
         ActiveRuntimeActivityCoordinator? activity = null,
         IBridgeActiveFileTransferCoordinator? fileTransfers = null,
-        IBridgeActiveSessionGroupCoordinator? sessionGroups = null)
+        IBridgeActiveSessionGroupCoordinator? sessionGroups = null,
+        IBridgeActiveApprovalNotifier? approvalNotifications = null)
         : this(
             options,
             stateSink,
@@ -102,7 +104,8 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             jitterSelector,
             activity,
             fileTransfers,
-            sessionGroups)
+            sessionGroups,
+            approvalNotifications)
     {
         ArgumentNullException.ThrowIfNull(runtimeCommands);
     }
@@ -119,7 +122,8 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         Func<int, int>? jitterSelector = null,
         ActiveRuntimeActivityCoordinator? activity = null,
         IBridgeActiveFileTransferCoordinator? fileTransfers = null,
-        IBridgeActiveSessionGroupCoordinator? sessionGroups = null)
+        IBridgeActiveSessionGroupCoordinator? sessionGroups = null,
+        IBridgeActiveApprovalNotifier? approvalNotifications = null)
     {
         this.options = options;
         this.stateSink = stateSink;
@@ -131,6 +135,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         this.activity = activity;
         this.fileTransfers = fileTransfers;
         this.sessionGroups = sessionGroups;
+        this.approvalNotifications = approvalNotifications;
         clock = timeProvider ?? TimeProvider.System;
         this.retryDelayOverride = retryDelayOverride;
         selectJitter = jitterSelector ?? (maximum => Random.Shared.Next(maximum + 1));
@@ -315,6 +320,26 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             ? Generation(runtimeEvent.Session!.ExternalId)
             : 0;
         await stateSink.HandleAsync(runtimeEvent, cancellationToken);
+        if (runtimeEvent.EventType == RuntimeEventTypes.ApprovalRequested &&
+            approvalNotifications is not null)
+        {
+            try
+            {
+                await approvalNotifications.NotifyPendingAsync(
+                    RequiredString(runtimeEvent.Payload, "requestId"),
+                    runtimeEvent.Session!.ExternalId,
+                    cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                // Approval state is already durable. Feishu delivery is an
+                // idempotent side channel and must not reject the Runtime event.
+            }
+        }
         if (runtimeEvent.EventType == RuntimeEventTypes.SessionStarted &&
             sessionGroups is not null)
         {

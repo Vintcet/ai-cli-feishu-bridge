@@ -186,6 +186,9 @@ public static class BridgeHostApplication
             services.GetRequiredService<ActiveFeishuFileTransferCoordinator>());
         services.AddSingleton<ActiveFeishuPromptCoordinator>();
         services.AddSingleton<ActiveFeishuApprovalCoordinator>();
+        services.AddSingleton<ActiveFeishuApprovalNotificationCoordinator>();
+        services.AddSingleton<IBridgeActiveApprovalNotifier>(services =>
+            services.GetRequiredService<ActiveFeishuApprovalNotificationCoordinator>());
         services.AddSingleton<ActiveFeishuInputCoordinator>();
         services.AddSingleton<ActiveFeishuIntentHandler>();
         services.AddSingleton<IBridgeFeishuIntentHandler>(services =>
@@ -249,7 +252,9 @@ public static class BridgeHostApplication
             activity: services.GetRequiredService<ActiveRuntimeActivityCoordinator>(),
             fileTransfers: services.GetRequiredService<IBridgeActiveFileTransferCoordinator>(),
             sessionGroups:
-                services.GetRequiredService<IBridgeActiveSessionGroupCoordinator>()));
+                services.GetRequiredService<IBridgeActiveSessionGroupCoordinator>(),
+            approvalNotifications:
+                services.GetRequiredService<IBridgeActiveApprovalNotifier>()));
         services.AddSingleton<IBridgeActiveRuntimeRetryCoordinator>(services =>
             services.GetRequiredService<ActiveRuntimeRetryCoordinator>());
         services.AddSingleton<IBridgeRuntimeEventHandler>(services =>
