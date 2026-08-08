@@ -21,6 +21,8 @@ internal sealed class ActiveSessionGroupCoordinator :
     IDisposable
 {
     private const int MaximumErrorLength = 500;
+    private const string DefaultRetryError =
+        "飞书群创建失败，请检查应用权限后重试。";
     private static readonly TimeSpan DefaultInactiveAge = TimeSpan.FromDays(7);
     private readonly object sync = new();
     private readonly BridgeHostOptions options;
@@ -141,6 +143,101 @@ internal sealed class ActiveSessionGroupCoordinator :
         string sessionId,
         CancellationToken cancellationToken = default)
     {
+        return await EnsureCoreAsync(sessionId, forceRetry: false, cancellationToken);
+    }
+
+    public async ValueTask<BridgeSessionGroupRetryResult> RetryAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        cancellationToken.ThrowIfCancellationRequested();
+        EnsureStarted();
+
+        var store = await storeOwner.ReadAsync(cancellationToken);
+        if (!store.Sessions.Sessions.TryGetValue(sessionId, out var session) ||
+            !ExtensionBoolean(session, "managedByAssistant"))
+        {
+            return RetryFailed("这个会话不存在，或不是由助手创建的。");
+        }
+        if (ExtensionString(session, "feishuChatId") is { } connectedChat)
+        {
+            return RetryConnected(session, connectedChat);
+        }
+
+        var numbered = await stateOwner.EnsureSessionGroupOrdinalAsync(
+            sessionId,
+            cancellationToken);
+        if (!numbered.Succeeded || numbered.Session is null ||
+            ExtensionPositiveInteger(
+                numbered.Session,
+                "feishuChatOrdinal") is not { } ordinal)
+        {
+            return RetryFailed(numbered.Error ?? DefaultRetryError);
+        }
+
+        store = await storeOwner.ReadAsync(cancellationToken);
+        if (!store.Sessions.Sessions.TryGetValue(sessionId, out session) ||
+            !ExtensionBoolean(session, "managedByAssistant"))
+        {
+            return RetryFailed("这个会话不存在，或不是由助手创建的。");
+        }
+        if (ExtensionString(session, "feishuChatId") is { } racedChat)
+        {
+            return RetryConnected(session, racedChat);
+        }
+        if (ExtensionPositiveInteger(session, "feishuChatOrdinal") != ordinal)
+        {
+            return RetryFailed("会话群序号已变化，请重试。");
+        }
+
+        var ownerOpenId = store.Bindings.OwnerOpenId;
+        if (string.IsNullOrWhiteSpace(ownerOpenId))
+        {
+            return RetryFailed(DefaultRetryError);
+        }
+        var cleared = await stateOwner.ClearSessionGroupErrorAsync(
+            sessionId,
+            ordinal,
+            ownerOpenId,
+            cancellationToken);
+        if (!cleared.Succeeded)
+        {
+            store = await storeOwner.ReadAsync(cancellationToken);
+            if (store.Sessions.Sessions.TryGetValue(sessionId, out var latest) &&
+                ExtensionBoolean(latest, "managedByAssistant") &&
+                ExtensionString(latest, "feishuChatId") is { } rejectedChat)
+            {
+                return RetryConnected(latest, rejectedChat);
+            }
+            return RetryFailed(cleared.Error ?? DefaultRetryError);
+        }
+
+        var updated = await EnsureCoreAsync(
+            sessionId,
+            forceRetry: true,
+            cancellationToken);
+        if (updated is not null &&
+            ExtensionString(updated, "feishuChatId") is { } createdChat)
+        {
+            return new(
+                Succeeded: true,
+                AlreadyConnected: false,
+                ChatId: createdChat,
+                ChatName: ExtensionString(updated, "feishuChatName") ?? string.Empty,
+                Error: null);
+        }
+        return RetryFailed(
+            updated is null
+                ? DefaultRetryError
+                : ExtensionString(updated, "feishuChatError") ?? DefaultRetryError);
+    }
+
+    private async ValueTask<SessionStoreRecord?> EnsureCoreAsync(
+        string sessionId,
+        bool forceRetry,
+        CancellationToken cancellationToken)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
         cancellationToken.ThrowIfCancellationRequested();
         EnsureStarted();
@@ -158,7 +255,7 @@ internal sealed class ActiveSessionGroupCoordinator :
                 cancellationToken);
             return numbered.Session ?? session;
         }
-        if (ExtensionString(session, "feishuChatError") is not null ||
+        if ((!forceRetry && ExtensionString(session, "feishuChatError") is not null) ||
             string.IsNullOrWhiteSpace(store.Bindings.OwnerOpenId))
         {
             return session;
@@ -168,9 +265,16 @@ internal sealed class ActiveSessionGroupCoordinator :
         lock (sync)
         {
             EnsureStartedLocked();
-            if (!creates.TryGetValue(sessionId, out operation!))
+            if (creates.TryGetValue(sessionId, out operation!) &&
+                operation.IsCompleted)
             {
-                operation = CreateAsync(sessionId, lifetime.Token);
+                creates.Remove(sessionId);
+                workers.Remove(operation);
+                operation = null!;
+            }
+            if (operation is null)
+            {
+                operation = CreateAsync(sessionId, forceRetry, lifetime.Token);
                 creates.Add(sessionId, operation);
                 workers.Add(operation);
                 _ = ObserveCreateAsync(sessionId, operation);
@@ -272,6 +376,7 @@ internal sealed class ActiveSessionGroupCoordinator :
 
     private async Task<SessionStoreRecord?> CreateAsync(
         string sessionId,
+        bool forceRetry,
         CancellationToken cancellationToken)
     {
         var prepared = await stateOwner.EnsureSessionGroupOrdinalAsync(
@@ -294,7 +399,7 @@ internal sealed class ActiveSessionGroupCoordinator :
         }
         var ownerOpenId = store.Bindings.OwnerOpenId;
         if (ExtensionString(session, "feishuChatId") is not null ||
-            ExtensionString(session, "feishuChatError") is not null ||
+            (!forceRetry && ExtensionString(session, "feishuChatError") is not null) ||
             string.IsNullOrWhiteSpace(ownerOpenId))
         {
             return session;
@@ -514,6 +619,24 @@ internal sealed class ActiveSessionGroupCoordinator :
             }
         }
     }
+
+    private static BridgeSessionGroupRetryResult RetryConnected(
+        SessionStoreRecord session,
+        string chatId) =>
+        new(
+            Succeeded: true,
+            AlreadyConnected: true,
+            ChatId: chatId,
+            ChatName: ExtensionString(session, "feishuChatName") ?? string.Empty,
+            Error: null);
+
+    private static BridgeSessionGroupRetryResult RetryFailed(string error) =>
+        new(
+            Succeeded: false,
+            AlreadyConnected: false,
+            ChatId: null,
+            ChatName: null,
+            Error: string.IsNullOrWhiteSpace(error) ? DefaultRetryError : error);
 
     private void EnsureActive()
     {

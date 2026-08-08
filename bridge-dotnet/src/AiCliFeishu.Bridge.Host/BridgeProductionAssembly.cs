@@ -50,6 +50,13 @@ internal sealed record BridgeSessionGroupNameUpdateResult(
     public bool Succeeded => Session is not null && Error is null;
 }
 
+internal sealed record BridgeSessionGroupRetryResult(
+    bool Succeeded,
+    bool AlreadyConnected,
+    string? ChatId,
+    string? ChatName,
+    string? Error);
+
 internal interface IBridgeActiveSessionGroupStateOwner
 {
     ValueTask<BridgeSessionGroupNameUpdateResult> EnsureSessionGroupOrdinalAsync(
@@ -73,6 +80,12 @@ internal interface IBridgeActiveSessionGroupStateOwner
         DateTimeOffset observedAt,
         CancellationToken cancellationToken = default);
 
+    ValueTask<BridgeSessionGroupNameUpdateResult> ClearSessionGroupErrorAsync(
+        string sessionId,
+        int expectedOrdinal,
+        string expectedOwnerOpenId,
+        CancellationToken cancellationToken = default);
+
     ValueTask<BridgeSessionGroupNameUpdateResult> UpdateSessionGroupNameAsync(
         string sessionId,
         string expectedChatId,
@@ -83,6 +96,10 @@ internal interface IBridgeActiveSessionGroupStateOwner
 internal interface IBridgeActiveSessionGroupCoordinator
 {
     ValueTask<SessionStoreRecord?> EnsureAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default);
+
+    ValueTask<BridgeSessionGroupRetryResult> RetryAsync(
         string sessionId,
         CancellationToken cancellationToken = default);
 

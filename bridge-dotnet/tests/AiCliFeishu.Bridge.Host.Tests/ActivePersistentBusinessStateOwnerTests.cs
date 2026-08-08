@@ -830,6 +830,81 @@ public sealed class ActivePersistentBusinessStateOwnerTests
         Assert.AreEqual(0, owner.Snapshot.Revision);
     }
 
+    [DataTestMethod]
+    [DataRow("owner", "管理员绑定已变化")]
+    [DataRow("ordinal", "序号已变化")]
+    [DataRow("binding", "群绑定已变化")]
+    public async Task SessionGroupErrorClearRejectsChangedBindingEvidence(
+        string mutation,
+        string expectedError)
+    {
+        var snapshot = AliasSnapshot(
+            AliasSession(
+                "session-target",
+                SessionStatuses.Waiting,
+                extensions: new()
+                {
+                    ["managedByAssistant"] = JsonSerializer.SerializeToElement(true),
+                    ["feishuChatOrdinal"] = JsonSerializer.SerializeToElement(1),
+                    ["feishuChatError"] =
+                        JsonSerializer.SerializeToElement("old permission error"),
+                    ["feishuChatErrorAt"] =
+                        JsonSerializer.SerializeToElement(Origin.ToString("O")),
+                })) with
+        {
+            Bindings = new BindingStoreDocument
+            {
+                OwnerOpenId = "owner",
+            },
+        };
+        var store = new RecordingStoreOwner(snapshot)
+        {
+            BeforeUpdate = current => mutation switch
+            {
+                "owner" => current with
+                {
+                    Bindings = new BindingStoreDocument
+                    {
+                        OwnerOpenId = "owner-new",
+                    },
+                },
+                "ordinal" => NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                    current,
+                    "session-target",
+                    new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                    {
+                        ["feishuChatOrdinal"] = JsonSerializer.SerializeToElement(2),
+                    }),
+                "binding" => NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                    current,
+                    "session-target",
+                    new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                    {
+                        ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-winner"),
+                    }),
+                _ => throw new AssertFailedException("未知测试变更。"),
+            },
+        };
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+
+        var result = await owner.ClearSessionGroupErrorAsync(
+            "session-target",
+            expectedOrdinal: 1,
+            expectedOwnerOpenId: "owner");
+
+        Assert.IsFalse(result.Succeeded);
+        StringAssert.Contains(result.Error!, expectedError);
+        Assert.AreEqual(
+            "old permission error",
+            store.Current.Sessions.Sessions["session-target"]
+                .ExtensionData!["feishuChatError"].GetString());
+        Assert.AreEqual(
+            Origin.ToString("O"),
+            store.Current.Sessions.Sessions["session-target"]
+                .ExtensionData!["feishuChatErrorAt"].GetString());
+    }
+
     [TestMethod]
     public async Task RejectsPassiveOptionsAndRequiresAnOpenProductionStore()
     {
@@ -999,6 +1074,7 @@ public sealed class ActivePersistentBusinessStateOwnerTests
 
         public bool IsOpen { get; set; } = true;
         public Exception? UpdateError { get; set; }
+        public Func<NodeStoreSnapshot, NodeStoreSnapshot>? BeforeUpdate { get; set; }
         public NodeStoreSnapshot Current => current;
         public int Updates { get; private set; }
         public BridgeProductionStoreSnapshot Snapshot => new(
@@ -1026,6 +1102,12 @@ public sealed class ActivePersistentBusinessStateOwnerTests
             if (UpdateError is not null)
             {
                 return ValueTask.FromException(UpdateError);
+            }
+            var beforeUpdate = BeforeUpdate;
+            BeforeUpdate = null;
+            if (beforeUpdate is not null)
+            {
+                current = beforeUpdate(current);
             }
             Updates++;
             current = update(current);

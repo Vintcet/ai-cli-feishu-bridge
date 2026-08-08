@@ -99,6 +99,8 @@ public static class BridgeControlApi
             return Results.Ok(status.Snapshot());
         });
 
+        MapSessionGroupControlApi(app);
+
         app.MapPost("/control/runtime-events", async (
             HttpRequest request,
             IRuntimeEventSink runtimeEvents,
@@ -476,6 +478,116 @@ public static class BridgeControlApi
             path,
             (Func<HttpContext, Task<IResult>>)(context =>
                 HandleOpenCodeEndpointIngressAsync(context, register)));
+
+    internal static void MapSessionGroupControlApi(WebApplication app)
+    {
+        ArgumentNullException.ThrowIfNull(app);
+        app.MapPost(
+            "/sessions/feishu-group/retry",
+            (Func<HttpContext, Task<IResult>>)HandleSessionGroupRetryAsync);
+    }
+
+    private static async Task<IResult> HandleSessionGroupRetryAsync(
+        HttpContext context)
+    {
+        const int maximumBodyBytes = 1024 * 1024;
+        var request = context.Request;
+        var cancellationToken = request.HttpContext.RequestAborted;
+        if (!HasApplicationJsonContentType(request))
+        {
+            return Results.Json(
+                new ControlError(false, "请求必须使用 application/json。"),
+                statusCode: StatusCodes.Status415UnsupportedMediaType);
+        }
+        if (IsCrossSite(request))
+        {
+            return Results.Json(
+                new ControlError(false, "拒绝跨站请求。"),
+                statusCode: StatusCodes.Status403Forbidden);
+        }
+        var tokenProvider = context.RequestServices
+            .GetRequiredService<IBridgeControlTokenProvider>();
+        if (!await IsAuthenticatedAsync(request, tokenProvider, cancellationToken))
+        {
+            return Results.Json(
+                new ControlError(false, "本机控制令牌无效。"),
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        var body = await ReadLimitedJsonObjectAsync(
+            request,
+            maximumBodyBytes,
+            cancellationToken);
+        if (body.Status is ManagedJsonReadStatus.TooLarge)
+        {
+            return Results.Json(
+                new ControlError(false, "请求体不能超过 1 MiB。"),
+                statusCode: StatusCodes.Status413PayloadTooLarge);
+        }
+        if (body.Status is not ManagedJsonReadStatus.Valid)
+        {
+            return Results.Json(
+                new ControlError(false, "请求格式不正确。"),
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var sessionId = body.Value.TryGetProperty("sessionId", out var sessionValue) &&
+            sessionValue.ValueKind is JsonValueKind.String
+                ? sessionValue.GetString()?.Trim()
+                : null;
+        if (string.IsNullOrWhiteSpace(sessionId) || sessionId.Length > 256)
+        {
+            return Results.Json(
+                new ControlError(false, "会话 ID 参数不正确。"),
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        var options = context.RequestServices
+            .GetRequiredService<BridgeHostOptions>();
+        if (options.OwnershipMode is not BridgeOwnershipMode.Active)
+        {
+            return Results.Json(
+                new ControlError(false, "Passive Host 不重试会话群。"),
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+
+        var businessState = context.RequestServices
+            .GetRequiredService<IBridgeControlBusinessStateSource>();
+        if (!businessState.Snapshot.Initialized)
+        {
+            return Results.Json(
+                new ControlError(false, "业务状态尚未从 Store 初始化。"),
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+
+        try
+        {
+            var coordinator = context.RequestServices
+                .GetRequiredService<IBridgeActiveSessionGroupCoordinator>();
+            var result = await coordinator.RetryAsync(
+                sessionId,
+                cancellationToken);
+            if (!result.Succeeded)
+            {
+                return Results.Json(
+                    new ControlError(false, result.Error ?? "飞书群创建失败，请重试。"),
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+            return Results.Ok(new
+            {
+                ok = true,
+                alreadyConnected = result.AlreadyConnected,
+                chatId = result.ChatId,
+                chatName = result.ChatName ?? string.Empty,
+            });
+        }
+        catch (InvalidOperationException)
+        {
+            return Results.Json(
+                new ControlError(false, "Active 会话群协调器当前不可用。"),
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+    }
 
     internal static void MapOpenCodeEndpointApi(WebApplication app)
     {

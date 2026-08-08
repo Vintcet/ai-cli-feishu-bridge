@@ -419,6 +419,58 @@ public sealed class BridgeControlApiTests
     }
 
     [TestMethod]
+    public async Task SessionGroupRetryEndpointAuthenticatesAndFailsClosedInPassiveHost()
+    {
+        using var missingToken = await client!.PostAsJsonAsync(
+            "/sessions/feishu-group/retry",
+            new { sessionId = "session-1" });
+        Assert.AreEqual(HttpStatusCode.Unauthorized, missingToken.StatusCode);
+
+        using var crossSite = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/sessions/feishu-group/retry")
+        {
+            Content = JsonContent.Create(new { sessionId = "session-1" }),
+        };
+        crossSite.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        crossSite.Headers.Add("Sec-Fetch-Site", "cross-site");
+        using var crossSiteResponse = await client!.SendAsync(crossSite);
+        Assert.AreEqual(HttpStatusCode.Forbidden, crossSiteResponse.StatusCode);
+
+        using var wrongMediaType = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/sessions/feishu-group/retry")
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "text/plain"),
+        };
+        wrongMediaType.Headers.Add(
+            BridgeControlApi.ControlTokenHeader,
+            "secret-token");
+        using var mediaResponse = await client.SendAsync(wrongMediaType);
+        Assert.AreEqual(HttpStatusCode.UnsupportedMediaType, mediaResponse.StatusCode);
+
+        using var invalid = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/sessions/feishu-group/retry")
+        {
+            Content = JsonContent.Create(new { sessionId = 0 }),
+        };
+        invalid.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var invalidResponse = await client.SendAsync(invalid);
+        Assert.AreEqual(HttpStatusCode.BadRequest, invalidResponse.StatusCode);
+
+        using var valid = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/sessions/feishu-group/retry")
+        {
+            Content = JsonContent.Create(new { sessionId = "session-1" }),
+        };
+        valid.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var validResponse = await client.SendAsync(valid);
+        Assert.AreEqual(HttpStatusCode.ServiceUnavailable, validResponse.StatusCode);
+    }
+
+    [TestMethod]
     public async Task ManagedIngressRoutesAuthenticateAndFailClosedInPassiveHost()
     {
         var paths = new[]

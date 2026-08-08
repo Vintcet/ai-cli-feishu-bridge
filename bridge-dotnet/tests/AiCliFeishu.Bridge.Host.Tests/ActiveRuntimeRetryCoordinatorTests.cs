@@ -969,6 +969,16 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult<SessionStoreRecord?>(null);
 
+        public ValueTask<BridgeSessionGroupRetryResult> RetryAsync(
+            string sessionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new BridgeSessionGroupRetryResult(
+                false,
+                false,
+                null,
+                null,
+                "recording coordinator"));
+
         public ValueTask<IReadOnlyList<string>> NotificationChatsAsync(
             string sessionId,
             CancellationToken cancellationToken = default)

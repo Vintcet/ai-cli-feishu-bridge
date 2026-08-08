@@ -1153,6 +1153,15 @@ public sealed class ActiveFeishuIntentHandlerTests
             throw new AssertFailedException(
                 "别名群名同步测试不应记录会话群创建错误。");
 
+        public ValueTask<BridgeSessionGroupNameUpdateResult>
+            ClearSessionGroupErrorAsync(
+                string sessionId,
+                int expectedOrdinal,
+                string expectedOwnerOpenId,
+                CancellationToken cancellationToken = default) =>
+            throw new AssertFailedException(
+                "别名群名同步测试不应清除会话群创建错误。");
+
         public async ValueTask<BridgeSessionGroupNameUpdateResult>
             UpdateSessionGroupNameAsync(
                 string sessionId,

@@ -109,6 +109,206 @@ public sealed class ActiveSessionGroupCoordinatorTests
     }
 
     [TestMethod]
+    public async Task ExplicitRetryClearsPersistedErrorAndCreatesTheGroup()
+    {
+        var store = new RecordingStoreOwner(Snapshot(
+            ownerOpenId: "owner",
+            Session(
+                "session-retry",
+                Origin,
+                extensions: new()
+                {
+                    ["feishuChatError"] =
+                        JsonSerializer.SerializeToElement("old permission error"),
+                    ["feishuChatErrorAt"] =
+                        JsonSerializer.SerializeToElement(Origin.ToString("O")),
+                })));
+        var gateway = new RecordingGateway
+        {
+            CreateError = new HttpRequestException("missing create chat permission"),
+        };
+        var (state, coordinator) = Owners(store, gateway);
+        await state.StartAsync(CancellationToken.None);
+        await coordinator.StartAsync(CancellationToken.None);
+        Assert.AreEqual(0, gateway.CreateAttempts);
+
+        gateway.CreateError = null;
+        var result = await coordinator.RetryAsync("session-retry");
+
+        Assert.IsTrue(result.Succeeded);
+        Assert.IsFalse(result.AlreadyConnected);
+        Assert.AreEqual("chat-created-1", result.ChatId);
+        Assert.AreEqual("Codex｜project", result.ChatName);
+        Assert.IsNull(
+            ExtensionString(store.Current, "session-retry", "feishuChatError"));
+        Assert.IsNull(
+            ExtensionString(store.Current, "session-retry", "feishuChatErrorAt"));
+        Assert.AreEqual(1, gateway.CreateAttempts);
+
+        await coordinator.StopAsync(CancellationToken.None);
+        coordinator.Dispose();
+    }
+
+    [TestMethod]
+    public async Task RetryOfAnAlreadyConnectedGroupIsIdempotent()
+    {
+        var store = new RecordingStoreOwner(Snapshot(
+            ownerOpenId: "owner",
+            Session(
+                "session-connected",
+                Origin,
+                extensions: new()
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-connected"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("Codex｜project"),
+                    ["feishuChatOrdinal"] = JsonSerializer.SerializeToElement(1),
+                })));
+        var gateway = new RecordingGateway();
+        var (state, coordinator) = Owners(store, gateway);
+        await state.StartAsync(CancellationToken.None);
+        await coordinator.StartAsync(CancellationToken.None);
+
+        var result = await coordinator.RetryAsync("session-connected");
+
+        Assert.IsTrue(result.Succeeded);
+        Assert.IsTrue(result.AlreadyConnected);
+        Assert.AreEqual("chat-connected", result.ChatId);
+        Assert.AreEqual("Codex｜project", result.ChatName);
+        Assert.AreEqual(0, gateway.CreateAttempts);
+
+        await coordinator.StopAsync(CancellationToken.None);
+        coordinator.Dispose();
+    }
+
+    [TestMethod]
+    public async Task ExplicitRetryPersistsAndReturnsTheLatestFailure()
+    {
+        var store = new RecordingStoreOwner(Snapshot(
+            ownerOpenId: "owner",
+            Session(
+                "session-retry-failed",
+                Origin,
+                extensions: new()
+                {
+                    ["feishuChatError"] =
+                        JsonSerializer.SerializeToElement("old permission error"),
+                    ["feishuChatErrorAt"] =
+                        JsonSerializer.SerializeToElement(Origin.AddHours(-1).ToString("O")),
+                })));
+        var gateway = new RecordingGateway
+        {
+            CreateError = new HttpRequestException("new create chat permission error"),
+        };
+        var (state, coordinator) = Owners(store, gateway);
+        await state.StartAsync(CancellationToken.None);
+        await coordinator.StartAsync(CancellationToken.None);
+
+        var result = await coordinator.RetryAsync("session-retry-failed");
+
+        Assert.IsFalse(result.Succeeded);
+        Assert.IsFalse(result.AlreadyConnected);
+        StringAssert.Contains(result.Error!, "new create chat permission error");
+        Assert.AreEqual(
+            result.Error,
+            ExtensionString(
+                store.Current,
+                "session-retry-failed",
+                "feishuChatError"));
+        Assert.AreEqual(
+            Origin.ToString("O"),
+            ExtensionString(
+                store.Current,
+                "session-retry-failed",
+                "feishuChatErrorAt"));
+        Assert.AreEqual(1, gateway.CreateAttempts);
+
+        await coordinator.StopAsync(CancellationToken.None);
+        coordinator.Dispose();
+    }
+
+    [TestMethod]
+    public async Task ConcurrentExplicitRetriesShareOneRemoteCreate()
+    {
+        var store = new RecordingStoreOwner(Snapshot(
+            ownerOpenId: "owner",
+            Session(
+                "session-retry-concurrent",
+                Origin,
+                extensions: new()
+                {
+                    ["feishuChatError"] =
+                        JsonSerializer.SerializeToElement("old permission error"),
+                    ["feishuChatErrorAt"] =
+                        JsonSerializer.SerializeToElement(Origin.ToString("O")),
+                })));
+        var gateway = new RecordingGateway
+        {
+            CreateRelease = new(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        var (state, coordinator) = Owners(store, gateway);
+        await state.StartAsync(CancellationToken.None);
+        await coordinator.StartAsync(CancellationToken.None);
+
+        var first = coordinator.RetryAsync("session-retry-concurrent").AsTask();
+        await gateway.CreateStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var second = coordinator.RetryAsync("session-retry-concurrent").AsTask();
+        Assert.AreEqual(1, gateway.CreateAttempts);
+
+        gateway.CreateRelease.SetResult();
+        var results = await Task.WhenAll(first, second);
+
+        Assert.IsTrue(results.All(result => result.Succeeded));
+        Assert.AreEqual(1, gateway.CreateAttempts);
+        Assert.AreEqual(results[0].ChatId, results[1].ChatId);
+        Assert.AreEqual(1, gateway.Welcome.Count);
+
+        await coordinator.StopAsync(CancellationToken.None);
+        coordinator.Dispose();
+    }
+
+    [TestMethod]
+    public async Task BindingWonDuringErrorClearMakesRetryIdempotentlyConnected()
+    {
+        var store = new RecordingStoreOwner(Snapshot(
+            ownerOpenId: "owner",
+            Session(
+                "session-retry-race",
+                Origin,
+                extensions: new()
+                {
+                    ["feishuChatOrdinal"] = JsonSerializer.SerializeToElement(1),
+                    ["feishuChatError"] =
+                        JsonSerializer.SerializeToElement("old permission error"),
+                    ["feishuChatErrorAt"] =
+                        JsonSerializer.SerializeToElement(Origin.ToString("O")),
+                })));
+        store.BeforeUpdate = current =>
+            NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                current,
+                "session-retry-race",
+                new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                {
+                    ["feishuChatId"] = JsonSerializer.SerializeToElement("chat-winner"),
+                    ["feishuChatName"] = JsonSerializer.SerializeToElement("winner"),
+                });
+        var gateway = new RecordingGateway();
+        var (state, coordinator) = Owners(store, gateway);
+        await state.StartAsync(CancellationToken.None);
+        await coordinator.StartAsync(CancellationToken.None);
+
+        var result = await coordinator.RetryAsync("session-retry-race");
+
+        Assert.IsTrue(result.Succeeded);
+        Assert.IsTrue(result.AlreadyConnected);
+        Assert.AreEqual("chat-winner", result.ChatId);
+        Assert.AreEqual("winner", result.ChatName);
+        Assert.AreEqual(0, gateway.CreateAttempts);
+
+        await coordinator.StopAsync(CancellationToken.None);
+        coordinator.Dispose();
+    }
+
+    [TestMethod]
     public async Task ConcurrentEnsureCallsShareOneRemoteCreate()
     {
         var store = new RecordingStoreOwner(Snapshot(ownerOpenId: "owner"));
@@ -369,6 +569,8 @@ public sealed class ActiveSessionGroupCoordinatorTests
             null,
             0);
 
+        public Func<NodeStoreSnapshot, NodeStoreSnapshot>? BeforeUpdate { get; set; }
+
         public void Replace(NodeStoreSnapshot value)
         {
             lock (sync)
@@ -397,6 +599,12 @@ public sealed class ActiveSessionGroupCoordinatorTests
             cancellationToken.ThrowIfCancellationRequested();
             lock (sync)
             {
+                var beforeUpdate = BeforeUpdate;
+                BeforeUpdate = null;
+                if (beforeUpdate is not null)
+                {
+                    current = beforeUpdate(current);
+                }
                 current = update(current);
             }
             return ValueTask.CompletedTask;

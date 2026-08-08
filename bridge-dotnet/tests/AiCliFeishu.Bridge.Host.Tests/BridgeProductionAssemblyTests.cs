@@ -1359,6 +1359,16 @@ public sealed class BridgeProductionAssemblyTests
                 "recording owner"));
 
         public ValueTask<BridgeSessionGroupNameUpdateResult>
+            ClearSessionGroupErrorAsync(
+                string sessionId,
+                int expectedOrdinal,
+                string expectedOwnerOpenId,
+                CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new BridgeSessionGroupNameUpdateResult(
+                null,
+                "recording owner"));
+
+        public ValueTask<BridgeSessionGroupNameUpdateResult>
             UpdateSessionGroupNameAsync(
                 string sessionId,
                 string expectedChatId,
@@ -1437,6 +1447,16 @@ public sealed class BridgeProductionAssemblyTests
             string sessionId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult<SessionStoreRecord?>(null);
+
+        public ValueTask<BridgeSessionGroupRetryResult> RetryAsync(
+            string sessionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new BridgeSessionGroupRetryResult(
+                false,
+                false,
+                null,
+                null,
+                "recording coordinator"));
 
         public ValueTask<IReadOnlyList<string>> NotificationChatsAsync(
             string sessionId,

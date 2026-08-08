@@ -387,6 +387,83 @@ internal sealed class ActivePersistentBusinessStateOwner(
     }
 
     public async ValueTask<BridgeSessionGroupNameUpdateResult>
+        ClearSessionGroupErrorAsync(
+            string sessionId,
+            int expectedOrdinal,
+            string expectedOwnerOpenId,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(expectedOrdinal);
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedOwnerOpenId);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            _ = RequireInitialized();
+            var observed = await storeOwner.ReadAsync(cancellationToken);
+            var rejection = SessionGroupBindingRejection(
+                observed,
+                sessionId,
+                expectedOrdinal,
+                expectedOwnerOpenId,
+                expectedChatId: null,
+                requireUnbound: true);
+            if (rejection is not null)
+            {
+                return rejection;
+            }
+            var observedSession = observed.Sessions.Sessions[sessionId];
+            if (ExtensionString(observedSession, "feishuChatError") is null &&
+                ExtensionString(observedSession, "feishuChatErrorAt") is null)
+            {
+                return new(observedSession, null);
+            }
+
+            BridgeSessionGroupNameUpdateResult? result = null;
+            await storeOwner.UpdateAsync(
+                store =>
+                {
+                    var currentRejection = SessionGroupBindingRejection(
+                        store,
+                        sessionId,
+                        expectedOrdinal,
+                        expectedOwnerOpenId,
+                        expectedChatId: null,
+                        requireUnbound: true);
+                    if (currentRejection is not null)
+                    {
+                        result = currentRejection;
+                        return store;
+                    }
+                    var current = store.Sessions.Sessions[sessionId];
+                    if (ExtensionString(current, "feishuChatError") is null &&
+                        ExtensionString(current, "feishuChatErrorAt") is null)
+                    {
+                        result = new(current, null);
+                        return store;
+                    }
+                    var updated = NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                        store,
+                        sessionId,
+                        new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                        {
+                            ["feishuChatError"] = null,
+                            ["feishuChatErrorAt"] = null,
+                        });
+                    result = new(updated.Sessions.Sessions[sessionId], null);
+                    return updated;
+                },
+                cancellationToken);
+            return result ?? throw new InvalidOperationException(
+                "会话群错误清除更新没有产生结果。 ");
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public async ValueTask<BridgeSessionGroupNameUpdateResult>
         UpdateSessionGroupNameAsync(
             string sessionId,
             string expectedChatId,
