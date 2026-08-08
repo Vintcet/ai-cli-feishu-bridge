@@ -280,6 +280,46 @@ public sealed class ActiveFeishuInputCoordinatorTests
     }
 
     [TestMethod]
+    public async Task QuotedSingleQuestionReplyCanResolveTheThreadRootRoute()
+    {
+        var fixture = Fixture.Create(
+            RuntimeNames.Codex,
+            questions: [Question("q1", multiple: false)]);
+        fixture.Store.Routes.Messages["question-card"] = new()
+        {
+            MessageId = "question-card",
+            SessionId = "session-1",
+            ChatId = "chat-1",
+            Kind = "input",
+            RequestId = "input-1",
+            CreatedAt = Origin.ToString("O"),
+        };
+        var intent = new FeishuIntent(
+            "event-root-reply",
+            FeishuIntentTypes.MessagePrompt,
+            "owner-1",
+            "chat-1",
+            "reply-message",
+            "p2p",
+            "trace-root-reply",
+            "fast",
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["rootMessageId"] = "question-card",
+            });
+
+        var handled = await fixture.Coordinator.TryHandleQuotedReplyAsync(
+            intent,
+            fixture.Store);
+
+        Assert.IsTrue(handled);
+        Assert.AreEqual(1, fixture.Runtime.Commands.Count);
+        Assert.IsTrue(fixture.Gateway.Replies.Any(item =>
+            item.MessageId == "reply-message" &&
+            item.Text.Contains("已把答案交给", StringComparison.Ordinal)));
+    }
+
+    [TestMethod]
     public async Task ExternalCompletionDuringDispatchUsesClaimedFeishuAnswers()
     {
         var fixture = Fixture.Create(

@@ -312,6 +312,33 @@ public sealed class ActiveFeishuIntentHandlerTests
     }
 
     [TestMethod]
+    public async Task QuotedApprovalTextIsHandledBeforePromptRouting()
+    {
+        var fixture = Fixture.Create(bound: true);
+        var result = await fixture.Handler.HandleAsync(new(
+            "event-quoted",
+            FeishuIntentTypes.MessagePrompt,
+            "owner-1",
+            "chat-1",
+            "reply-message",
+            "p2p",
+            "trace-quoted",
+            Text: "继续",
+            Parameters: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["parentMessageId"] = "approval-card",
+            }));
+
+        Assert.IsNull(result);
+        Assert.AreEqual(1, fixture.Gateway.Replies.Count);
+        StringAssert.Contains(fixture.Gateway.Replies[0].Text, "等待审批");
+        Assert.IsFalse(fixture.Gateway.Replies[0].Text.Contains(
+            "尚未迁移",
+            StringComparison.Ordinal));
+        Assert.AreEqual(0, fixture.RuntimeCommands.Commands.Count);
+    }
+
+    [TestMethod]
     public async Task RetryStopValidatesCycleAndReturnsCoordinatorResult()
     {
         var fixture = Fixture.Create(bound: true);
@@ -575,8 +602,41 @@ public sealed class ActiveFeishuIntentHandlerTests
                     [session.SessionId] = session,
                 },
             },
-            new RouteStoreDocument(),
-            new ApprovalStoreDocument(),
+            new RouteStoreDocument
+            {
+                Messages = new Dictionary<string, MessageRouteStoreRecord>(
+                    StringComparer.Ordinal)
+                {
+                    ["approval-card"] = new()
+                    {
+                        MessageId = "approval-card",
+                        SessionId = "session-12345678",
+                        RequestId = "approval-1",
+                        ChatId = "chat-1",
+                        Kind = "approval",
+                        CreatedAt = "2026-08-07T00:00:00.000Z",
+                    },
+                },
+            },
+            new ApprovalStoreDocument
+            {
+                Requests = new Dictionary<string, ApprovalStoreRecord>(
+                    StringComparer.Ordinal)
+                {
+                    ["approval-1"] = new()
+                    {
+                        RequestId = "approval-1",
+                        SessionId = "session-12345678",
+                        TurnId = "turn-1",
+                        Cwd = "K:\\workspace\\project-one",
+                        ToolName = "shell_command",
+                        ToolPreview = "git status",
+                        CreatedAt = "2026-08-07T00:00:00.000Z",
+                        ExpiresAt = "2026-08-07T00:05:00.000Z",
+                        Status = ApprovalStatuses.Pending,
+                    },
+                },
+            },
             new SettingsStoreDocument { WorkspaceRoot = workspaceRoot ?? "K:\\workspace" },
             new ControlTokenStoreDocument());
     }

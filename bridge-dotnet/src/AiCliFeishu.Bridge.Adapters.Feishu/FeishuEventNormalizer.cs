@@ -41,6 +41,11 @@ public sealed class FeishuEventNormalizer(IFeishuInboundDeduplicator deduplicato
         {
             parameters["parentMessageId"] = parentId;
         }
+        var rootId = Text(message, "root_id");
+        if (rootId is not null)
+        {
+            parameters["rootMessageId"] = rootId;
+        }
         return FeishuNormalizationResult.Accepted(new(
             eventId,
             MessageIntentType(text),

@@ -71,15 +71,10 @@ internal sealed class ActiveFeishuIntentHandler(
 
         return intent.IntentType switch
         {
-            FeishuIntentTypes.MessagePrompt => await inputs.TryHandleQuotedReplyAsync(
-                    intent,
-                    store,
-                    cancellationToken)
-                ? null
-                : await prompts.HandleAsync(
-                    intent,
-                    store,
-                    cancellationToken),
+            FeishuIntentTypes.MessagePrompt => await HandleMessagePromptAsync(
+                intent,
+                store,
+                cancellationToken),
             FeishuIntentTypes.ApprovalResolve or
             FeishuIntentTypes.ApprovalDeferToLocal => await approvals.HandleAsync(
                 intent,
@@ -338,6 +333,32 @@ internal sealed class ActiveFeishuIntentHandler(
         }
         await SendTextWithFallbackAsync(intent, message, cancellationToken);
         return null;
+    }
+
+    private async Task<FeishuCallbackResult?> HandleMessagePromptAsync(
+        FeishuIntent intent,
+        NodeStoreSnapshot store,
+        CancellationToken cancellationToken)
+    {
+        if (await inputs.TryHandleQuotedReplyAsync(
+                intent,
+                store,
+                cancellationToken))
+        {
+            return null;
+        }
+
+        var approval = await approvals.TryHandleQuotedReplyAsync(
+            intent,
+            store,
+            cancellationToken);
+        if (approval is not null)
+        {
+            await RespondTextAsync(intent, approval.ToastContent, cancellationToken);
+            return null;
+        }
+
+        return await prompts.HandleAsync(intent, store, cancellationToken);
     }
 
     private async Task<FeishuCallbackResult?> PresentCardAsync(

@@ -98,13 +98,14 @@ internal sealed class ActiveFeishuInputCoordinator(
     {
         ArgumentNullException.ThrowIfNull(intent);
         ArgumentNullException.ThrowIfNull(store);
-        var parentMessageId = Parameter(intent, "parentMessageId");
-        if (parentMessageId is null ||
-            !store.Routes.Messages.TryGetValue(parentMessageId, out var route) ||
-            !string.Equals(route.Kind, "input", StringComparison.Ordinal))
+        var quoted = ActiveFeishuQuotedRouteLookup.Find(intent, store.Routes);
+        if (quoted is null ||
+            !string.Equals(quoted.Route.Kind, "input", StringComparison.Ordinal))
         {
             return false;
         }
+        var route = quoted.Route;
+        var quotedMessageId = quoted.MessageId;
         if (string.IsNullOrWhiteSpace(route.RequestId))
         {
             await RespondAsync(intent, "这张问题卡缺少请求信息，已无法回答。", cancellationToken);
@@ -116,7 +117,7 @@ internal sealed class ActiveFeishuInputCoordinator(
             await RespondAsync(intent, "这组问题已经处理或失效。", cancellationToken);
             return true;
         }
-        var questionId = TargetQuestionId(route.RequestId, parentMessageId) ??
+        var questionId = TargetQuestionId(route.RequestId, quotedMessageId) ??
             ExtensionString(route.ExtensionData, "questionId") ??
             (context.Input.Questions.Count == 1
                 ? context.Input.Questions[0].Id
@@ -145,7 +146,7 @@ internal sealed class ActiveFeishuInputCoordinator(
             return true;
         }
         var selectionKey = route.ChatId;
-        RegisterTarget(context, parentMessageId, question.Id, selectionKey);
+        RegisterTarget(context, quotedMessageId, question.Id, selectionKey);
         var result = await RecordAnswerAsync(
             intent,
             context,

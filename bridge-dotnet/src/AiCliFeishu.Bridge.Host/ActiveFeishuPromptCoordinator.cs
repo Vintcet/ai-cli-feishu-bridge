@@ -101,12 +101,12 @@ internal sealed class ActiveFeishuPromptCoordinator(
             }
         }
 
-        var quotedRoute = QuotedRoute(intent, store.Routes);
-        if (quotedRoute is not null && IsInteractiveRoute(quotedRoute))
+        var quotedRoute = ActiveFeishuQuotedRouteLookup.Find(intent, store.Routes);
+        if (quotedRoute is not null && IsInteractiveRoute(quotedRoute.Route))
         {
             await RejectAsync(
                 intent,
-                Session(store, quotedRoute.SessionId),
+                Session(store, quotedRoute.Route.SessionId),
                 "引用的审批或问答交互尚未迁移，请使用原卡片处理。",
                 cancellationToken);
             return null;
@@ -155,7 +155,7 @@ internal sealed class ActiveFeishuPromptCoordinator(
         {
             target = activeSessions.SingleOrDefault(session => string.Equals(
                 session.SessionId,
-                quotedRoute.SessionId,
+                quotedRoute.Route.SessionId,
                 StringComparison.Ordinal));
         }
         else if (activeSessions.Length == 1)
@@ -521,17 +521,6 @@ internal sealed class ActiveFeishuPromptCoordinator(
                 aliasMatch.Groups[1].Value,
                 aliasMatch.Groups[2].Value.Trim())
             : null;
-    }
-
-    private static MessageRouteStoreRecord? QuotedRoute(
-        FeishuIntent intent,
-        RouteStoreDocument routes)
-    {
-        var parentMessageId = intent.Parameters?.GetValueOrDefault("parentMessageId");
-        return !string.IsNullOrWhiteSpace(parentMessageId) &&
-            routes.Messages.TryGetValue(parentMessageId, out var route)
-                ? route
-                : null;
     }
 
     private static bool IsInteractiveRoute(MessageRouteStoreRecord route) =>

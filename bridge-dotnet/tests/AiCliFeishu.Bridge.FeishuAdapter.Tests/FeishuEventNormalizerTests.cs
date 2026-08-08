@@ -96,6 +96,29 @@ public sealed class FeishuEventNormalizerTests
     }
 
     [TestMethod]
+    public void MessagePreservesRootMetadataForThreadReplies()
+    {
+        var result = NewNormalizer().NormalizeMessage(
+            "event-root",
+            "trace-root",
+            Json("""
+                {
+                  "sender":{"sender_id":{"open_id":"owner"}},
+                  "message":{
+                    "message_id":"message-root",
+                    "root_id":"approval-card",
+                    "chat_id":"chat-1",
+                    "chat_type":"group",
+                    "message_type":"text",
+                    "content":"{\"text\":\"批准\"}"
+                  }
+                }
+                """));
+
+        Assert.AreEqual("approval-card", result.Intent!.Parameters!["rootMessageId"]);
+    }
+
+    [TestMethod]
     public void ObjectMessageContentIsAcceptedLikeTheFeishuStringForm()
     {
         var payload = JsonSerializer.Serialize(new

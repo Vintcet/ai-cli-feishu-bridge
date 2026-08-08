@@ -172,6 +172,64 @@ internal sealed class ActiveFeishuApprovalCoordinator(
         }
     }
 
+    public async Task<FeishuCallbackResult?> TryHandleQuotedReplyAsync(
+        FeishuIntent intent,
+        NodeStoreSnapshot store,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(intent);
+        ArgumentNullException.ThrowIfNull(store);
+        cancellationToken.ThrowIfCancellationRequested();
+        var quoted = ActiveFeishuQuotedRouteLookup.Find(intent, store.Routes);
+        if (quoted is null ||
+            !string.Equals(quoted.Route.Kind, "approval", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(quoted.Route.RequestId))
+        {
+            return new("warning", "这张审批卡缺少请求信息，已无法处理。");
+        }
+
+        var action = ApprovalActionFromText(intent.Text);
+        if (action is null)
+        {
+            return new(
+                "info",
+                "这个会话正在等待审批。请点击审批卡片按钮，或引用卡片回复“批准”“拒绝”或“本机确认”。");
+        }
+
+        var parameters = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["requestId"] = quoted.Route.RequestId,
+            ["sessionId"] = quoted.Route.SessionId,
+        };
+        var intentType = action == "desktop"
+            ? FeishuIntentTypes.ApprovalDeferToLocal
+            : FeishuIntentTypes.ApprovalResolve;
+        if (action is ApprovalResolutions.Allow or ApprovalResolutions.Deny)
+        {
+            parameters["resolution"] = action;
+        }
+        var result = await HandleAsync(
+            intent with
+            {
+                IntentType = intentType,
+                Parameters = parameters,
+            },
+            store,
+            cancellationToken);
+        return action == "desktop" &&
+            result.ToastType == "success"
+            ? result with
+            {
+                ToastContent =
+                    "已转回 PC 审批，电脑端审批窗口将在下一次状态刷新时弹出。",
+            }
+            : result;
+    }
+
     private static RuntimeCommandEnvelope Command(
         FeishuIntent intent,
         BridgeApprovalClaim claim,
@@ -298,4 +356,23 @@ internal sealed class ActiveFeishuApprovalCoordinator(
         RuntimeNames.OpenCode => "OpenCode",
         _ => "Codex",
     };
+
+    private static string? ApprovalActionFromText(string? text)
+    {
+        var normalized = new string((text ?? string.Empty)
+            .Where(character => !char.IsWhiteSpace(character) &&
+                character is not '，' and not '。' and not '！' and not '!')
+            .ToArray())
+            .ToLowerInvariant();
+        return normalized switch
+        {
+            "批准" or "允许" or "同意" or "approve" or "allow" =>
+                ApprovalResolutions.Allow,
+            "拒绝" or "不允许" or "deny" or "reject" =>
+                ApprovalResolutions.Deny,
+            "本机确认" or "本机审批" or "电脑确认" or "电脑审批" or "pc审批" =>
+                "desktop",
+            _ => null,
+        };
+    }
 }

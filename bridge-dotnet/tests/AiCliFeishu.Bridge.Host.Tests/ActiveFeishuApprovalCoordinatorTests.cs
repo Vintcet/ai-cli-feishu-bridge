@@ -93,6 +93,60 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
     }
 
     [TestMethod]
+    public async Task QuotedTextAllowUsesThePersistedApprovalRoute()
+    {
+        var fixture = Fixture.Create(RuntimeNames.Codex);
+
+        var result = await fixture.Coordinator.TryHandleQuotedReplyAsync(
+            QuotedIntent("批准", "parentMessageId", "card-owner"),
+            fixture.Store);
+
+        Assert.AreEqual("success", result!.ToastType);
+        Assert.AreEqual(1, fixture.Runtime.Commands.Count);
+        Assert.AreEqual(
+            ApprovalStatuses.Resolved,
+            fixture.State.Snapshot.Approvals.Requests["approval-1"].Status);
+        StringAssert.Contains(result.ToastContent, "已批准");
+    }
+
+    [TestMethod]
+    public async Task QuotedTextDesktopCanResolveAThreadRootRouteWithoutClaimingDecision()
+    {
+        var fixture = Fixture.Create(RuntimeNames.Codex, ready: false);
+
+        var result = await fixture.Coordinator.TryHandleQuotedReplyAsync(
+            QuotedIntent("电脑审批！", "rootMessageId", "card-group"),
+            fixture.Store);
+
+        Assert.AreEqual("success", result!.ToastType);
+        Assert.AreEqual(0, fixture.Runtime.Commands.Count);
+        Assert.AreEqual(
+            ApprovalStatuses.Pending,
+            fixture.State.Snapshot.Approvals.Requests["approval-1"].Status);
+        StringAssert.Contains(
+            result.ToastContent,
+            "电脑端审批窗口将在下一次状态刷新时弹出");
+        Assert.IsTrue(
+            fixture.Store.Approvals.Requests["approval-1"]
+                .ExtensionData!["desktopApprovalRequested"].GetBoolean());
+    }
+
+    [TestMethod]
+    public async Task QuotedTextWithUnknownApprovalActionReturnsUsageWithoutClaiming()
+    {
+        var fixture = Fixture.Create(RuntimeNames.Codex);
+
+        var result = await fixture.Coordinator.TryHandleQuotedReplyAsync(
+            QuotedIntent("继续", "parentMessageId", "card-owner"),
+            fixture.Store);
+
+        Assert.AreEqual("info", result!.ToastType);
+        StringAssert.Contains(result.ToastContent, "批准");
+        Assert.AreEqual(0, fixture.Runtime.Commands.Count);
+        Assert.AreEqual(0, fixture.State.Snapshot.Approvals.Claims.Count);
+    }
+
+    [TestMethod]
     public async Task TamperedTargetInvalidDecisionAndUnavailableRuntimeFailClosed()
     {
         var fixture = Fixture.Create(RuntimeNames.Codex, ready: false);
@@ -205,6 +259,23 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
             Parameters: parameters);
     }
 
+    private static FeishuIntent QuotedIntent(
+        string text,
+        string routeParameter,
+        string messageId) => new(
+        "event-quoted",
+        FeishuIntentTypes.MessagePrompt,
+        "owner-1",
+        "chat-1",
+        "reply-message",
+        "p2p",
+        "trace-quoted",
+        text,
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [routeParameter] = messageId,
+        });
+
     private static string CardText(FeishuCardView card) => string.Join(
         '\n',
         Descendants(card.Content)
@@ -303,7 +374,31 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
                     [session.SessionId] = session,
                 },
             },
-            new RouteStoreDocument(),
+            new RouteStoreDocument
+            {
+                Messages = new Dictionary<string, MessageRouteStoreRecord>(
+                    StringComparer.Ordinal)
+                {
+                    ["card-owner"] = new()
+                    {
+                        MessageId = "card-owner",
+                        SessionId = session.SessionId,
+                        RequestId = approval.RequestId,
+                        ChatId = "chat-1",
+                        Kind = "approval",
+                        CreatedAt = Origin.ToString("O"),
+                    },
+                    ["card-group"] = new()
+                    {
+                        MessageId = "card-group",
+                        SessionId = session.SessionId,
+                        RequestId = approval.RequestId,
+                        ChatId = "chat-1",
+                        Kind = "approval",
+                        CreatedAt = Origin.ToString("O"),
+                    },
+                },
+            },
             new ApprovalStoreDocument
             {
                 Requests = new Dictionary<string, ApprovalStoreRecord>(StringComparer.Ordinal)
