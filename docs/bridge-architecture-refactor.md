@@ -386,6 +386,7 @@ M5 先以被动模式建立 `AiCliFeishu.Bridge.Host` 装配根和测试边界�
 - 隔离恢复执行器已有真实子进程集成演练：测试专用 Host fixture 可选在每个随机临时数据目录中原子发布与自身 PID/Host/实例绑定的 `owner.json`，只在确认 leaseId 和 PID 仍属于自己时清理租约；演练覆盖离线提交前检查点启动真实 Node 并 CAS 收敛到 `RolledBack`、离线 `Completed` 启动真实 C# 且保持检查点字节不变、在线提交前 C# 经完整身份核对后停止并恢复真实 Node，以及实例身份不匹配时拒绝停止或启动任何 Owner。fixture 的租约在监听前建立、优雅退出时释放，交接检查直接读取该隔离租约，不读取生产 Store 或路径；
 - 桌面控制层新增仍未接入入口的 `BridgeHostPersistentCutoverCoordinator`：取得检查点写锁后先拒绝未完成/无效旧检查点，再在任何所有权副作用前持久化 `Planned` 和对应阶段意图；Node 停止一旦开始即使用不可取消安全序列，阶段观察成功后立即刷盘，回退停止 C# 时使用检查点绑定的完整 Host/API/PID/实例身份，且紧贴 Node 启动前再次检查 Store 刷盘、兼容性和租约缺失。只有 `Completed` 检查点写入成功才报告提交，持久化冲突、不可用或恢复要求只返回粗粒度结果并保留最后一个耐久阶段，不继续执行未记录副作用；
 - 真实进程适配器为持久化协调增加了窄范围启动绑定回调：`Process.Start` 取得 PID 后、启动方法返回前必须由协调器把 `DotNetStartRequested` 或 `NodeRollbackStartRequested` 原子写入检查点；绑定写入失败会直接停止协调器，恢复器随后只按已持久化证据决策。OS 进程建立与回调开始之间仍存在无法由当前进程 API 消除的极小崩溃窗口；该窗口保持保守人工恢复，不猜 PID、不凭 PID 停止 C#、不弱化身份验证。隔离测试覆盖写锁冲突、孤儿临时文件、取消边界、阶段写入失败/异常/CAS 冲突、启动返回异常、回退前二次交接、严格时间戳与检查点/公开结果信息最小化；
+- 持久化切换与恢复执行器现已在同一隔离真实进程演练中闭合：真实 Node 持有隔离租约启动，协调器停止 Node、确认租约释放、启动并验证真实 C#，再模拟最终 `Completed` 检查点发布失败；耐久状态保持在 `DotNetActiveVerified`，恢复执行器随后按同一文件版本和完整身份停止 C#、复核租约缺失、启动并验证新的 Node，最终 CAS 收敛到 `RolledBack`。全过程只使用随机回环端口、临时数据目录和测试 fixture，不接触生产 Store、CLI、飞书或桌面入口；
 - 切换事务、内存/持久化协调器、恢复执行器和真实进程适配器都没有被 `BridgeClient`、`MainForm`、`Program`、Host DI、启动配置或发布脚本注册；当前 `active` 所有权仍被硬性拒绝，Host 不连接真实飞书、不启动 CLI、不写生产 Store，Node 仍是唯一 Active Owner。
 
 被动 Host 的本地无外部副作用验证：

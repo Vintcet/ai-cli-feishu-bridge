@@ -16,6 +16,72 @@ public sealed class BridgeHostRecoveryProcessIntegrationTests
     private const string DotNetInstanceName = "production-dotnet";
 
     [TestMethod]
+    public async Task InterruptedPersistentCutoverRecoversFromARealDotNetToARealNode()
+    {
+        await using var environment = await IsolatedRecoveryEnvironment.CreateAsync();
+        var initialNodeProcessId = await environment.StartInitialFixtureAsync(
+            "node",
+            NodeInstanceName);
+        var coordinator = environment.CreatePersistentCoordinator(
+            async (writer, checkpoint, cancellationToken) =>
+            {
+                if (checkpoint.Stage is BridgeHostCutoverStage.Completed)
+                {
+                    return new(
+                        BridgeHostCutoverCheckpointWriteState.Unavailable,
+                        BridgeHostCutoverCheckpointReadState.Present);
+                }
+                return await writer.TryWriteAsync(checkpoint, cancellationToken);
+            });
+
+        var cutover = await coordinator.RunAsync(
+            NodeIdentity(initialNodeProcessId),
+            DotNetInstanceName);
+
+        Assert.AreEqual(BridgeHostPersistentCutoverState.Unavailable, cutover.State);
+        Assert.AreEqual(
+            BridgeHostCutoverStage.DotNetActiveVerified,
+            cutover.DurableSnapshot?.Stage);
+        Assert.IsFalse(IsProcessAlive(initialNodeProcessId));
+        Assert.AreEqual(0, environment.NodeStarts);
+        Assert.AreEqual(1, environment.DotNetStarts);
+        Assert.AreEqual(1, environment.StartedProcessIds.Count);
+        var dotNetProcessId = environment.StartedProcessIds[0];
+        Assert.IsTrue(IsProcessAlive(dotNetProcessId));
+        Assert.AreEqual(
+            BridgeHostCutoverStage.DotNetActiveVerified,
+            (await environment.ReadCheckpointAsync()).Stage);
+        await environment.AssertLiveLeaseAsync(
+            "dotnet",
+            DotNetInstanceName,
+            dotNetProcessId);
+
+        var recovery = await environment.Executor.RunAsync();
+
+        Assert.AreEqual(BridgeHostRecoveryExecutionState.Recovered, recovery.State);
+        Assert.AreEqual(
+            BridgeHostRecoveryDisposition.RollBackDotNetToNode,
+            recovery.Plan?.Disposition);
+        Assert.IsFalse(IsProcessAlive(dotNetProcessId));
+        Assert.AreEqual(1, environment.NodeStarts);
+        Assert.AreEqual(1, environment.DotNetStarts);
+        Assert.AreEqual(2, environment.StartedProcessIds.Count);
+        var recoveredNodeProcessId = environment.StartedProcessIds[1];
+        Assert.IsTrue(IsProcessAlive(recoveredNodeProcessId));
+
+        var checkpoint = await environment.ReadCheckpointAsync();
+        Assert.AreEqual(BridgeHostCutoverStage.RolledBack, checkpoint.Stage);
+        Assert.AreEqual(recoveredNodeProcessId, checkpoint.NodeRollbackProcessId);
+        Assert.AreEqual(
+            BridgeCutoverFailureReason.OwnershipUncertain,
+            checkpoint.FailureReason);
+        await environment.AssertLiveLeaseAsync(
+            "node",
+            NodeInstanceName,
+            recoveredNodeProcessId);
+    }
+
+    [TestMethod]
     public async Task OfflinePreCommitCheckpointRestartsARealNodeAndConvergesRollback()
     {
         await using var environment = await IsolatedRecoveryEnvironment.CreateAsync();
@@ -182,6 +248,15 @@ public sealed class BridgeHostRecoveryProcessIntegrationTests
         public string CheckpointPath =>
             Path.Combine(dataDirectory, BridgeHostCutoverCheckpointStore.CheckpointFileName);
 
+        public BridgeHostPersistentCutoverCoordinator CreatePersistentCoordinator(
+            BridgeHostPersistentCutoverCoordinator.WriteCheckpointAsync writeCheckpoint) =>
+            new(
+                dataDirectory,
+                operations,
+                TimeProvider.System,
+                static () => "integration-persistent-cutover",
+                writeCheckpoint);
+
         public static Task<IsolatedRecoveryEnvironment> CreateAsync()
         {
             var root = Path.Combine(
@@ -340,6 +415,15 @@ public sealed class BridgeHostRecoveryProcessIntegrationTests
     }
 
     private sealed record TrackedProcess(int ProcessId, string HostKind);
+
+    private static BridgeCutoverHostIdentity NodeIdentity(int processId) =>
+        new(
+            processId,
+            "node",
+            BridgeHostCutoverTransaction.CurrentManagementApiVersion,
+            "active",
+            ActiveOwner: true,
+            NodeInstanceName);
 
     private sealed class LeaseBackedStoreHandoffInspector(string dataDirectory) :
         IBridgeStoreHandoffInspector
