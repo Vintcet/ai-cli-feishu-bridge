@@ -1123,6 +1123,36 @@ public sealed class ActiveFeishuIntentHandlerTests
         { get; } = [];
         public Exception? UpdateError { get; set; }
 
+        public ValueTask<BridgeSessionGroupNameUpdateResult>
+            EnsureSessionGroupOrdinalAsync(
+                string sessionId,
+                CancellationToken cancellationToken = default) =>
+            throw new AssertFailedException(
+                "别名群名同步测试不应分配会话群序号。");
+
+        public ValueTask<BridgeSessionGroupNameUpdateResult>
+            BindSessionGroupAsync(
+                string sessionId,
+                int expectedOrdinal,
+                string expectedOwnerOpenId,
+                string chatId,
+                string name,
+                DateTimeOffset createdAt,
+                CancellationToken cancellationToken = default) =>
+            throw new AssertFailedException(
+                "别名群名同步测试不应创建会话群绑定。");
+
+        public ValueTask<BridgeSessionGroupNameUpdateResult>
+            RecordSessionGroupErrorAsync(
+                string sessionId,
+                int expectedOrdinal,
+                string expectedOwnerOpenId,
+                string error,
+                DateTimeOffset observedAt,
+                CancellationToken cancellationToken = default) =>
+            throw new AssertFailedException(
+                "别名群名同步测试不应记录会话群创建错误。");
+
         public async ValueTask<BridgeSessionGroupNameUpdateResult>
             UpdateSessionGroupNameAsync(
                 string sessionId,

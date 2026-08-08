@@ -52,11 +52,45 @@ internal sealed record BridgeSessionGroupNameUpdateResult(
 
 internal interface IBridgeActiveSessionGroupStateOwner
 {
+    ValueTask<BridgeSessionGroupNameUpdateResult> EnsureSessionGroupOrdinalAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default);
+
+    ValueTask<BridgeSessionGroupNameUpdateResult> BindSessionGroupAsync(
+        string sessionId,
+        int expectedOrdinal,
+        string expectedOwnerOpenId,
+        string chatId,
+        string name,
+        DateTimeOffset createdAt,
+        CancellationToken cancellationToken = default);
+
+    ValueTask<BridgeSessionGroupNameUpdateResult> RecordSessionGroupErrorAsync(
+        string sessionId,
+        int expectedOrdinal,
+        string expectedOwnerOpenId,
+        string error,
+        DateTimeOffset observedAt,
+        CancellationToken cancellationToken = default);
+
     ValueTask<BridgeSessionGroupNameUpdateResult> UpdateSessionGroupNameAsync(
         string sessionId,
         string expectedChatId,
         string name,
         CancellationToken cancellationToken = default);
+}
+
+internal interface IBridgeActiveSessionGroupCoordinator
+{
+    ValueTask<SessionStoreRecord?> EnsureAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default);
+
+    ValueTask<IReadOnlyList<string>> NotificationChatsAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default);
+
+    void ScheduleEnsure(string sessionId);
 }
 
 internal interface IBridgeActiveRuntimeStateSink
@@ -256,6 +290,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IBridgeActiveInputStateOwner),
         typeof(IBridgeActiveSessionAliasStateOwner),
         typeof(IBridgeActiveSessionGroupStateOwner),
+        typeof(IBridgeActiveSessionGroupCoordinator),
         typeof(IBridgeActiveFileTransferCoordinator),
         typeof(IBridgeFeishuCredentialSource),
         typeof(IBridgeManagedTerminalRegistrationDirectory),
@@ -276,6 +311,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveFeishuCredentialSource),
         typeof(ActiveFeishuEventSource),
         typeof(ActiveFeishuGateway),
+        typeof(ActiveSessionGroupCoordinator),
         typeof(ActiveFeishuPromptCoordinator),
         typeof(ActiveFeishuFileTransferCoordinator),
         typeof(ActiveFeishuApprovalCoordinator),
@@ -358,6 +394,7 @@ internal static class BridgeProductionAssemblyPreflight
     private static readonly Type[] activeFeishuConcreteServices =
     [
         typeof(ActiveFeishuPromptCoordinator),
+        typeof(ActiveSessionGroupCoordinator),
         typeof(ActiveFeishuApprovalCoordinator),
         typeof(ActiveFeishuInputCoordinator),
         typeof(ActiveFeishuIntentHandler),
@@ -375,6 +412,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IBridgeActiveInputStateOwner),
         typeof(IBridgeActiveSessionAliasStateOwner),
         typeof(IBridgeActiveSessionGroupStateOwner),
+        typeof(IBridgeActiveSessionGroupCoordinator),
         typeof(IBridgeFeishuIntentHandler),
         typeof(IFeishuIntentSink),
         typeof(IBridgeActiveFileTransferCoordinator),

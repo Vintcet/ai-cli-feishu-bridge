@@ -458,7 +458,7 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(typeof(ActiveProductionStoreOwner), storeOwner.ImplementationType);
         var subsystems = services.Where(descriptor =>
             descriptor.ServiceType == typeof(IBridgeHostSubsystem)).ToArray();
-        Assert.AreEqual(10, subsystems.Length);
+        Assert.AreEqual(11, subsystems.Length);
         Assert.IsTrue(subsystems.All(descriptor =>
             descriptor.ImplementationFactory is not null));
         var hostedServices = services.Where(descriptor =>
@@ -581,6 +581,15 @@ public sealed class BridgeProductionAssemblyTests
         var sessionGroupState = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgeActiveSessionGroupStateOwner));
         Assert.IsNotNull(sessionGroupState.ImplementationFactory);
+        Assert.AreEqual(
+            typeof(ActiveSessionGroupCoordinator),
+            services.Single(descriptor =>
+                descriptor.ServiceType == typeof(ActiveSessionGroupCoordinator))
+                .ImplementationType);
+        Assert.IsNotNull(services.Single(descriptor =>
+            descriptor.ServiceType ==
+                typeof(IBridgeActiveSessionGroupCoordinator))
+            .ImplementationFactory);
         Assert.AreEqual(
             typeof(BridgeControlStatusReader),
             services.Single(descriptor =>
@@ -986,6 +995,24 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void ActivePreflightRejectsSessionGroupCoordinatorThatCanOwnAnotherInstance()
+    {
+        var options = ActiveOptions();
+        var services = CompleteActiveServices();
+        services.RemoveAll<IBridgeActiveSessionGroupCoordinator>();
+        services.AddSingleton<IBridgeActiveSessionGroupCoordinator,
+            RecordingSessionGroupCoordinator>();
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeProductionAssemblyPreflight.Validate(options, services));
+
+        StringAssert.Contains(
+            error.Message,
+            nameof(IBridgeActiveSessionGroupCoordinator));
+        StringAssert.Contains(error.Message, "组合根工厂");
+    }
+
+    [TestMethod]
     public void ActivePreflightRejectsFeishuIntentSinkThatCanOwnAnotherInstance()
     {
         var options = ActiveOptions();
@@ -1144,6 +1171,11 @@ public sealed class BridgeProductionAssemblyTests
         services.AddSingleton<IBridgeActiveSessionGroupStateOwner>(provider =>
             (IBridgeActiveSessionGroupStateOwner)provider
                 .GetRequiredService<IBridgePersistentBusinessStateOwner>());
+        services.AddSingleton<ActiveSessionGroupCoordinator>();
+        services.AddSingleton<IBridgeActiveSessionGroupCoordinator>(provider =>
+            provider.GetRequiredService<ActiveSessionGroupCoordinator>());
+        services.AddSingleton<IBridgeHostSubsystem>(provider =>
+            provider.GetRequiredService<ActiveSessionGroupCoordinator>());
         services.AddSingleton<ActiveFeishuFileTransferCoordinator>();
         services.AddSingleton<IBridgeActiveFileTransferCoordinator>(provider =>
             provider.GetRequiredService<ActiveFeishuFileTransferCoordinator>());
@@ -1294,6 +1326,39 @@ public sealed class BridgeProductionAssemblyTests
                 "recording owner"));
 
         public ValueTask<BridgeSessionGroupNameUpdateResult>
+            EnsureSessionGroupOrdinalAsync(
+                string sessionId,
+                CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new BridgeSessionGroupNameUpdateResult(
+                null,
+                "recording owner"));
+
+        public ValueTask<BridgeSessionGroupNameUpdateResult>
+            BindSessionGroupAsync(
+                string sessionId,
+                int expectedOrdinal,
+                string expectedOwnerOpenId,
+                string chatId,
+                string name,
+                DateTimeOffset createdAt,
+                CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new BridgeSessionGroupNameUpdateResult(
+                null,
+                "recording owner"));
+
+        public ValueTask<BridgeSessionGroupNameUpdateResult>
+            RecordSessionGroupErrorAsync(
+                string sessionId,
+                int expectedOrdinal,
+                string expectedOwnerOpenId,
+                string error,
+                DateTimeOffset observedAt,
+                CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new BridgeSessionGroupNameUpdateResult(
+                null,
+                "recording owner"));
+
+        public ValueTask<BridgeSessionGroupNameUpdateResult>
             UpdateSessionGroupNameAsync(
                 string sessionId,
                 string expectedChatId,
@@ -1363,6 +1428,24 @@ public sealed class BridgeProductionAssemblyTests
             string sessionId,
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult<BridgeInputClaim?>(null);
+    }
+
+    private sealed class RecordingSessionGroupCoordinator :
+        IBridgeActiveSessionGroupCoordinator
+    {
+        public ValueTask<SessionStoreRecord?> EnsureAsync(
+            string sessionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<SessionStoreRecord?>(null);
+
+        public ValueTask<IReadOnlyList<string>> NotificationChatsAsync(
+            string sessionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<IReadOnlyList<string>>([]);
+
+        public void ScheduleEnsure(string sessionId)
+        {
+        }
     }
     private sealed class RecordingFeishuCredentialSource : IBridgeFeishuCredentialSource
     {

@@ -150,6 +150,27 @@ public sealed class ActivePersistentBusinessStateOwnerTests
     }
 
     [TestMethod]
+    public async Task OpenCodeSessionStartPersistsAssistantOwnershipMetadata()
+    {
+        var store = new RecordingStoreOwner(SnapshotFromMemory());
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+
+        await owner.HandleAsync(Event(
+            "opencode-session-started",
+            RuntimeEventTypes.SessionStarted,
+            Origin.AddMinutes(2),
+            new { model = "openai/gpt-5" },
+            RuntimeNames.OpenCode));
+
+        var session = store.Current.Sessions.Sessions["session-1"];
+        Assert.AreEqual(RuntimeNames.OpenCode, session.Runtime);
+        Assert.IsTrue(session.ExtensionData!["managedByAssistant"].GetBoolean());
+        Assert.IsTrue(session.ExtensionData["historyEligible"].GetBoolean());
+        Assert.AreEqual("opencode", session.ExtensionData["source"].GetString());
+    }
+
+    [TestMethod]
     public async Task ApprovalRequestPersistsRequiredNodeCompatibilityFields()
     {
         await WriteStoreAsync(SessionStatuses.Waiting, approvalStatus: null);
@@ -853,10 +874,11 @@ public sealed class ActivePersistentBusinessStateOwnerTests
         string eventId,
         string eventType,
         DateTimeOffset occurredAt,
-        object payload) => new()
+        object payload,
+        string runtime = RuntimeNames.Codex) => new()
         {
             ProtocolVersion = BridgeProtocolVersion.Current,
-            Runtime = RuntimeNames.Codex,
+            Runtime = runtime,
             Session = new RuntimeSessionReference
             {
                 ExternalId = "session-1",

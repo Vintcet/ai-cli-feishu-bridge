@@ -13,6 +13,46 @@ namespace AiCliFeishu.Bridge.Host.Tests;
 public sealed class ActiveRuntimeRetryCoordinatorTests
 {
     [TestMethod]
+    public async Task SessionStartSchedulesGroupOnlyAfterStatePersistence()
+    {
+        var actions = new ConcurrentQueue<string>();
+        var sessionGroups = new RecordingSessionGroupCoordinator(actions);
+        await using var fixture = await RetryFixture.CreateAsync(
+            sessionGroups: sessionGroups,
+            actions: actions);
+
+        await fixture.Coordinator.HandleAsync(Event(
+            "session-started",
+            RuntimeEventTypes.SessionStarted,
+            "session-started",
+            new { }));
+
+        CollectionAssert.AreEqual(
+            new[] { "state:session.started", $"group:{SessionId}" },
+            actions.ToArray());
+    }
+
+    [TestMethod]
+    public async Task CompletionUsesSessionGroupNotificationRouter()
+    {
+        var sessionGroups = new RecordingSessionGroupCoordinator(
+            chats: ["chat-session-group"]);
+        await using var fixture = await RetryFixture.CreateAsync(
+            sessionGroups: sessionGroups);
+
+        await fixture.Coordinator.HandleAsync(Event(
+            "completed-session-group",
+            RuntimeEventTypes.TurnCompleted,
+            "turn-session-group",
+            new { turnId = "turn-session-group", message = "done" }));
+
+        Assert.AreEqual("chat-session-group", fixture.Gateway.Sends.Single().ChatId);
+        CollectionAssert.AreEqual(
+            new[] { SessionId },
+            sessionGroups.NotificationRequests.ToArray());
+    }
+
+    [TestMethod]
     public async Task RetryableFailurePersistsBeforeNotificationAndDispatchesStandardPrompt()
     {
         await using var fixture = await RetryFixture.CreateAsync(
@@ -825,9 +865,11 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             bool ready = true,
             string runtime = RuntimeNames.Codex,
             TimeSpan? retryDelay = null,
-            Exception? stateError = null)
+            Exception? stateError = null,
+            IBridgeActiveSessionGroupCoordinator? sessionGroups = null,
+            ConcurrentQueue<string>? actions = null)
         {
-            var actions = new ConcurrentQueue<string>();
+            actions ??= new ConcurrentQueue<string>();
             store ??= new RecordingStoreOwner(StoreSnapshot(
                 chats ?? ["chat-1"],
                 autoRetry,
@@ -855,7 +897,8 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
                 new FeishuCardRenderer(),
                 retryDelayOverride: retryDelay ?? TimeSpan.FromSeconds(5),
                 jitterSelector: _ => 0,
-                fileTransfers: fileTransfers);
+                fileTransfers: fileTransfers,
+                sessionGroups: sessionGroups);
             await coordinator.StartAsync(CancellationToken.None);
             return new(
                 coordinator,
@@ -903,6 +946,39 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             }
             Completed = true;
         }
+    }
+
+    private sealed class RecordingSessionGroupCoordinator :
+        IBridgeActiveSessionGroupCoordinator
+    {
+        private readonly ConcurrentQueue<string>? actions;
+        private readonly IReadOnlyList<string> chats;
+
+        public RecordingSessionGroupCoordinator(
+            ConcurrentQueue<string>? actions = null,
+            IReadOnlyList<string>? chats = null)
+        {
+            this.actions = actions;
+            this.chats = chats ?? ["chat-group"];
+        }
+
+        public List<string> NotificationRequests { get; } = [];
+
+        public ValueTask<SessionStoreRecord?> EnsureAsync(
+            string sessionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<SessionStoreRecord?>(null);
+
+        public ValueTask<IReadOnlyList<string>> NotificationChatsAsync(
+            string sessionId,
+            CancellationToken cancellationToken = default)
+        {
+            NotificationRequests.Add(sessionId);
+            return ValueTask.FromResult(chats);
+        }
+
+        public void ScheduleEnsure(string sessionId) =>
+            actions?.Enqueue($"group:{sessionId}");
     }
 
     private sealed class RecordingStoreOwner(NodeStoreSnapshot current) :

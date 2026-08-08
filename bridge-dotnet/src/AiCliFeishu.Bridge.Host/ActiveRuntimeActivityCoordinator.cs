@@ -30,6 +30,7 @@ internal sealed class ActiveRuntimeActivityCoordinator :
     private readonly IBridgeProductionStoreOwner storeOwner;
     private readonly IFeishuGateway gateway;
     private readonly IFeishuCardRenderer renderer;
+    private readonly IBridgeActiveSessionGroupCoordinator? sessionGroups;
     private readonly TimeProvider clock;
     private readonly TimeSpan flushInterval;
     private readonly TimeSpan retryInterval;
@@ -47,12 +48,14 @@ internal sealed class ActiveRuntimeActivityCoordinator :
         IFeishuCardRenderer renderer,
         TimeProvider? timeProvider = null,
         TimeSpan? flushInterval = null,
-        TimeSpan? retryInterval = null)
+        TimeSpan? retryInterval = null,
+        IBridgeActiveSessionGroupCoordinator? sessionGroups = null)
     {
         this.options = options ?? throw new ArgumentNullException(nameof(options));
         this.storeOwner = storeOwner ?? throw new ArgumentNullException(nameof(storeOwner));
         this.gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
         this.renderer = renderer ?? throw new ArgumentNullException(nameof(renderer));
+        this.sessionGroups = sessionGroups;
         clock = timeProvider ?? TimeProvider.System;
         this.flushInterval = Positive(
             flushInterval ?? TimeSpan.FromSeconds(2),
@@ -427,7 +430,10 @@ internal sealed class ActiveRuntimeActivityCoordinator :
                 return true;
             }
 
-            var chats = NotificationChats(store, session);
+            var chats = await NotificationChatsAsync(
+                store,
+                session,
+                cancellationToken);
             if (chats.Count == 0)
             {
                 lock (sync)
@@ -817,10 +823,17 @@ internal sealed class ActiveRuntimeActivityCoordinator :
         };
     }
 
-    private static IReadOnlyList<string> NotificationChats(
+    private async ValueTask<IReadOnlyList<string>> NotificationChatsAsync(
         NodeStoreSnapshot store,
-        SessionStoreRecord session)
+        SessionStoreRecord session,
+        CancellationToken cancellationToken)
     {
+        if (sessionGroups is not null)
+        {
+            return await sessionGroups.NotificationChatsAsync(
+                session.SessionId,
+                cancellationToken);
+        }
         if (ExtensionBoolean(session, "managedByAssistant") &&
             ExtensionString(session, "feishuChatId") is { } sessionChat)
         {

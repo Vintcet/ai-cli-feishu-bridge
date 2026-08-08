@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using AiCliFeishu.Bridge.Adapters.Storage;
 using AiCliFeishu.Bridge.Core;
@@ -165,6 +167,218 @@ internal sealed class ActivePersistentBusinessStateOwner(
                 cancellationToken);
             return result ?? throw new InvalidOperationException(
                 "会话别名更新没有产生结果。 ");
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public async ValueTask<BridgeSessionGroupNameUpdateResult>
+        EnsureSessionGroupOrdinalAsync(
+            string sessionId,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            _ = RequireInitialized();
+            var observed = await storeOwner.ReadAsync(cancellationToken);
+            var prepared = AssignSessionGroupOrdinals(observed, sessionId);
+            if (prepared.Error is not null || !prepared.Changed)
+            {
+                return new(prepared.Session, prepared.Error);
+            }
+
+            BridgeSessionGroupNameUpdateResult? result = null;
+            await storeOwner.UpdateAsync(
+                store =>
+                {
+                    var current = AssignSessionGroupOrdinals(store, sessionId);
+                    result = new(current.Session, current.Error);
+                    return current.Store;
+                },
+                cancellationToken);
+            return result ?? throw new InvalidOperationException(
+                "会话群序号更新没有产生结果。 ");
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public async ValueTask<BridgeSessionGroupNameUpdateResult>
+        BindSessionGroupAsync(
+            string sessionId,
+            int expectedOrdinal,
+            string expectedOwnerOpenId,
+            string chatId,
+            string name,
+            DateTimeOffset createdAt,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(expectedOrdinal);
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedOwnerOpenId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(chatId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        if (name.Length > SessionGroupNameRules.MaximumLength)
+        {
+            return new(
+                null,
+                $"飞书群名称最多 {SessionGroupNameRules.MaximumLength} 个字符。");
+        }
+
+        var createdAtText = createdAt.ToUniversalTime().ToString("O");
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            _ = RequireInitialized();
+            var observed = await storeOwner.ReadAsync(cancellationToken);
+            var rejection = SessionGroupBindingRejection(
+                observed,
+                sessionId,
+                expectedOrdinal,
+                expectedOwnerOpenId,
+                chatId,
+                requireUnbound: false);
+            if (rejection is not null)
+            {
+                return rejection;
+            }
+            var observedSession = observed.Sessions.Sessions[sessionId];
+            if (SessionGroupBindingMatches(
+                    observedSession,
+                    chatId,
+                    name,
+                    createdAtText))
+            {
+                return new(observedSession, null);
+            }
+
+            BridgeSessionGroupNameUpdateResult? result = null;
+            await storeOwner.UpdateAsync(
+                store =>
+                {
+                    var currentRejection = SessionGroupBindingRejection(
+                        store,
+                        sessionId,
+                        expectedOrdinal,
+                        expectedOwnerOpenId,
+                        chatId,
+                        requireUnbound: false);
+                    if (currentRejection is not null)
+                    {
+                        result = currentRejection;
+                        return store;
+                    }
+
+                    var current = store.Sessions.Sessions[sessionId];
+                    if (SessionGroupBindingMatches(
+                            current,
+                            chatId,
+                            name,
+                            createdAtText))
+                    {
+                        result = new(current, null);
+                        return store;
+                    }
+                    var updated = NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                        store,
+                        sessionId,
+                        new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                        {
+                            ["feishuChatId"] = JsonSerializer.SerializeToElement(chatId),
+                            ["feishuChatName"] = JsonSerializer.SerializeToElement(name),
+                            ["feishuChatCreatedAt"] =
+                                JsonSerializer.SerializeToElement(createdAtText),
+                            ["feishuChatError"] = null,
+                            ["feishuChatErrorAt"] = null,
+                        });
+                    result = new(updated.Sessions.Sessions[sessionId], null);
+                    return updated;
+                },
+                cancellationToken);
+            return result ?? throw new InvalidOperationException(
+                "会话群绑定更新没有产生结果。 ");
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public async ValueTask<BridgeSessionGroupNameUpdateResult>
+        RecordSessionGroupErrorAsync(
+            string sessionId,
+            int expectedOrdinal,
+            string expectedOwnerOpenId,
+            string error,
+            DateTimeOffset observedAt,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(expectedOrdinal);
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedOwnerOpenId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(error);
+        if (error.Length > 500)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(error),
+                "会话群错误详情最多保留 500 个字符。");
+        }
+
+        var observedAtText = observedAt.ToUniversalTime().ToString("O");
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            _ = RequireInitialized();
+            var observed = await storeOwner.ReadAsync(cancellationToken);
+            var rejection = SessionGroupBindingRejection(
+                observed,
+                sessionId,
+                expectedOrdinal,
+                expectedOwnerOpenId,
+                expectedChatId: null,
+                requireUnbound: true);
+            if (rejection is not null)
+            {
+                return rejection;
+            }
+
+            BridgeSessionGroupNameUpdateResult? result = null;
+            await storeOwner.UpdateAsync(
+                store =>
+                {
+                    var currentRejection = SessionGroupBindingRejection(
+                        store,
+                        sessionId,
+                        expectedOrdinal,
+                        expectedOwnerOpenId,
+                        expectedChatId: null,
+                        requireUnbound: true);
+                    if (currentRejection is not null)
+                    {
+                        result = currentRejection;
+                        return store;
+                    }
+                    var updated = NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                        store,
+                        sessionId,
+                        new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                        {
+                            ["feishuChatError"] = JsonSerializer.SerializeToElement(error),
+                            ["feishuChatErrorAt"] =
+                                JsonSerializer.SerializeToElement(observedAtText),
+                        });
+                    result = new(updated.Sessions.Sessions[sessionId], null);
+                    return updated;
+                },
+                cancellationToken);
+            return result ?? throw new InvalidOperationException(
+                "会话群错误更新没有产生结果。 ");
         }
         finally
         {
@@ -1016,6 +1230,174 @@ internal sealed class ActivePersistentBusinessStateOwner(
         return null;
     }
 
+    private static SessionGroupOrdinalMutation AssignSessionGroupOrdinals(
+        NodeStoreSnapshot store,
+        string sessionId)
+    {
+        if (!store.Sessions.Sessions.TryGetValue(sessionId, out var target))
+        {
+            return new(store, null, false, "会话不存在或已经失效。");
+        }
+
+        var scope = SessionGroupScopeKey(target);
+        var siblings = store.Sessions.Sessions.Values
+            .Where(session =>
+                string.Equals(
+                    SessionGroupScopeKey(session),
+                    scope,
+                    StringComparison.Ordinal) &&
+                (string.Equals(
+                     session.SessionId,
+                     sessionId,
+                     StringComparison.Ordinal) ||
+                 ExtensionBoolean(session, "managedByAssistant") ||
+                 ExtensionString(session, "feishuChatId") is not null ||
+                 ExtensionPositiveInteger(session, "feishuChatOrdinal") is not null))
+            .OrderBy(SessionGroupOrderTime)
+            .ThenBy(session => session.SessionId, StringComparer.Ordinal)
+            .ToArray();
+        var used = siblings
+            .Select(session => ExtensionPositiveInteger(
+                session,
+                "feishuChatOrdinal"))
+            .Where(value => value is not null)
+            .Select(value => value!.Value)
+            .ToHashSet();
+
+        var updated = store;
+        var changed = false;
+        foreach (var session in siblings)
+        {
+            if (ExtensionPositiveInteger(
+                    session,
+                    "feishuChatOrdinal") is not null)
+            {
+                continue;
+            }
+            var ordinal = 1;
+            while (used.Contains(ordinal))
+            {
+                ordinal++;
+            }
+            updated = NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                updated,
+                session.SessionId,
+                new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                {
+                    ["feishuChatOrdinal"] = JsonSerializer.SerializeToElement(ordinal),
+                });
+            used.Add(ordinal);
+            changed = true;
+        }
+        return new(
+            updated,
+            updated.Sessions.Sessions[sessionId],
+            changed,
+            null);
+    }
+
+    private static BridgeSessionGroupNameUpdateResult?
+        SessionGroupBindingRejection(
+            NodeStoreSnapshot store,
+            string sessionId,
+            int expectedOrdinal,
+            string expectedOwnerOpenId,
+            string? expectedChatId,
+            bool requireUnbound)
+    {
+        if (!store.Sessions.Sessions.TryGetValue(sessionId, out var session) ||
+            !ExtensionBoolean(session, "managedByAssistant"))
+        {
+            return new(null, "会话不存在，或不是由助手创建的。");
+        }
+        if (!string.Equals(
+                store.Bindings.OwnerOpenId,
+                expectedOwnerOpenId,
+                StringComparison.Ordinal))
+        {
+            return new(null, "飞书管理员绑定已变化，请重试。");
+        }
+        if (ExtensionPositiveInteger(session, "feishuChatOrdinal") !=
+            expectedOrdinal)
+        {
+            return new(null, "会话群序号已变化，请重试。");
+        }
+        var currentChatId = ExtensionString(session, "feishuChatId");
+        if (requireUnbound && currentChatId is not null ||
+            expectedChatId is not null &&
+            currentChatId is not null &&
+            !string.Equals(
+                currentChatId,
+                expectedChatId,
+                StringComparison.Ordinal))
+        {
+            return new(null, "会话群绑定已变化，请重试。");
+        }
+        return null;
+    }
+
+    private static bool SessionGroupBindingMatches(
+        SessionStoreRecord session,
+        string chatId,
+        string name,
+        string createdAt) =>
+        string.Equals(
+            ExtensionString(session, "feishuChatId"),
+            chatId,
+            StringComparison.Ordinal) &&
+        string.Equals(
+            ExtensionString(session, "feishuChatName"),
+            name,
+            StringComparison.Ordinal) &&
+        string.Equals(
+            ExtensionString(session, "feishuChatCreatedAt"),
+            createdAt,
+            StringComparison.Ordinal) &&
+        ExtensionString(session, "feishuChatError") is null &&
+        ExtensionString(session, "feishuChatErrorAt") is null;
+
+    private static string SessionGroupScopeKey(SessionStoreRecord session)
+    {
+        var runtime = string.IsNullOrWhiteSpace(session.Runtime)
+            ? RuntimeNames.Codex
+            : session.Runtime;
+        var project = (session.ProjectName ?? string.Empty)
+            .Trim()
+            .Normalize(NormalizationForm.FormC)
+            .ToLower(CultureInfo.GetCultureInfo("en-US"));
+        return $"{runtime}\0{project}";
+    }
+
+    private static DateTimeOffset SessionGroupOrderTime(
+        SessionStoreRecord session)
+    {
+        var value = ExtensionString(session, "feishuChatCreatedAt") ??
+            session.OpenedAt;
+        return DateTimeOffset.TryParse(value, out var parsed)
+            ? parsed
+            : DateTimeOffset.MinValue;
+    }
+
+    private static int? ExtensionPositiveInteger(
+        ExtensibleStoreObject value,
+        string name) =>
+        value.ExtensionData is not null &&
+        value.ExtensionData.FirstOrDefault(item => string.Equals(
+            item.Key,
+            name,
+            StringComparison.OrdinalIgnoreCase))
+            is { Value.ValueKind: JsonValueKind.Number } item &&
+        item.Value.TryGetInt32(out var number) &&
+        number > 0
+            ? number
+            : null;
+
+    private sealed record SessionGroupOrdinalMutation(
+        NodeStoreSnapshot Store,
+        SessionStoreRecord? Session,
+        bool Changed,
+        string? Error);
+
     private static bool HasNonEmptyExtension(
         ExtensibleStoreObject value,
         string name) =>
@@ -1048,12 +1430,28 @@ internal sealed class ActivePersistentBusinessStateOwner(
         RuntimeEventEnvelope runtimeEvent)
     {
         if (runtimeEvent.EventType is not RuntimeEventTypes.SessionStarted ||
-            runtimeEvent.Payload.ValueKind is not JsonValueKind.Object ||
-            !runtimeEvent.Payload.TryGetProperty(
+            runtimeEvent.Payload.ValueKind is not JsonValueKind.Object)
+        {
+            return null;
+        }
+        var openCode = string.Equals(
+            runtimeEvent.Runtime,
+            RuntimeNames.OpenCode,
+            StringComparison.Ordinal);
+        if (!runtimeEvent.Payload.TryGetProperty(
                 "managedTerminalId",
                 out var terminalIdElement))
         {
-            return null;
+            return openCode
+                ? new(
+                    runtimeEvent.Session!.ExternalId,
+                    new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                    {
+                        ["managedByAssistant"] = JsonSerializer.SerializeToElement(true),
+                        ["historyEligible"] = JsonSerializer.SerializeToElement(true),
+                        ["source"] = JsonSerializer.SerializeToElement("opencode"),
+                    })
+                : null;
         }
         if (terminalIdElement.ValueKind is not JsonValueKind.String ||
             terminalIdElement.GetString() is not { } terminalId ||
@@ -1083,6 +1481,10 @@ internal sealed class ActivePersistentBusinessStateOwner(
             sourceElement.GetString() is { Length: > 0 } source)
         {
             values["source"] = JsonSerializer.SerializeToElement(source);
+        }
+        else if (openCode)
+        {
+            values["source"] = JsonSerializer.SerializeToElement("opencode");
         }
         return new(runtimeEvent.Session!.ExternalId, values);
     }

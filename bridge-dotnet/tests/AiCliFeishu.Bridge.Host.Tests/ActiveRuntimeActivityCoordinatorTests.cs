@@ -15,6 +15,28 @@ public sealed class ActiveRuntimeActivityCoordinatorTests
     private const string SessionId = "session-activity-1";
 
     [TestMethod]
+    public async Task ActivityUsesSessionGroupNotificationRouter()
+    {
+        var sessionGroups = new RecordingSessionGroupCoordinator(
+            ["chat-session-group"]);
+        await using var fixture = await Fixture.CreateAsync(
+            sessionGroups: sessionGroups,
+            flushInterval: TimeSpan.FromMilliseconds(20));
+
+        await fixture.Coordinator.RecordAsync(Activity(
+            "activity-session-group",
+            "turn-session-group",
+            RuntimeActivityKinds.ToolStarted,
+            "正在调用命令行"));
+        await WaitUntilAsync(() => fixture.Gateway.Sends.Count == 1);
+
+        Assert.AreEqual("chat-session-group", fixture.Gateway.Sends.Single().ChatId);
+        CollectionAssert.AreEqual(
+            new[] { SessionId },
+            sessionGroups.Requests.ToArray());
+    }
+
+    [TestMethod]
     public async Task DisabledSettingDoesNotSendActivityCard()
     {
         await using var fixture = await Fixture.CreateAsync(notifyActivity: false);
@@ -397,7 +419,8 @@ public sealed class ActiveRuntimeActivityCoordinatorTests
             RecordingStore? store = null,
             RecordingGateway? gateway = null,
             TimeSpan? flushInterval = null,
-            TimeSpan? retryInterval = null)
+            TimeSpan? retryInterval = null,
+            IBridgeActiveSessionGroupCoordinator? sessionGroups = null)
         {
             store ??= new RecordingStore(StoreSnapshot(
                 notifyActivity,
@@ -415,7 +438,8 @@ public sealed class ActiveRuntimeActivityCoordinatorTests
                 gateway,
                 new FeishuCardRenderer(),
                 flushInterval: flushInterval ?? TimeSpan.FromMilliseconds(30),
-                retryInterval: retryInterval ?? TimeSpan.FromMilliseconds(30));
+                retryInterval: retryInterval ?? TimeSpan.FromMilliseconds(30),
+                sessionGroups: sessionGroups);
             await coordinator.StartAsync(CancellationToken.None);
             return new(coordinator, store, gateway);
         }
@@ -424,6 +448,29 @@ public sealed class ActiveRuntimeActivityCoordinatorTests
         {
             await Coordinator.StopAsync(CancellationToken.None);
             Coordinator.Dispose();
+        }
+    }
+
+    private sealed class RecordingSessionGroupCoordinator(
+        IReadOnlyList<string> chats) : IBridgeActiveSessionGroupCoordinator
+    {
+        public List<string> Requests { get; } = [];
+
+        public ValueTask<SessionStoreRecord?> EnsureAsync(
+            string sessionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult<SessionStoreRecord?>(null);
+
+        public ValueTask<IReadOnlyList<string>> NotificationChatsAsync(
+            string sessionId,
+            CancellationToken cancellationToken = default)
+        {
+            Requests.Add(sessionId);
+            return ValueTask.FromResult(chats);
+        }
+
+        public void ScheduleEnsure(string sessionId)
+        {
         }
     }
 

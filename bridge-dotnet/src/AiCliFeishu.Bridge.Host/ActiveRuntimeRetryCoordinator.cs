@@ -62,6 +62,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
     private readonly IFeishuCardRenderer renderer;
     private readonly ActiveRuntimeActivityCoordinator? activity;
     private readonly IBridgeActiveFileTransferCoordinator? fileTransfers;
+    private readonly IBridgeActiveSessionGroupCoordinator? sessionGroups;
     private readonly TimeProvider clock;
     private readonly TimeSpan? retryDelayOverride;
     private readonly Func<int, int> selectJitter;
@@ -87,7 +88,8 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         TimeSpan? retryDelayOverride = null,
         Func<int, int>? jitterSelector = null,
         ActiveRuntimeActivityCoordinator? activity = null,
-        IBridgeActiveFileTransferCoordinator? fileTransfers = null)
+        IBridgeActiveFileTransferCoordinator? fileTransfers = null,
+        IBridgeActiveSessionGroupCoordinator? sessionGroups = null)
         : this(
             options,
             stateSink,
@@ -99,7 +101,8 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             retryDelayOverride,
             jitterSelector,
             activity,
-            fileTransfers)
+            fileTransfers,
+            sessionGroups)
     {
         ArgumentNullException.ThrowIfNull(runtimeCommands);
     }
@@ -115,7 +118,8 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         TimeSpan? retryDelayOverride = null,
         Func<int, int>? jitterSelector = null,
         ActiveRuntimeActivityCoordinator? activity = null,
-        IBridgeActiveFileTransferCoordinator? fileTransfers = null)
+        IBridgeActiveFileTransferCoordinator? fileTransfers = null,
+        IBridgeActiveSessionGroupCoordinator? sessionGroups = null)
     {
         this.options = options;
         this.stateSink = stateSink;
@@ -126,6 +130,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         this.renderer = renderer;
         this.activity = activity;
         this.fileTransfers = fileTransfers;
+        this.sessionGroups = sessionGroups;
         clock = timeProvider ?? TimeProvider.System;
         this.retryDelayOverride = retryDelayOverride;
         selectJitter = jitterSelector ?? (maximum => Random.Shared.Next(maximum + 1));
@@ -310,6 +315,20 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             ? Generation(runtimeEvent.Session!.ExternalId)
             : 0;
         await stateSink.HandleAsync(runtimeEvent, cancellationToken);
+        if (runtimeEvent.EventType == RuntimeEventTypes.SessionStarted &&
+            sessionGroups is not null)
+        {
+            try
+            {
+                sessionGroups.ScheduleEnsure(runtimeEvent.Session!.ExternalId);
+            }
+            catch
+            {
+                // Session state is already durable. Group creation is a best-effort
+                // side channel and must not turn a valid Hook/SSE event into a
+                // runtime failure.
+            }
+        }
 
         switch (runtimeEvent.EventType)
         {
@@ -578,7 +597,10 @@ internal sealed class ActiveRuntimeRetryCoordinator :
 
         var retryView = cycle is null ? null : View(cycle, "scheduled");
         var cards = renderer.RuntimeError(SessionView(session), notification.Message, retryView);
-        var chats = NotificationChats(store, session);
+        var chats = await NotificationChatsAsync(
+            store,
+            session,
+            cancellationToken);
         var delivery = await SendCardsAsync(
             notification,
             chats,
@@ -704,7 +726,10 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         var cards = renderer.RuntimeCompletion(
             SessionView(session),
             claim.Message);
-        var chats = NotificationChats(store, session);
+        var chats = await NotificationChatsAsync(
+            store,
+            session,
+            cancellationToken);
         var delivery = await SendCardsAsync(
             claim,
             chats,
@@ -1218,10 +1243,17 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         Math.Clamp(settings.RetryIntervalSeconds ?? DefaultIntervalSeconds, 1, 600),
         Math.Clamp(settings.RetryJitterSeconds ?? DefaultJitterSeconds, 0, 120));
 
-    private static IReadOnlyList<string> NotificationChats(
+    private async ValueTask<IReadOnlyList<string>> NotificationChatsAsync(
         NodeStoreSnapshot store,
-        SessionStoreRecord session)
+        SessionStoreRecord session,
+        CancellationToken cancellationToken)
     {
+        if (sessionGroups is not null)
+        {
+            return await sessionGroups.NotificationChatsAsync(
+                session.SessionId,
+                cancellationToken);
+        }
         if (ExtensionBoolean(session, "managedByAssistant") &&
             ExtensionString(session, "feishuChatId") is { } sessionChat)
         {

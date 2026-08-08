@@ -168,6 +168,11 @@ public static class BridgeHostApplication
                 .GetRequiredService<IBridgeFeishuCredentialSource>());
         services.AddSingleton<IFeishuEventSource, ActiveFeishuEventSource>();
         services.AddSingleton<IFeishuGateway, ActiveFeishuGateway>();
+        services.AddSingleton<ActiveSessionGroupCoordinator>();
+        services.AddSingleton<IBridgeActiveSessionGroupCoordinator>(services =>
+            services.GetRequiredService<ActiveSessionGroupCoordinator>());
+        services.AddSingleton<IBridgeHostSubsystem>(services =>
+            services.GetRequiredService<ActiveSessionGroupCoordinator>());
         services.AddSingleton<ActiveFeishuFileTransferCoordinator>();
         services.AddSingleton<IBridgeActiveFileTransferCoordinator>(services =>
             services.GetRequiredService<ActiveFeishuFileTransferCoordinator>());
@@ -223,7 +228,9 @@ public static class BridgeHostApplication
             services.GetRequiredService<BridgeHostOptions>(),
             services.GetRequiredService<IBridgeProductionStoreOwner>(),
             services.GetRequiredService<IFeishuGateway>(),
-            services.GetRequiredService<IFeishuCardRenderer>()));
+            services.GetRequiredService<IFeishuCardRenderer>(),
+            sessionGroups:
+                services.GetRequiredService<IBridgeActiveSessionGroupCoordinator>()));
         services.AddSingleton<ActiveRuntimeRetryCoordinator>(services => new(
             services.GetRequiredService<BridgeHostOptions>(),
             services.GetRequiredService<IBridgeActiveRuntimeStateSink>(),
@@ -232,7 +239,9 @@ public static class BridgeHostApplication
             services.GetRequiredService<IFeishuGateway>(),
             services.GetRequiredService<IFeishuCardRenderer>(),
             activity: services.GetRequiredService<ActiveRuntimeActivityCoordinator>(),
-            fileTransfers: services.GetRequiredService<IBridgeActiveFileTransferCoordinator>()));
+            fileTransfers: services.GetRequiredService<IBridgeActiveFileTransferCoordinator>(),
+            sessionGroups:
+                services.GetRequiredService<IBridgeActiveSessionGroupCoordinator>()));
         services.AddSingleton<IBridgeActiveRuntimeRetryCoordinator>(services =>
             services.GetRequiredService<ActiveRuntimeRetryCoordinator>());
         services.AddSingleton<IBridgeRuntimeEventHandler>(services =>
