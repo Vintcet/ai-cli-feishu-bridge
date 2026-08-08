@@ -166,7 +166,9 @@ public sealed class ActiveRuntimeActivityCoordinatorTests
             "turn-1",
             RuntimeActivityKinds.ToolStarted,
             "正在调用命令行"));
-        await WaitUntilAsync(() => fixture.Store.Updates > 0);
+        await WaitUntilAsync(() => ExtensionString(
+            fixture.Store.Current.Sessions.Sessions[SessionId],
+            "activeActivityKey") is null);
 
         Assert.AreEqual(0, fixture.Gateway.Sends.Count);
         Assert.IsNull(ExtensionString(

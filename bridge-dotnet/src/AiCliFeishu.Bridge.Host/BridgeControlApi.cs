@@ -66,8 +66,8 @@ public static class BridgeControlApi
         app.MapGet("/control/status", async (
             HttpRequest request,
             BridgeControlStatusReader status,
-            IBridgeStoreShadow storeShadow,
-            BridgeBusinessStateOwner businessStateOwner,
+            IBridgeControlStoreStatusSource storeStatus,
+            IBridgeControlBusinessStateSource businessState,
             BridgeHealthRegistry health,
             IBridgeControlTokenProvider tokenProvider,
             CancellationToken cancellationToken) =>
@@ -86,14 +86,15 @@ public static class BridgeControlApi
             }
             if (request.Query["refresh"].ToString() == "1")
             {
-                await storeShadow.RefreshAsync(cancellationToken);
-                await businessStateOwner.RefreshAsync(cancellationToken);
-                var component = storeShadow.ComponentHealth;
+                await storeStatus.RefreshAsync(cancellationToken);
+                await businessState.RefreshAsync(cancellationToken);
+                var component = storeStatus.ComponentHealth;
                 health.Report(component.Name, component.Status, component.Detail);
+                var businessComponent = businessState.ComponentHealth;
                 health.Report(
-                    businessStateOwner.ComponentHealth.Name,
-                    businessStateOwner.ComponentHealth.Status,
-                    businessStateOwner.ComponentHealth.Detail);
+                    businessComponent.Name,
+                    businessComponent.Status,
+                    businessComponent.Detail);
             }
             return Results.Ok(status.Snapshot());
         });
@@ -101,7 +102,7 @@ public static class BridgeControlApi
         app.MapPost("/control/runtime-events", async (
             HttpRequest request,
             IRuntimeEventSink runtimeEvents,
-            BridgeBusinessStateOwner businessStateOwner,
+            IBridgeControlBusinessStateSource businessState,
             IBridgeControlTokenProvider tokenProvider,
             CancellationToken cancellationToken) =>
         {
@@ -138,7 +139,7 @@ public static class BridgeControlApi
                     new ControlError(false, "Runtime 事件 JSON 无效。"),
                     statusCode: StatusCodes.Status400BadRequest);
             }
-            if (!businessStateOwner.Snapshot.Initialized)
+            if (!businessState.Snapshot.Initialized)
             {
                 return Results.Json(
                     new ControlError(false, "业务状态尚未从 Store 初始化。"),
@@ -165,7 +166,7 @@ public static class BridgeControlApi
         app.MapPost("/control/runtime-commands", async (
             HttpRequest request,
             IBridgeRuntimeCommandGateway commands,
-            BridgeBusinessStateOwner businessStateOwner,
+            IBridgeControlBusinessStateSource businessState,
             IBridgeControlTokenProvider tokenProvider,
             CancellationToken cancellationToken) =>
         {
@@ -209,7 +210,7 @@ public static class BridgeControlApi
                     new ControlError(false, "Runtime 命令未通过 Bridge Protocol 校验。"),
                     statusCode: StatusCodes.Status422UnprocessableEntity);
             }
-            if (!businessStateOwner.Snapshot.Initialized)
+            if (!businessState.Snapshot.Initialized)
             {
                 return Results.Json(
                     new ControlError(false, "业务状态尚未从 Store 初始化。"),
@@ -238,7 +239,7 @@ public static class BridgeControlApi
         app.MapPost("/control/feishu-intents", async (
             HttpRequest request,
             IFeishuIntentSink intents,
-            BridgeBusinessStateOwner businessStateOwner,
+            IBridgeControlBusinessStateSource businessState,
             IBridgeControlTokenProvider tokenProvider,
             CancellationToken cancellationToken) =>
         {
@@ -275,7 +276,7 @@ public static class BridgeControlApi
                     new ControlError(false, "飞书标准意图 JSON 无效。"),
                     statusCode: StatusCodes.Status400BadRequest);
             }
-            if (!businessStateOwner.Snapshot.Initialized)
+            if (!businessState.Snapshot.Initialized)
             {
                 return Results.Json(
                     new ControlError(false, "业务状态尚未从 Store 初始化。"),

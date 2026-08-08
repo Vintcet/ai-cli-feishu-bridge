@@ -25,6 +25,13 @@ public sealed class BridgeProductionAssemblyTests
 
         Assert.IsInstanceOfType<ReadOnlyNodeStoreShadow>(
             app.Services.GetRequiredService<IBridgeStoreShadow>());
+        Assert.IsTrue(ReferenceEquals(
+            app.Services.GetRequiredService<IBridgeStoreShadow>(),
+            app.Services.GetRequiredService<IBridgeControlStoreStatusSource>()));
+        Assert.IsTrue(ReferenceEquals(
+            app.Services.GetRequiredService<BridgeBusinessStateOwner>(),
+            app.Services.GetRequiredService<IBridgeControlBusinessStateSource>()));
+        Assert.IsNotNull(app.Services.GetService<BridgeControlStatusReader>());
         Assert.IsInstanceOfType<PassiveFeishuEventSource>(
             app.Services.GetRequiredService<IFeishuEventSource>());
         Assert.IsInstanceOfType<PassiveFeishuGateway>(
@@ -414,6 +421,21 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void PassivePreflightRejectsMissingControlStateAlias()
+    {
+        var options = BridgeHostOptions.Passive(Path.GetTempPath(), port: 0);
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeHostApplication.Build(options, configureServices: services =>
+                services.RemoveAll<IBridgeControlStoreStatusSource>()));
+
+        StringAssert.Contains(
+            error.Message,
+            nameof(IBridgeControlStoreStatusSource));
+        StringAssert.Contains(error.Message, "控制 API");
+    }
+
+    [TestMethod]
     public void ActiveAssemblyIsCompleteAndIsolatedWhileCutoverGateRemainsClosed()
     {
         var options = ActiveOptions();
@@ -547,6 +569,32 @@ public sealed class BridgeProductionAssemblyTests
         Assert.AreEqual(
             typeof(ActivePersistentBusinessStateOwner),
             businessOwner.ImplementationType);
+        var controlStore = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IBridgeControlStoreStatusSource));
+        Assert.IsNotNull(controlStore.ImplementationFactory);
+        var controlBusiness = services.Single(descriptor =>
+            descriptor.ServiceType == typeof(IBridgeControlBusinessStateSource));
+        Assert.IsNotNull(controlBusiness.ImplementationFactory);
+        Assert.AreEqual(
+            typeof(BridgeControlStatusReader),
+            services.Single(descriptor =>
+                descriptor.ServiceType == typeof(BridgeControlStatusReader))
+                .ImplementationType);
+        var productionStore = new RecordingProductionStoreOwner();
+        var persistentBusiness = new RecordingPersistentBusinessStateOwner();
+        var controlServices = new ServiceCollection();
+        controlServices.AddSingleton<IBridgeProductionStoreOwner>(productionStore);
+        controlServices.AddSingleton<IBridgePersistentBusinessStateOwner>(
+            persistentBusiness);
+        using (var provider = controlServices.BuildServiceProvider())
+        {
+            Assert.AreSame(
+                productionStore,
+                controlStore.ImplementationFactory(provider));
+            Assert.AreSame(
+                persistentBusiness,
+                controlBusiness.ImplementationFactory(provider));
+        }
         Assert.IsNotNull(services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgeActiveApprovalStateOwner))
             .ImplementationFactory);
@@ -796,6 +844,38 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
+    public void ActivePreflightRejectsMissingControlStatusReader()
+    {
+        var options = ActiveOptions();
+        var services = CompleteActiveServices();
+        services.RemoveAll<BridgeControlStatusReader>();
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeProductionAssemblyPreflight.Validate(options, services));
+
+        StringAssert.Contains(error.Message, nameof(BridgeControlStatusReader));
+        StringAssert.Contains(error.Message, "控制 API");
+    }
+
+    [TestMethod]
+    public void ActivePreflightRejectsControlStateAliasThatCanOwnAnotherInstance()
+    {
+        var options = ActiveOptions();
+        var services = CompleteActiveServices();
+        services.RemoveAll<IBridgeControlBusinessStateSource>();
+        services.AddSingleton<IBridgeControlBusinessStateSource,
+            RecordingPersistentBusinessStateOwner>();
+
+        var error = Assert.ThrowsException<InvalidOperationException>(() =>
+            BridgeProductionAssemblyPreflight.Validate(options, services));
+
+        StringAssert.Contains(
+            error.Message,
+            nameof(IBridgeControlBusinessStateSource));
+        StringAssert.Contains(error.Message, "组合根工厂");
+    }
+
+    [TestMethod]
     public void ActivePreflightRejectsMissingFeishuIntentHandlerBeforeResolvingFactories()
     {
         var options = ActiveOptions();
@@ -956,6 +1036,13 @@ public sealed class BridgeProductionAssemblyTests
         };
         AddCompleteActiveRuntimeAssembly(services);
         AddCompleteActiveFeishuAssembly(services);
+        services.AddSingleton<IBridgeControlStoreStatusSource>(provider =>
+            (IBridgeControlStoreStatusSource)provider
+                .GetRequiredService<IBridgeProductionStoreOwner>());
+        services.AddSingleton<IBridgeControlBusinessStateSource>(provider =>
+            (IBridgeControlBusinessStateSource)provider
+                .GetRequiredService<IBridgePersistentBusinessStateOwner>());
+        services.AddSingleton<BridgeControlStatusReader>();
         services.AddSingleton(new BridgeProductionAssemblyManifest(owners));
         return services;
     }
@@ -1076,12 +1163,32 @@ public sealed class BridgeProductionAssemblyTests
             ValueTask.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
-    private sealed class RecordingProductionStoreOwner : IBridgeProductionStoreOwner
+    private sealed class RecordingProductionStoreOwner :
+        IBridgeProductionStoreOwner,
+        IBridgeControlStoreStatusSource
     {
         public BridgeProductionStoreSnapshot Snapshot { get; } = new(
             BridgeProductionStoreState.Open,
             null,
             0);
+
+        public BridgeControlStoreStatus Status { get; } = new(
+            BridgeStoreShadowStatuses.NotLoaded,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0);
+
+        public BridgeComponentHealth ComponentHealth { get; } =
+            new("production-store", "starting");
+
+        public Task RefreshAsync(CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
 
         public ValueTask OpenAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
@@ -1103,12 +1210,19 @@ public sealed class BridgeProductionAssemblyTests
     }
     private sealed class RecordingPersistentBusinessStateOwner
         : IBridgePersistentBusinessStateOwner,
+          IBridgeControlBusinessStateSource,
           IBridgeActiveRuntimeStateSink,
           IBridgeActiveApprovalStateOwner,
           IBridgeActiveInputStateOwner
     {
         public BridgeBusinessStateSnapshot Snapshot { get; } =
             BridgeBusinessStateSnapshot.NotInitialized;
+
+        public BridgeComponentHealth ComponentHealth { get; } =
+            new("persistent-business-state-owner", "starting");
+
+        public Task RefreshAsync(CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
 
         public Task HandleAsync(
             RuntimeEventEnvelope runtimeEvent,

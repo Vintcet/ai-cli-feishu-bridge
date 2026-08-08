@@ -342,6 +342,11 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IFeishuIntentSink),
         typeof(IBridgeActiveFileTransferCoordinator),
     ];
+    private static readonly Type[] controlFactoryServices =
+    [
+        typeof(IBridgeControlStoreStatusSource),
+        typeof(IBridgeControlBusinessStateSource),
+    ];
 
     public static BridgeProductionAssemblySnapshot Validate(
         BridgeHostOptions options,
@@ -384,6 +389,7 @@ internal static class BridgeProductionAssemblyPreflight
                     $"Passive Host 端口 {contract.Name} 必须且只能使用 {implementation.Name}。");
             }
         }
+        ValidateControlAssembly(services, "Passive Host");
 
         var guards = services
             .Where(descriptor =>
@@ -474,6 +480,7 @@ internal static class BridgeProductionAssemblyPreflight
             typeof(BridgeRuntimeWorker));
         ValidateActiveRuntimeAssembly(services);
         ValidateActiveFeishuAssembly(services);
+        ValidateControlAssembly(services, "Active Host");
 
         foreach (var owner in manifest.Owners)
         {
@@ -593,6 +600,29 @@ internal static class BridgeProductionAssemblyPreflight
             {
                 throw new InvalidOperationException(
                     $"Active Host 标准飞书装配端口 {serviceType.Name} 必须且只能使用组合根工厂。");
+            }
+        }
+    }
+
+    private static void ValidateControlAssembly(
+        IServiceCollection services,
+        string hostName)
+    {
+        RequireSingleImplementation(
+            services,
+            typeof(BridgeControlStatusReader),
+            typeof(BridgeControlStatusReader),
+            $"{hostName} 控制 API 装配");
+        foreach (var serviceType in controlFactoryServices)
+        {
+            var registrations = services
+                .Where(descriptor => descriptor.ServiceType == serviceType)
+                .ToArray();
+            if (registrations.Length != 1 ||
+                registrations[0].ImplementationFactory is null)
+            {
+                throw new InvalidOperationException(
+                    $"{hostName} 控制 API 状态端口 {serviceType.Name} 必须且只能使用组合根工厂。");
             }
         }
     }

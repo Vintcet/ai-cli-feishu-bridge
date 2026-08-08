@@ -1,4 +1,5 @@
 using AiCliFeishu.Bridge.Core;
+using AiCliFeishu.Bridge.Adapters.Storage;
 
 namespace AiCliFeishu.Bridge.Host;
 
@@ -66,20 +67,35 @@ public sealed record BridgeControlStatusSnapshot(
     BridgeControlBusinessStatus BusinessState,
     BridgeControlBoundaryStatus Boundaries);
 
+public interface IBridgeControlStoreStatusSource
+{
+    BridgeControlStoreStatus Status { get; }
+
+    BridgeComponentHealth ComponentHealth { get; }
+
+    Task RefreshAsync(CancellationToken cancellationToken = default);
+}
+
+public interface IBridgeControlBusinessStateSource
+{
+    BridgeBusinessStateSnapshot Snapshot { get; }
+
+    BridgeComponentHealth ComponentHealth { get; }
+
+    Task RefreshAsync(CancellationToken cancellationToken = default);
+}
+
 public sealed class BridgeControlStatusReader(
     BridgeHealthRegistry health,
-    IBridgeStoreShadow storeShadow,
-    BridgeBusinessStateOwner businessStateOwner,
+    IBridgeControlStoreStatusSource storeStatus,
+    IBridgeControlBusinessStateSource businessState,
     BridgeBoundaryCatalog boundaryCatalog)
 {
     public BridgeControlStatusSnapshot Snapshot()
     {
         var host = health.Snapshot();
-        var store = storeShadow.Snapshot;
-        var core = store.Core;
-        var sessions = core?.Sessions.Sessions.Values;
-        var approvals = core?.Approvals.Requests.Values;
-        var business = businessStateOwner.Snapshot;
+        var store = storeStatus.Status;
+        var business = businessState.Snapshot;
         var businessSessions = business.Sessions.Sessions.Values;
         var businessApprovals = business.Approvals.Requests.Values;
         var businessInputs = business.Inputs.Requests.Values;
@@ -104,17 +120,7 @@ public sealed class BridgeControlStatusReader(
             host.ProcessId,
             host.OwnershipMode,
             host.ActiveOwner,
-            new BridgeControlStoreStatus(
-                store.Status,
-                store.StoreFiles,
-                store.Bindings,
-                sessions?.Count() ?? 0,
-                sessions?.Count(session => session.Status != SessionStatuses.Ended) ?? 0,
-                sessions?.Count(session => session.Status == SessionStatuses.Ended) ?? 0,
-                core?.Routes.Messages.Count ?? 0,
-                core?.Routes.ProcessedInbound.Count ?? 0,
-                approvals?.Count() ?? 0,
-                approvals?.Count(approval => approval.Status == ApprovalStatuses.Pending) ?? 0),
+            store,
             new BridgeControlBusinessStatus(
                 business.Initialized,
                 business.SourceStatus,
@@ -157,4 +163,49 @@ public sealed class BridgeControlStatusReader(
         RuntimeCapability.ActivityStream => "activity.stream",
         _ => throw new ArgumentOutOfRangeException(nameof(capability), capability, null),
     };
+}
+
+internal static class BridgeControlStoreStatusProjection
+{
+    public static BridgeControlStoreStatus FromShadow(
+        BridgeStoreShadowSnapshot store)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        var core = store.Core;
+        var sessions = core?.Sessions.Sessions.Values;
+        var approvals = core?.Approvals.Requests.Values;
+        return new(
+            store.Status,
+            store.StoreFiles,
+            store.Bindings,
+            sessions?.Count() ?? 0,
+            sessions?.Count(session => session.Status != SessionStatuses.Ended) ?? 0,
+            sessions?.Count(session => session.Status == SessionStatuses.Ended) ?? 0,
+            core?.Routes.Messages.Count ?? 0,
+            core?.Routes.ProcessedInbound.Count ?? 0,
+            approvals?.Count() ?? 0,
+            approvals?.Count(approval => approval.Status == ApprovalStatuses.Pending) ?? 0);
+    }
+
+    public static BridgeControlStoreStatus FromProduction(
+        BridgeProductionStoreSnapshot store)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        var status = store.State switch
+        {
+            BridgeProductionStoreState.Open when store.Store is not null =>
+                BridgeStoreShadowStatuses.Loaded,
+            BridgeProductionStoreState.Failed => BridgeStoreShadowStatuses.Failed,
+            _ => BridgeStoreShadowStatuses.NotLoaded,
+        };
+        var core = store.Store is null
+            ? null
+            : NodeStoreCoreProjection.Project(store.Store);
+        var projected = new BridgeStoreShadowSnapshot(
+            status,
+            core,
+            store.StoreFiles,
+            store.Store?.Bindings.Users.Count ?? 0);
+        return FromShadow(projected);
+    }
 }

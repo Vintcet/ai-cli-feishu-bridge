@@ -8,6 +8,7 @@ public static class BridgeStoreShadowStatuses
     public const string Loaded = "loaded";
     public const string Missing = "missing";
     public const string Incompatible = "incompatible";
+    public const string Failed = "failed";
 }
 
 public sealed record BridgeStoreShadowSnapshot(
@@ -34,7 +35,10 @@ public interface IBridgeStoreShadow
 }
 
 public sealed class ReadOnlyNodeStoreShadow(BridgeHostOptions options)
-    : IBridgeStoreShadow, IBridgeHostSubsystem, IBridgeHostSubsystemHealth
+    : IBridgeStoreShadow,
+      IBridgeControlStoreStatusSource,
+      IBridgeHostSubsystem,
+      IBridgeHostSubsystemHealth
 {
     private readonly SemaphoreSlim refreshLock = new(1, 1);
     private BridgeStoreShadowSnapshot snapshot = BridgeStoreShadowSnapshot.NotLoaded;
@@ -42,6 +46,9 @@ public sealed class ReadOnlyNodeStoreShadow(BridgeHostOptions options)
     public string Name => "node-store-shadow";
 
     public BridgeStoreShadowSnapshot Snapshot => Volatile.Read(ref snapshot);
+
+    BridgeControlStoreStatus IBridgeControlStoreStatusSource.Status =>
+        BridgeControlStoreStatusProjection.FromShadow(Snapshot);
 
     public BridgeComponentHealth ComponentHealth
     {

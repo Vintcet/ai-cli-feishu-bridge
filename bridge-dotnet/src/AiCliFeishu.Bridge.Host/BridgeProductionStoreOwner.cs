@@ -35,6 +35,7 @@ internal interface IBridgeProductionStoreOwner
 
 internal sealed class ActiveProductionStoreOwner :
     IBridgeProductionStoreOwner,
+    IBridgeControlStoreStatusSource,
     IBridgeHostSubsystem,
     IBridgeHostSubsystemHealth
 {
@@ -84,6 +85,19 @@ internal sealed class ActiveProductionStoreOwner :
     public string Name => "production-store";
 
     public BridgeProductionStoreSnapshot Snapshot => Redact(Volatile.Read(ref snapshot));
+
+    BridgeControlStoreStatus IBridgeControlStoreStatusSource.Status =>
+        BridgeControlStoreStatusProjection.FromProduction(CurrentSnapshot);
+
+    Task IBridgeControlStoreStatusSource.RefreshAsync(
+        CancellationToken cancellationToken)
+    {
+        // The active Store owner is already the sole in-process authority. A
+        // status refresh must not perform a second disk read or replace its
+        // current projection while runtime events may be committing updates.
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.CompletedTask;
+    }
 
     internal BridgeProductionStoreSnapshot CurrentSnapshot => Volatile.Read(ref snapshot);
 

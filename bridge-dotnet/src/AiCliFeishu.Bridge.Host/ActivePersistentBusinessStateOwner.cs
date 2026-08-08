@@ -10,6 +10,7 @@ internal sealed class ActivePersistentBusinessStateOwner(
     IBridgeProductionStoreOwner storeOwner,
     TimeProvider? timeProvider = null)
     : IBridgePersistentBusinessStateOwner,
+      IBridgeControlBusinessStateSource,
       IBridgeActiveRuntimeStateSink,
       IBridgeActiveApprovalStateOwner,
       IBridgeActiveInputStateOwner,
@@ -87,6 +88,15 @@ internal sealed class ActivePersistentBusinessStateOwner(
     public Task StopAsync(CancellationToken cancellationToken)
     {
         _ = cancellationToken;
+        return Task.CompletedTask;
+    }
+
+    public Task RefreshAsync(CancellationToken cancellationToken = default)
+    {
+        // Active business state is the authoritative in-memory projection. It is
+        // advanced only after the production Store write succeeds; a control API
+        // refresh must not re-read the files and overwrite newer runtime state.
+        cancellationToken.ThrowIfCancellationRequested();
         return Task.CompletedTask;
     }
 

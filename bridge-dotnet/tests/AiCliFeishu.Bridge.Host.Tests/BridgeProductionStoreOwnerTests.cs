@@ -44,6 +44,17 @@ public sealed class BridgeProductionStoreOwnerTests
         Assert.AreEqual(
             new BridgeComponentHealth("production-store", "ready", "loaded files=1"),
             owner.ComponentHealth);
+        var controlStatus = ((IBridgeControlStoreStatusSource)owner).Status;
+        Assert.AreEqual(BridgeStoreShadowStatuses.Loaded, controlStatus.Status);
+        Assert.AreEqual(1, controlStatus.Files);
+        Assert.AreEqual(1, controlStatus.Sessions);
+        Assert.AreEqual(1, controlStatus.ActiveSessions);
+        Assert.AreEqual(0, controlStatus.EndedSessions);
+        Assert.AreEqual(0, controlStatus.Bindings);
+        Assert.AreEqual(0, controlStatus.Routes);
+        Assert.AreEqual(0, controlStatus.Approvals);
+        await ((IBridgeControlStoreStatusSource)owner).RefreshAsync();
+        Assert.AreEqual(BridgeProductionStoreState.Open, owner.Snapshot.State);
         Assert.AreEqual(source, await File.ReadAllTextAsync(sessions));
         CollectionAssert.AreEquivalent(
             new[]

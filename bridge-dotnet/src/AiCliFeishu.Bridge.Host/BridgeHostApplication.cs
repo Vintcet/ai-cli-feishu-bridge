@@ -100,6 +100,12 @@ public static class BridgeHostApplication
         services.AddSingleton<IOpenCodeRuntimeLifecycle, PassiveOpenCodeRuntimeLifecycle>();
         AddRuntimeCommandAssembly(services);
         services.AddSingleton<IBridgeStoreShadow, ReadOnlyNodeStoreShadow>();
+        services.AddSingleton<IBridgeControlStoreStatusSource>(services =>
+            (IBridgeControlStoreStatusSource)services
+                .GetRequiredService<IBridgeStoreShadow>());
+        services.AddSingleton<IBridgeControlBusinessStateSource>(services =>
+            (IBridgeControlBusinessStateSource)services
+                .GetRequiredService<BridgeBusinessStateOwner>());
         services.AddSingleton<BridgeControlStatusReader>();
         services.AddSingleton<IBridgeHostSubsystem, PassiveOwnerGuardSubsystem>();
         services.AddSingleton<IBridgeHostSubsystem>(services =>
@@ -125,6 +131,13 @@ public static class BridgeHostApplication
             (IBridgeHostSubsystem)services.GetRequiredService<IBridgeProductionStoreOwner>());
         services.AddSingleton<IBridgePersistentBusinessStateOwner,
             ActivePersistentBusinessStateOwner>();
+        services.AddSingleton<IBridgeControlBusinessStateSource>(services =>
+            (IBridgeControlBusinessStateSource)services
+                .GetRequiredService<IBridgePersistentBusinessStateOwner>());
+        services.AddSingleton<IBridgeControlStoreStatusSource>(services =>
+            (IBridgeControlStoreStatusSource)services
+                .GetRequiredService<IBridgeProductionStoreOwner>());
+        services.AddSingleton<BridgeControlStatusReader>();
         services.AddSingleton<IBridgeActiveRuntimeStateSink>(services =>
             (IBridgeActiveRuntimeStateSink)services
                 .GetRequiredService<IBridgePersistentBusinessStateOwner>());

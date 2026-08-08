@@ -98,6 +98,9 @@ public sealed class ActivePersistentBusinessStateOwnerTests
             reloaded.Sessions.Sessions["session-1"].Status);
         Assert.AreEqual("existing-short", reloaded.Sessions.Sessions["session-1"].ShortId);
         Assert.AreEqual("keep-settings", reloaded.Settings.ExtensionData!["future"].GetString());
+        var authoritative = owner.Snapshot;
+        await ((IBridgeControlBusinessStateSource)owner).RefreshAsync();
+        Assert.AreSame(authoritative, owner.Snapshot);
 
         await store.CloseAsync();
         await lease.ReleaseAsync();

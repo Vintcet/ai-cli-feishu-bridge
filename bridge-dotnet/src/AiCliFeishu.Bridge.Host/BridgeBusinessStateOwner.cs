@@ -28,6 +28,7 @@ public sealed record BridgeBusinessStateSnapshot(
 public sealed class BridgeBusinessStateOwner(IBridgeStoreShadow storeShadow)
     : IBridgeRuntimeEventHandler,
       IBridgeFeishuIntentHandler,
+      IBridgeControlBusinessStateSource,
       IBridgeHostSubsystem,
       IBridgeHostSubsystemHealth
 {
