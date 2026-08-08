@@ -1,5 +1,7 @@
 # 纯 C# 迁移交接（2026-08-08）
 
+> 续接结果与当前生产切换闸门见 `docs/csharp-migration-handoff-2026-08-09.md`。
+
 ## 1. 续接入口
 
 - 仓库：`K:\AI\codex+\codex-feishu-bridge`
