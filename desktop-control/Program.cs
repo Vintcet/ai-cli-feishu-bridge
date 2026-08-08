@@ -58,6 +58,7 @@ internal static class Program
             AppLog.Initialize(Path.Combine(bridgeClient.BridgeRoot, "data"));
             if (start)
             {
+                RequireSafeStartupRecovery(bridgeClient);
                 bridgeClient.StartAsync().GetAwaiter().GetResult();
                 for (var attempt = 0; attempt < 25; attempt += 1)
                 {
@@ -94,12 +95,25 @@ internal static class Program
         {
             using var bridgeClient = new BridgeClient();
             AppLog.Initialize(Path.Combine(bridgeClient.BridgeRoot, "data"));
+            RequireSafeStartupRecovery(bridgeClient);
             return bridgeClient.RunBridgeService();
         }
         catch (Exception error)
         {
             AppLog.Error("后台桥接宿主失败", error);
             return 1;
+        }
+    }
+
+    private static void RequireSafeStartupRecovery(BridgeClient bridgeClient)
+    {
+        var recovery = bridgeClient.RecoverProductionHostOnStartupAsync()
+            .AsTask()
+            .GetAwaiter()
+            .GetResult();
+        if (!recovery.CanContinue)
+        {
+            throw new InvalidOperationException(recovery.UserMessage);
         }
     }
 

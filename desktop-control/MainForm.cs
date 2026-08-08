@@ -58,6 +58,7 @@ internal sealed partial class MainForm : Form
     private bool closing;
     private bool exitRequested;
     private bool trayHintShown;
+    private BridgeHostStartupRecoveryResult? startupRecoveryBlock;
     private int activationRequested;
     private string? lastProjectDirectory;
     private BridgeStatus? lastStatus;
@@ -115,8 +116,45 @@ internal sealed partial class MainForm : Form
         Shown += async (_, _) =>
         {
             RestoreFromTray();
-            AppLog.Info("面板已显示，开始自动刷新。");
-            await RefreshStatusAsync();
+            AppLog.Info("面板已显示，开始检查生产 Host 恢复状态。");
+            SetOperating(true, "正在核对生产 Host 所有权与切换检查点…");
+            try
+            {
+                var recovery = await bridgeClient
+                    .RecoverProductionHostOnStartupAsync(lifetime.Token);
+                if (!recovery.CanContinue)
+                {
+                    startupRecoveryBlock = recovery;
+                    AppLog.Warn($"生产 Host 启动恢复已阻止继续：{recovery.State}。");
+                }
+                else
+                {
+                    startupRecoveryBlock = null;
+                    AppLog.Info($"生产 Host 启动恢复结果：{recovery.State}。");
+                    if (recovery.State is BridgeHostStartupRecoveryState.Recovered)
+                    {
+                        operationLabel.Text = recovery.UserMessage;
+                    }
+                    await RefreshStatusAsync(force: true);
+                }
+            }
+            catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+            {
+            }
+            catch (Exception)
+            {
+                startupRecoveryBlock = new(
+                    BridgeHostStartupRecoveryState.Unavailable);
+                AppLog.Warn("生产 Host 启动恢复发生未分类错误，已阻止继续。");
+            }
+            finally
+            {
+                SetOperating(false);
+                if (startupRecoveryBlock is not null)
+                {
+                    ApplyStartupRecoveryBlock(startupRecoveryBlock);
+                }
+            }
             refreshTimer.Start();
         };
         FormClosing += (_, eventArgs) =>
@@ -985,6 +1023,11 @@ internal sealed partial class MainForm : Form
     private async Task ConnectAsync()
     {
         if (operating) return;
+        if (startupRecoveryBlock is not null)
+        {
+            ApplyStartupRecoveryBlock(startupRecoveryBlock);
+            return;
+        }
         SetOperating(true, "正在启动桥接服务…");
         try
         {
@@ -1018,6 +1061,11 @@ internal sealed partial class MainForm : Form
     private async Task DisconnectAsync()
     {
         if (operating) return;
+        if (startupRecoveryBlock is not null)
+        {
+            ApplyStartupRecoveryBlock(startupRecoveryBlock);
+            return;
+        }
         SetOperating(true, "正在断开桥接服务…");
         try
         {
@@ -1059,6 +1107,11 @@ internal sealed partial class MainForm : Form
         refreshing = true;
         try
         {
+            if (startupRecoveryBlock is not null)
+            {
+                ApplyStartupRecoveryBlock(startupRecoveryBlock);
+                return;
+            }
             var status = await bridgeClient.GetStatusAsync(
                 lifetime.Token,
                 forceRefresh: force);
@@ -1392,6 +1445,21 @@ internal sealed partial class MainForm : Form
         {
             operationLabel.Text = "点击“连接”启动飞书桥接服务";
         }
+    }
+
+    private void ApplyStartupRecoveryBlock(
+        BridgeHostStartupRecoveryResult recovery)
+    {
+        ApplyOfflineStatus();
+        SetHeaderStatus("需要人工接管", Warning);
+        serviceValue.Text = "恢复已阻止";
+        connectionButton.Enabled = false;
+        newCodexButton.Enabled = false;
+        newClaudeCodeButton.Enabled = false;
+        newOpenCodeButton.Enabled = false;
+        approvalButton.Enabled = false;
+        settingsButton.Enabled = false;
+        operationLabel.Text = recovery.UserMessage;
     }
 
     private void SetHeaderStatus(string text, Color color)

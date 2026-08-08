@@ -106,7 +106,7 @@ public sealed class BridgeHostRecoveryExecutorTests
     }
 
     [TestMethod]
-    public async Task StableExpectedOwnerNeedsNoRecoverySideEffects()
+    public async Task StableExpectedOwnerConvergesOnlyNonTerminalNodeCheckpoint()
     {
         foreach (var (checkpoint, identity) in new[]
         {
@@ -124,10 +124,18 @@ public sealed class BridgeHostRecoveryExecutorTests
             var result = await Executor(observer, operations).RunAsync();
 
             Assert.AreEqual(
-                BridgeHostRecoveryExecutionState.NoActionRequired,
+                checkpoint.Stage is BridgeHostCutoverStage.Completed
+                    ? BridgeHostRecoveryExecutionState.NoActionRequired
+                    : BridgeHostRecoveryExecutionState.Recovered,
                 result.State,
                 checkpoint.Stage.ToString());
             Assert.AreEqual(0, operations.Calls.Count, checkpoint.Stage.ToString());
+            var durable = await Store().ReadAsync();
+            Assert.AreEqual(
+                checkpoint.Stage is BridgeHostCutoverStage.Completed
+                    ? BridgeHostCutoverStage.Completed
+                    : BridgeHostCutoverStage.RolledBack,
+                durable.Checkpoint?.Stage);
         }
     }
 

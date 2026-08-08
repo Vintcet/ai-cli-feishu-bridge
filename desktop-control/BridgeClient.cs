@@ -58,6 +58,29 @@ internal sealed class BridgeClient : IDisposable
         _ = await RefreshTargetCoreAsync(cancellationToken);
     }
 
+    public async ValueTask<BridgeHostStartupRecoveryResult>
+        RecoverProductionHostOnStartupAsync(
+            CancellationToken cancellationToken = default)
+    {
+        if (!CurrentTarget.IsProduction)
+        {
+            return new(BridgeHostStartupRecoveryState.Skipped);
+        }
+
+        var recovery = new BridgeHostStartupRecovery(
+            Path.Combine(BridgeRoot, "data"),
+            async token =>
+            {
+                using var cutover = new BridgeHostProductionCutover(
+                    BridgeRoot,
+                    AppContext.BaseDirectory,
+                    Port);
+                return await cutover.RecoverAsync(token);
+            },
+            RefreshTargetAsync);
+        return await recovery.RunAsync(cancellationToken);
+    }
+
     public async Task<BridgeStatus?> GetStatusAsync(
         CancellationToken cancellationToken = default,
         bool forceRefresh = false)

@@ -9,6 +9,10 @@ internal sealed record BridgeHostRecoveryInspection(
     BridgeHostRecoveryPlan Plan,
     string? CheckpointFileVersion = null);
 
+internal sealed record BridgeHostRecoveryExecutionInspection(
+    BridgeHostRecoveryInspection Inspection,
+    BridgeCutoverHostIdentity? ObservedIdentity);
+
 internal sealed class BridgeHostRecoveryEndpointProbe : IDisposable
 {
     private const string ControlTokenHeader = "X-AI-CLI-Feishu-Control-Token";
@@ -266,6 +270,11 @@ internal sealed class BridgeHostRecoveryObserver : IDisposable
     }
 
     public async ValueTask<BridgeHostRecoveryInspection> InspectAsync(
+        CancellationToken cancellationToken = default) =>
+        (await InspectForExecutionAsync(cancellationToken)).Inspection;
+
+    internal async ValueTask<BridgeHostRecoveryExecutionInspection>
+        InspectForExecutionAsync(
         CancellationToken cancellationToken = default)
     {
         var checkpointBefore = await readCheckpoint(cancellationToken);
@@ -274,7 +283,7 @@ internal sealed class BridgeHostRecoveryObserver : IDisposable
                 out var checkpoint,
                 out var checkpointFailure))
         {
-            return Manual(checkpointBefore.State, checkpointFailure);
+            return Execution(Manual(checkpointBefore.State, checkpointFailure));
         }
 
         var endpointBefore = await inspectEndpoint(cancellationToken);
@@ -290,27 +299,27 @@ internal sealed class BridgeHostRecoveryObserver : IDisposable
                 checkpointBefore.FileVersion,
                 StringComparison.Ordinal))
         {
-            return Manual(
+            return Execution(Manual(
                 NormalizeCheckpointState(checkpointAfter.State),
-                BridgeHostRecoveryReason.CheckpointChanged);
+                BridgeHostRecoveryReason.CheckpointChanged));
         }
         if (!IsValidEndpoint(endpointBefore) || !IsValidEndpoint(endpointAfter))
         {
-            return Manual(
+            return Execution(Manual(
                 BridgeHostCutoverCheckpointReadState.Present,
-                BridgeHostRecoveryReason.EndpointUncertain);
+                BridgeHostRecoveryReason.EndpointUncertain));
         }
         if (!IsValidLease(leaseBefore) || !IsValidLease(leaseAfter))
         {
-            return Manual(
+            return Execution(Manual(
                 BridgeHostCutoverCheckpointReadState.Present,
-                BridgeHostRecoveryReason.ActiveOwnerLeaseInvalid);
+                BridgeHostRecoveryReason.ActiveOwnerLeaseInvalid));
         }
         if (endpointBefore != endpointAfter || leaseBefore != leaseAfter)
         {
-            return Manual(
+            return Execution(Manual(
                 BridgeHostCutoverCheckpointReadState.Present,
-                BridgeHostRecoveryReason.ObservationChanged);
+                BridgeHostRecoveryReason.ObservationChanged));
         }
 
         var planner = new BridgeHostRecoveryPlanner(
@@ -319,10 +328,12 @@ internal sealed class BridgeHostRecoveryObserver : IDisposable
         var plan = planner.Plan(
             checkpoint.ToSnapshot(),
             new BridgeHostRecoveryObservation(endpointAfter, leaseAfter));
-        return new(
-            BridgeHostCutoverCheckpointReadState.Present,
-            plan,
-            checkpointAfter.FileVersion);
+        return Execution(
+            new(
+                BridgeHostCutoverCheckpointReadState.Present,
+                plan,
+                checkpointAfter.FileVersion),
+            endpointAfter.Identity);
     }
 
     public void Dispose() => ownedResource?.Dispose();
@@ -395,4 +406,9 @@ internal sealed class BridgeHostRecoveryObserver : IDisposable
             new BridgeHostRecoveryPlan(
                 BridgeHostRecoveryDisposition.ManualIntervention,
                 reason));
+
+    private static BridgeHostRecoveryExecutionInspection Execution(
+        BridgeHostRecoveryInspection inspection,
+        BridgeCutoverHostIdentity? observedIdentity = null) =>
+        new(inspection, observedIdentity);
 }

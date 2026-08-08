@@ -90,7 +90,9 @@ internal sealed class BridgeHostRecoveryExecutor
             return Manual(BridgeHostRecoveryReason.CheckpointChanged);
         }
 
-        var inspection = await observer.InspectAsync(cancellationToken);
+        var executionInspection = await observer.InspectForExecutionAsync(
+            cancellationToken);
+        var inspection = executionInspection.Inspection;
         if (inspection.CheckpointState is not
                 BridgeHostCutoverCheckpointReadState.Present)
         {
@@ -125,6 +127,7 @@ internal sealed class BridgeHostRecoveryExecutor
 
         return await ExecuteAsync(
             inspection.Plan,
+            executionInspection.ObservedIdentity,
             preliminaryCheckpoint,
             locked.FileVersion,
             writer,
@@ -133,16 +136,34 @@ internal sealed class BridgeHostRecoveryExecutor
 
     private async ValueTask<BridgeHostRecoveryExecutionResult> ExecuteAsync(
         BridgeHostRecoveryPlan plan,
+        BridgeCutoverHostIdentity? observedIdentity,
         BridgeHostCutoverCheckpoint checkpoint,
         string checkpointFileVersion,
         BridgeHostCutoverCheckpointWriter writer,
         CancellationToken cancellationToken)
     {
-        if (plan.Disposition is BridgeHostRecoveryDisposition.NodeAlreadyActive or
-            BridgeHostRecoveryDisposition.DotNetAlreadyActive)
+        if (plan.Disposition is BridgeHostRecoveryDisposition.DotNetAlreadyActive ||
+            (plan.Disposition is BridgeHostRecoveryDisposition.NodeAlreadyActive &&
+                checkpoint.Stage is BridgeHostCutoverStage.RolledBack))
         {
             return new(
                 BridgeHostRecoveryExecutionState.NoActionRequired,
+                plan);
+        }
+        if (plan.Disposition is BridgeHostRecoveryDisposition.NodeAlreadyActive)
+        {
+            if (observedIdentity is null ||
+                !IsExpectedNode(
+                    observedIdentity,
+                    observedIdentity.ProcessId,
+                    checkpoint.ExpectedNode.InstanceName))
+            {
+                return Manual(BridgeHostRecoveryReason.RecoveryTargetUnbound);
+            }
+            return await ConvergeRecoveredNodeAsync(
+                writer,
+                observedIdentity,
+                checkpointFileVersion,
                 plan);
         }
 
