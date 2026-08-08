@@ -91,6 +91,27 @@ public sealed class BridgeHostProductionCutoverTests
     }
 
     [TestMethod]
+    public void StartPrerequisiteValidationIsReadOnlyAndRequiresBothRollbackHosts()
+    {
+        using var environment = ProductionEnvironment.Create();
+        using var cutover = environment.CreateCutover();
+
+        cutover.ValidateStartPrerequisites();
+        Assert.AreEqual(0, environment.StartAttempts);
+
+        File.Delete(Path.Combine(environment.Root, "dist", "index.js"));
+        Assert.ThrowsException<FileNotFoundException>(
+            cutover.ValidateStartPrerequisites);
+
+        File.WriteAllText(Path.Combine(environment.Root, "dist", "index.js"), "");
+        File.Delete(Path.Combine(
+            environment.ApplicationDirectory,
+            "AiCliFeishuBridgeHost.exe"));
+        Assert.ThrowsException<FileNotFoundException>(
+            cutover.ValidateStartPrerequisites);
+    }
+
+    [TestMethod]
     public void ProductionCompositionRootFailsClosedForInvalidControlTokens()
     {
         using var environment = ProductionEnvironment.Create();

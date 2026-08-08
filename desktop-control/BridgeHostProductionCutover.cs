@@ -138,6 +138,13 @@ internal sealed class BridgeHostProductionCutover : IDisposable
             cancellationToken);
     }
 
+    public void ValidateStartPrerequisites()
+    {
+        ThrowIfDisposed();
+        _ = CreateNodeStartInfo();
+        _ = CreateDotNetStartInfo(DotNetTarget.InstanceName);
+    }
+
     public ValueTask<BridgeHostRecoveryInspection> InspectRecoveryAsync(
         CancellationToken cancellationToken = default)
     {

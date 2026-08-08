@@ -14,6 +14,7 @@ internal sealed class BridgeClient : IDisposable
     private const string ExpectedProcessIdHeader = "X-AI-CLI-Feishu-Expected-Process-Id";
     private readonly HttpClient httpClient;
     private readonly BridgeHostTargetState targetState;
+    private string? ownershipOperationBlockMessage;
 
     public BridgeClient()
     {
@@ -79,6 +80,38 @@ internal sealed class BridgeClient : IDisposable
             },
             RefreshTargetAsync);
         return await recovery.RunAsync(cancellationToken);
+    }
+
+    public async ValueTask<BridgeHostProductionCutoverResult>
+        CutoverProductionHostAsync(
+            CancellationToken cancellationToken = default)
+    {
+        RequireOwnershipOperationsAllowed();
+        var nodeTarget = BridgeHostTarget.NodeProduction(Port);
+        var service = new BridgeHostProductionCutoverService(
+            nodeTarget,
+            RecoverProductionHostOnStartupAsync,
+            () => CurrentTarget,
+            async token => await GetStatusAsync(token, forceRefresh: true),
+            async (expectedNode, token) =>
+            {
+                using var cutover = new BridgeHostProductionCutover(
+                    BridgeRoot,
+                    AppContext.BaseDirectory,
+                    Port);
+                cutover.ValidateStartPrerequisites();
+                return await cutover.CutoverAsync(expectedNode, token);
+            },
+            RefreshTargetAsync);
+        var result = await service.RunAsync(cancellationToken);
+        if (result.RequiresOwnershipLock)
+        {
+            Interlocked.CompareExchange(
+                ref ownershipOperationBlockMessage,
+                result.UserMessage,
+                null);
+        }
+        return result;
     }
 
     public async Task<BridgeStatus?> GetStatusAsync(
@@ -147,6 +180,7 @@ internal sealed class BridgeClient : IDisposable
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
+        RequireOwnershipOperationsAllowed();
         var target = await RefreshTargetCoreAsync(cancellationToken);
         AppLog.Info(
             $"启动桥接（host={target.HostKind}，ownership={target.OwnershipMode}，" +
@@ -185,6 +219,7 @@ internal sealed class BridgeClient : IDisposable
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
+        RequireOwnershipOperationsAllowed();
         var target = await RefreshTargetCoreAsync(cancellationToken);
         AppLog.Info("停止桥接...");
         var status = await GetStatusAsync(target, cancellationToken);
@@ -234,6 +269,7 @@ internal sealed class BridgeClient : IDisposable
 
     public int RunBridgeService()
     {
+        RequireOwnershipOperationsAllowed();
         var target = RefreshTargetCoreAsync().AsTask().GetAwaiter().GetResult();
         var running = GetStatusAsync(target, default).GetAwaiter().GetResult();
         if (running is not null)
@@ -1190,6 +1226,15 @@ internal sealed class BridgeClient : IDisposable
                 $"生产 Bridge Host 目标已刷新：{previous.DisplayName} → {current.DisplayName}。");
         }
         return current;
+    }
+
+    private void RequireOwnershipOperationsAllowed()
+    {
+        var message = Volatile.Read(ref ownershipOperationBlockMessage);
+        if (message is not null)
+        {
+            throw new InvalidOperationException(message);
+        }
     }
 
     private static bool TryReadControlToken(string bridgeRoot, out string token)

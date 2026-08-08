@@ -429,7 +429,9 @@ Codex 和 Claude Code Hook 脚本默认连接 `http://127.0.0.1:8765`。如需�
 
 默认不安装 Windows 登录自启动。每次需要使用时，运行桌面面板 EXE 或自己的快捷方式，点击状态按钮连接；服务运行后同一个按钮会变为“断开”。无需输入命令行。
 
-桌面 EXE 会直接启动 Node.js 桥接进程；断开时通过带本机控制令牌的接口平滑停止，不再经过 VBS 或桥接启停 PowerShell 脚本。需要自动化但不打开面板时，可使用 `AI CLI飞书助手.exe --bridge-start` 和 `AI CLI飞书助手.exe --bridge-stop`。
+桌面 EXE 会根据持久化生产切换检查点启动当前 Active Host；断开时通过带本机控制令牌的接口平滑停止，不再经过 VBS 或桥接启停 PowerShell 脚本。需要自动化但不打开面板时，可使用 `AI CLI飞书助手.exe --bridge-start` 和 `AI CLI飞书助手.exe --bridge-stop`。
+
+从 Node 生产 Host 显式切换到 C# Active Host，可运行 `AI CLI飞书助手.exe --bridge-cutover-to-dotnet` 并在警告框中确认。隔离演练或受控自动化可额外传入 `--confirm-production-cutover`；该参数只跳过警告框，不会跳过认证身份、启动恢复、Store 刷盘、唯一 Owner 租约和耐久检查点校验。切换失败不会静默猜测回退目标。
 
 Release ZIP 仍提供可选的登录自启动安装脚本；它只为当前 Windows 用户创建一个受限权限的计划任务，不会提升权限：
 

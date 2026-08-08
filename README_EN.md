@@ -368,7 +368,9 @@ Codex and Claude Code hook scripts connect to `http://127.0.0.1:8765` by default
 
 ## Installation and startup
 
-Windows login startup is not installed by default. For normal use, run the desktop executable or your shortcut and click Connect. The desktop executable starts Node.js directly and uses an authenticated local endpoint for graceful shutdown, without VBS or bridge lifecycle PowerShell wrappers. For automation without opening the panel, use `AI CLI飞书助手.exe --bridge-start` and `AI CLI飞书助手.exe --bridge-stop`.
+Windows login startup is not installed by default. For normal use, run the desktop executable or your shortcut and click Connect. The desktop executable starts the current Active Host selected by the durable production-cutover checkpoint and uses an authenticated local endpoint for graceful shutdown, without VBS or bridge lifecycle PowerShell wrappers. For automation without opening the panel, use `AI CLI飞书助手.exe --bridge-start` and `AI CLI飞书助手.exe --bridge-stop`.
+
+To explicitly cut over from the Node production Host to the C# Active Host, run `AI CLI飞书助手.exe --bridge-cutover-to-dotnet` and confirm the warning dialog. Isolated drills or controlled automation may also pass `--confirm-production-cutover`; this only skips the dialog and does not bypass authenticated identity, startup recovery, Store flush, unique-owner lease, or durable-checkpoint validation. A failed cutover never guesses a fallback target silently.
 
 The Release ZIP includes optional login-startup scripts. They create a limited, current-user scheduled task and do not elevate the bridge:
 
