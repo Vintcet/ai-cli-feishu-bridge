@@ -13,30 +13,62 @@ internal sealed class BridgeClient : IDisposable
     private const string ManagementApiVersionHeader = "X-AI-CLI-Feishu-Management-Api-Version";
     private const string ExpectedProcessIdHeader = "X-AI-CLI-Feishu-Expected-Process-Id";
     private readonly HttpClient httpClient;
-    private readonly BridgeHostTarget target;
+    private readonly BridgeHostTargetState targetState;
 
     public BridgeClient()
     {
         BridgeRoot = FindBridgeRoot();
-        target = SelectHostTarget(BridgeRoot);
-        Port = target.Port;
+        var configuredTarget = SelectHostTarget(BridgeRoot);
+        var productionTargetSelector = configuredTarget.IsProduction
+            ? new BridgeHostProductionTargetSelector(
+                Path.Combine(BridgeRoot, "data"),
+                configuredTarget.Port)
+            : null;
+        Func<CancellationToken, ValueTask<BridgeHostTarget>>? selectProductionTarget =
+            productionTargetSelector is null
+                ? null
+                : productionTargetSelector.SelectAsync;
+        targetState = new BridgeHostTargetState(
+            configuredTarget,
+            selectProductionTarget);
         httpClient = new HttpClient
         {
-            BaseAddress = new Uri($"http://127.0.0.1:{Port}/"),
+            BaseAddress = new Uri(
+                $"http://127.0.0.1:{configuredTarget.Port}/"),
             Timeout = TimeSpan.FromSeconds(5),
         };
     }
 
     public string BridgeRoot { get; }
 
-    public int Port { get; }
+    public int Port => targetState.Current.Port;
 
-    public bool IsProductionTarget => target.IsProduction;
+    public bool IsProductionTarget => targetState.Current.IsProduction;
 
-    public string HostDisplayName => target.DisplayName;
+    public bool IsDotNetProductionTarget =>
+        targetState.Current.Mode is BridgeHostMode.DotNetProduction;
+
+    public string HostDisplayName => targetState.Current.DisplayName;
+
+    internal BridgeHostTarget CurrentTarget => targetState.Current;
+
+    public async ValueTask RefreshTargetAsync(
+        CancellationToken cancellationToken = default)
+    {
+        _ = await RefreshTargetCoreAsync(cancellationToken);
+    }
 
     public async Task<BridgeStatus?> GetStatusAsync(
         CancellationToken cancellationToken = default,
+        bool forceRefresh = false)
+    {
+        var target = await RefreshTargetCoreAsync(cancellationToken);
+        return await GetStatusAsync(target, cancellationToken, forceRefresh);
+    }
+
+    private async Task<BridgeStatus?> GetStatusAsync(
+        BridgeHostTarget target,
+        CancellationToken cancellationToken,
         bool forceRefresh = false)
     {
         if (!TryReadControlToken(BridgeRoot, out var controlToken))
@@ -74,7 +106,7 @@ internal sealed class BridgeClient : IDisposable
             if (status is not null && !target.Matches(status))
             {
                 throw new InvalidOperationException(
-                    $"端口 {Port} 返回了身份不匹配的 Bridge Host：" +
+                    $"端口 {target.Port} 返回了身份不匹配的 Bridge Host：" +
                     $"expected={target.HostKind}/{target.OwnershipMode}，" +
                     $"actual={status.HostKind}/{status.OwnershipMode}。");
             }
@@ -92,16 +124,17 @@ internal sealed class BridgeClient : IDisposable
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
+        var target = await RefreshTargetCoreAsync(cancellationToken);
         AppLog.Info(
             $"启动桥接（host={target.HostKind}，ownership={target.OwnershipMode}，" +
-            $"root={BridgeRoot}，port={Port}）...");
+            $"root={BridgeRoot}，port={target.Port}）...");
         if (target.IsProduction)
         {
             await RunPowerShellScriptAsync("install-hooks.ps1", TimeSpan.FromSeconds(10));
             await RunPowerShellScriptAsync("install-claude-code-hooks.ps1", TimeSpan.FromSeconds(10));
         }
 
-        var running = await GetStatusAsync(cancellationToken);
+        var running = await GetStatusAsync(target, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         if (running is not null)
         {
@@ -111,7 +144,7 @@ internal sealed class BridgeClient : IDisposable
                 return;
             }
             throw new InvalidOperationException(
-                $"{target.HostKind} Bridge Host 已在端口 {Port} 运行，" +
+                $"{target.HostKind} Bridge Host 已在端口 {target.Port} 运行，" +
                 $"但状态为 {running.Status}，已拒绝重复启动。");
         }
 
@@ -120,17 +153,18 @@ internal sealed class BridgeClient : IDisposable
         if (publicProbe?.Ok == true)
         {
             throw new InvalidOperationException(
-                $"端口 {Port} 上已有桥接进程，但本机控制令牌不匹配；为避免启动重复进程，已拒绝继续。");
+                $"端口 {target.Port} 上已有桥接进程，但本机控制令牌不匹配；为避免启动重复进程，已拒绝继续。");
         }
 
-        StartBridgeProcess();
+        StartBridgeProcess(target);
         AppLog.Info($"{target.HostKind} 桥接进程已直接启动。");
     }
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
+        var target = await RefreshTargetCoreAsync(cancellationToken);
         AppLog.Info("停止桥接...");
-        var status = await GetStatusAsync(cancellationToken);
+        var status = await GetStatusAsync(target, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         if (status is null)
         {
@@ -139,7 +173,7 @@ internal sealed class BridgeClient : IDisposable
             if (publicProbe?.Ok == true)
             {
                 throw new InvalidOperationException(
-                    $"端口 {Port} 上的桥接进程未通过本机控制令牌验证，已拒绝停止。");
+                    $"端口 {target.Port} 上的桥接进程未通过本机控制令牌验证，已拒绝停止。");
             }
             AppLog.Info("桥接已经停止。");
             return;
@@ -167,14 +201,18 @@ internal sealed class BridgeClient : IDisposable
         AppLog.Info($"桥接已接受平滑停止请求（pid={status.ProcessId}）。");
         await BridgeHostExitWaiter.WaitAsync(
             status.ProcessId,
-            cancellationToken => ObserveBridgeExitAsync(status.ProcessId, cancellationToken),
+            cancellationToken => ObserveBridgeExitAsync(
+                target,
+                status.ProcessId,
+                cancellationToken),
             cancellationToken);
         AppLog.Info($"桥接已完成平滑停止（pid={status.ProcessId}）。");
     }
 
     public int RunBridgeService()
     {
-        var running = GetStatusAsync().GetAwaiter().GetResult();
+        var target = RefreshTargetCoreAsync().AsTask().GetAwaiter().GetResult();
+        var running = GetStatusAsync(target, default).GetAwaiter().GetResult();
         if (running is not null)
         {
             if (running.Ok)
@@ -183,17 +221,17 @@ internal sealed class BridgeClient : IDisposable
                 return 0;
             }
             throw new InvalidOperationException(
-                $"{target.HostKind} Bridge Host 已在端口 {Port} 运行，" +
+                $"{target.HostKind} Bridge Host 已在端口 {target.Port} 运行，" +
                 $"但状态为 {running.Status}，后台宿主不会重复启动。");
         }
         var publicProbe = ProbeBridgeAsync().GetAwaiter().GetResult();
         if (publicProbe?.Ok == true)
         {
             throw new InvalidOperationException(
-                $"端口 {Port} 上已有桥接进程，但本机控制令牌不匹配。");
+                $"端口 {target.Port} 上已有桥接进程，但本机控制令牌不匹配。");
         }
 
-        using var process = StartBridgeProcessCore();
+        using var process = StartBridgeProcessCore(target);
         AppLog.Info($"后台宿主正在监控桥接 pid={process.Id}。");
         process.WaitForExit();
         AppLog.Info($"桥接 pid={process.Id} 已退出，代码 {process.ExitCode}。");
@@ -920,10 +958,11 @@ internal sealed class BridgeClient : IDisposable
     }
 
     private async Task<BridgeHostExitObservation> ObserveBridgeExitAsync(
+        BridgeHostTarget target,
         int expectedProcessId,
         CancellationToken cancellationToken)
     {
-        var status = await GetStatusAsync(cancellationToken);
+        var status = await GetStatusAsync(target, cancellationToken);
         if (status is not null)
         {
             return BridgeHostExitObservation.Authenticated(status.ProcessId);
@@ -955,14 +994,19 @@ internal sealed class BridgeClient : IDisposable
         }
     }
 
-    private void StartBridgeProcess()
+    private void StartBridgeProcess(BridgeHostTarget target)
     {
-        using var process = StartBridgeProcessCore();
+        using var process = StartBridgeProcessCore(target);
         AppLog.Info($"已启动 {target.HostKind} 桥接进程 pid={process.Id}。");
     }
 
-    private Process StartBridgeProcessCore()
+    private Process StartBridgeProcessCore(BridgeHostTarget target)
     {
+        if (target.Mode is BridgeHostMode.DotNetProduction)
+        {
+            throw new InvalidOperationException(
+                "C# 生产 Host 必须由持久化切换或恢复执行器启动；普通连接流程已拒绝直接取得 Active Owner。");
+        }
         var startInfo = target.CreateStartInfo(BridgeRoot, AppContext.BaseDirectory);
         try
         {
@@ -1111,6 +1155,19 @@ internal sealed class BridgeClient : IDisposable
         => BridgeHostTarget.FromConfiguration(
             Environment.GetEnvironmentVariable("AI_CLI_FEISHU_BRIDGE_HOST"),
             ReadBridgePort(bridgeRoot));
+
+    private async ValueTask<BridgeHostTarget> RefreshTargetCoreAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var previous = targetState.Current;
+        var current = await targetState.RefreshAsync(cancellationToken);
+        if (previous != current)
+        {
+            AppLog.Info(
+                $"生产 Bridge Host 目标已刷新：{previous.DisplayName} → {current.DisplayName}。");
+        }
+        return current;
+    }
 
     private static bool TryReadControlToken(string bridgeRoot, out string token)
     {
