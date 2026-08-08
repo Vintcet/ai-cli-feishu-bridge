@@ -38,12 +38,19 @@ public sealed class FeishuInteractionCoordinator(
         FeishuApprovalView view,
         CancellationToken cancellationToken = default)
     {
-        if (approval.Status != ApprovalStatuses.Resolved || approval.Resolution is null)
+        if (approval.Status is not ApprovalStatuses.Resolved and
+                not ApprovalStatuses.Orphaned ||
+            approval.Resolution is null)
         {
             return;
         }
-        var card = renderer.ResolvedApproval(session, view, approval.Resolution);
-        var revision = $"approval:{approval.RequestId}:{approval.Resolution}:{approval.ResolvedAt:O}";
+        var card = renderer.ResolvedApproval(
+            session,
+            view,
+            approval.Resolution,
+            approval.Status);
+        var revision =
+            $"approval:{approval.RequestId}:{approval.Status}:{approval.Resolution}:{approval.ResolvedAt:O}";
         await PatchAllAsync(approval.MessageIds, revision, card, cancellationToken);
     }
 

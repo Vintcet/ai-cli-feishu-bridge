@@ -56,6 +56,41 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
     }
 
     [TestMethod]
+    public async Task TerminalApprovalSynchronizationRunsOnlyAfterStatePersistence()
+    {
+        var actions = new ConcurrentQueue<string>();
+        var notifier = new RecordingApprovalNotifier(actions);
+        await using var fixture = await RetryFixture.CreateAsync(
+            actions: actions,
+            approvalNotifications: notifier);
+
+        await fixture.Coordinator.HandleAsync(Event(
+            "approval-resolved",
+            RuntimeEventTypes.ApprovalResolvedExternally,
+            "turn-approval",
+            new
+            {
+                requestId = "approval-1",
+                resolution = ApprovalResolutions.Allow,
+            }));
+        await fixture.Coordinator.HandleAsync(Event(
+            "session-ended",
+            RuntimeEventTypes.SessionEnded,
+            "turn-approval",
+            new { }));
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "state:approval.resolved_externally",
+                $"approval-sync:approval-1:{SessionId}",
+                "state:session.ended",
+                $"approval-session-sync:{SessionId}",
+            },
+            actions.ToArray());
+    }
+
+    [TestMethod]
     public async Task SessionStartSchedulesGroupOnlyAfterStatePersistence()
     {
         var actions = new ConcurrentQueue<string>();
@@ -1005,6 +1040,29 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             actions.Enqueue($"approval:{requestId}:{sessionId}");
+            return Error is null
+                ? Task.CompletedTask
+                : Task.FromException(Error);
+        }
+
+        public Task SynchronizeAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            actions.Enqueue($"approval-sync:{requestId}:{sessionId}");
+            return Error is null
+                ? Task.CompletedTask
+                : Task.FromException(Error);
+        }
+
+        public Task SynchronizeSessionAsync(
+            string sessionId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            actions.Enqueue($"approval-session-sync:{sessionId}");
             return Error is null
                 ? Task.CompletedTask
                 : Task.FromException(Error);

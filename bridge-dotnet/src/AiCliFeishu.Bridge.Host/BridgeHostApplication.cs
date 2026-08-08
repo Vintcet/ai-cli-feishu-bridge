@@ -189,6 +189,8 @@ public static class BridgeHostApplication
         services.AddSingleton<ActiveFeishuApprovalNotificationCoordinator>();
         services.AddSingleton<IBridgeActiveApprovalNotifier>(services =>
             services.GetRequiredService<ActiveFeishuApprovalNotificationCoordinator>());
+        services.AddSingleton<IBridgeHostSubsystem>(services =>
+            services.GetRequiredService<ActiveFeishuApprovalNotificationCoordinator>());
         services.AddSingleton<ActiveFeishuInputCoordinator>();
         services.AddSingleton<ActiveFeishuIntentHandler>();
         services.AddSingleton<IBridgeFeishuIntentHandler>(services =>

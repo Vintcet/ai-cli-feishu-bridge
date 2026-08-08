@@ -92,7 +92,8 @@ public interface IFeishuCardRenderer
     FeishuCardView ResolvedApproval(
         FeishuSessionView session,
         FeishuApprovalView approval,
-        string resolution);
+        string resolution,
+        string status);
 
     FeishuCardView DeferredApproval(
         FeishuSessionView session,

@@ -58,6 +58,48 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
         Assert.AreEqual("chat-owner", route.ChatId);
     }
 
+    [TestMethod]
+    public async Task StartupSynchronizesHistoricalResolvedAndOrphanedCards()
+    {
+        var store = new RecordingStoreOwner(TerminalStoreSnapshot());
+        var state = new ActivePersistentBusinessStateOwner(
+            Options(),
+            store,
+            new FixedTimeProvider(Origin.AddMinutes(5)));
+        await state.StartAsync(CancellationToken.None);
+        var gateway = new RecordingFeishuGateway();
+        var renderer = new FeishuCardRenderer();
+        var coordinator = new ActiveFeishuApprovalNotificationCoordinator(
+            state,
+            store,
+            gateway,
+            renderer,
+            new FeishuInteractionCoordinator(
+                gateway,
+                renderer,
+                new InMemoryFeishuCardPatchLedger()),
+            new RecordingSessionGroupCoordinator([]));
+
+        await coordinator.StartAsync(CancellationToken.None);
+        await coordinator.StopAsync(CancellationToken.None);
+
+        Assert.AreEqual(2, gateway.Patches.Count);
+        var resolved = gateway.Patches.Single(item => item.MessageId == "message-resolved");
+        var orphaned = gateway.Patches.Single(item => item.MessageId == "message-orphaned");
+        StringAssert.Contains(CardText(resolved.Card), "已批准");
+        StringAssert.Contains(CardText(orphaned.Card), "审批已失效，无需再处理");
+        Assert.IsTrue(gateway.Patches.All(item =>
+            !item.Card.Content.ToJsonString().Contains(
+                FeishuCardActions.ApprovalAllow,
+                StringComparison.Ordinal)));
+    }
+
+    private static string CardText(FeishuCardView card) => string.Join(
+        '\n',
+        card.Content["elements"]!.AsArray()
+            .Select(element => element?["text"]?["content"]?.GetValue<string>())
+            .Where(text => text is not null));
+
     private static BridgeHostOptions Options() => new(
         Path.GetTempPath(),
         IPAddress.Loopback,
@@ -129,6 +171,46 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
             new ControlTokenStoreDocument());
     }
 
+    private static NodeStoreSnapshot TerminalStoreSnapshot()
+    {
+        var store = StoreSnapshot();
+        store.Approvals.Requests = new Dictionary<string, ApprovalStoreRecord>(
+            StringComparer.Ordinal)
+        {
+            ["approval-resolved"] = new()
+            {
+                RequestId = "approval-resolved",
+                SessionId = "session-1",
+                TurnId = "turn-resolved",
+                Cwd = "K:/repo",
+                ToolName = "shell_command",
+                ToolPreview = "git status",
+                CreatedAt = Origin.ToString("O"),
+                ExpiresAt = Origin.AddMinutes(20).ToString("O"),
+                Status = ApprovalStatuses.Resolved,
+                MessageIds = ["message-resolved"],
+                Resolution = ApprovalResolutions.Allow,
+                ResolvedAt = Origin.AddMinutes(2).ToString("O"),
+            },
+            ["approval-orphaned"] = new()
+            {
+                RequestId = "approval-orphaned",
+                SessionId = "session-1",
+                TurnId = "turn-orphaned",
+                Cwd = "K:/repo",
+                ToolName = "shell_command",
+                ToolPreview = "git diff",
+                CreatedAt = Origin.ToString("O"),
+                ExpiresAt = Origin.AddMinutes(20).ToString("O"),
+                Status = ApprovalStatuses.Orphaned,
+                MessageIds = ["message-orphaned"],
+                Resolution = ApprovalResolutions.Local,
+                ResolvedAt = Origin.AddMinutes(3).ToString("O"),
+            },
+        };
+        return store;
+    }
+
     private sealed class RecordingStoreOwner(NodeStoreSnapshot current) :
         IBridgeProductionStoreOwner
     {
@@ -198,6 +280,7 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
     private sealed class RecordingFeishuGateway : IFeishuGateway
     {
         public List<SentCard> Sends { get; } = [];
+        public List<(string MessageId, FeishuCardView Card)> Patches { get; } = [];
 
         public Task<string> SendCardAsync(
             string chatId,
@@ -220,7 +303,12 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
         public Task PatchCardAsync(
             string messageId,
             FeishuCardView card,
-            CancellationToken cancellationToken = default) => Task.CompletedTask;
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Patches.Add((messageId, card));
+            return Task.CompletedTask;
+        }
 
         public Task<string> SendTextAsync(
             string chatId,

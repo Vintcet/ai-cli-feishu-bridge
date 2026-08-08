@@ -320,26 +320,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             ? Generation(runtimeEvent.Session!.ExternalId)
             : 0;
         await stateSink.HandleAsync(runtimeEvent, cancellationToken);
-        if (runtimeEvent.EventType == RuntimeEventTypes.ApprovalRequested &&
-            approvalNotifications is not null)
-        {
-            try
-            {
-                await approvalNotifications.NotifyPendingAsync(
-                    RequiredString(runtimeEvent.Payload, "requestId"),
-                    runtimeEvent.Session!.ExternalId,
-                    cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch
-            {
-                // Approval state is already durable. Feishu delivery is an
-                // idempotent side channel and must not reject the Runtime event.
-            }
-        }
+        await SynchronizeApprovalNotificationsAsync(runtimeEvent, cancellationToken);
         if (runtimeEvent.EventType == RuntimeEventTypes.SessionStarted &&
             sessionGroups is not null)
         {
@@ -406,6 +387,50 @@ internal sealed class ActiveRuntimeRetryCoordinator :
                 Reset(runtimeEvent.Session!.ExternalId);
                 fileTransfers?.RemoveSession(runtimeEvent.Session.ExternalId);
                 break;
+        }
+    }
+
+    private async Task SynchronizeApprovalNotificationsAsync(
+        RuntimeEventEnvelope runtimeEvent,
+        CancellationToken cancellationToken)
+    {
+        if (approvalNotifications is null)
+        {
+            return;
+        }
+        try
+        {
+            switch (runtimeEvent.EventType)
+            {
+                case RuntimeEventTypes.ApprovalRequested:
+                    await approvalNotifications.NotifyPendingAsync(
+                        RequiredString(runtimeEvent.Payload, "requestId"),
+                        runtimeEvent.Session!.ExternalId,
+                        cancellationToken);
+                    break;
+                case RuntimeEventTypes.ApprovalResolvedExternally:
+                    await approvalNotifications.SynchronizeAsync(
+                        RequiredString(runtimeEvent.Payload, "requestId"),
+                        runtimeEvent.Session!.ExternalId,
+                        cancellationToken);
+                    break;
+                case RuntimeEventTypes.SessionEnded:
+                case RuntimeEventTypes.RuntimeDisconnected:
+                    await approvalNotifications.SynchronizeSessionAsync(
+                        runtimeEvent.Session!.ExternalId,
+                        cancellationToken);
+                    break;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // Approval state is already durable. Feishu delivery and terminal
+            // card synchronization are idempotent side channels and must not
+            // reject the Runtime event.
         }
     }
 

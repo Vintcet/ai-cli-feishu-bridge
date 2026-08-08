@@ -49,7 +49,7 @@ internal sealed class ActiveFeishuApprovalCoordinator(
 
         if (approval.Status != ApprovalStatuses.Pending)
         {
-            await SynchronizeResolvedAsync(
+            await SynchronizeTerminalAsync(
                 approval,
                 sessionView,
                 approvalView,
@@ -94,6 +94,16 @@ internal sealed class ActiveFeishuApprovalCoordinator(
             cancellationToken);
         if (claim is null)
         {
+            var observed = stateOwner.Snapshot.Approvals.Requests
+                .GetValueOrDefault(requestId);
+            if (observed is not null)
+            {
+                await SynchronizeTerminalAsync(
+                    observed,
+                    sessionView,
+                    approvalView,
+                    cancellationToken);
+            }
             return new("warning", "这条审批已经处理或正在处理中。");
         }
 
@@ -107,6 +117,16 @@ internal sealed class ActiveFeishuApprovalCoordinator(
                     cancellationToken);
                 if (deferred is null)
                 {
+                    var observed = stateOwner.Snapshot.Approvals.Requests
+                        .GetValueOrDefault(requestId);
+                    if (observed is not null)
+                    {
+                        await SynchronizeTerminalAsync(
+                            observed,
+                            sessionView,
+                            approvalView,
+                            cancellationToken);
+                    }
                     return new("warning", "这条审批已经处理或失效。");
                 }
                 await interactions.SynchronizeDeferredApprovalAsync(
@@ -145,7 +165,7 @@ internal sealed class ActiveFeishuApprovalCoordinator(
                     .GetValueOrDefault(requestId);
                 if (observed is not null)
                 {
-                    await SynchronizeResolvedAsync(
+                    await SynchronizeTerminalAsync(
                         observed,
                         sessionView,
                         approvalView,
@@ -256,12 +276,13 @@ internal sealed class ActiveFeishuApprovalCoordinator(
             }),
         };
 
-    private Task SynchronizeResolvedAsync(
+    private Task SynchronizeTerminalAsync(
         ApprovalState approval,
         FeishuSessionView session,
         FeishuApprovalView view,
         CancellationToken cancellationToken) =>
-        approval.Status == ApprovalStatuses.Resolved && approval.Resolution is not null
+        approval.Status is ApprovalStatuses.Resolved or ApprovalStatuses.Orphaned &&
+            approval.Resolution is not null
             ? interactions.SynchronizeApprovalAsync(
                 approval,
                 session,

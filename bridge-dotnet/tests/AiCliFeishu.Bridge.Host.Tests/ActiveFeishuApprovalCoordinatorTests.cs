@@ -233,6 +233,31 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
             fixture.State.Snapshot.Approvals.Requests["approval-1"].Resolution);
     }
 
+    [TestMethod]
+    public async Task ClickingOrphanedApprovalPatchesInvalidCardWithoutDispatching()
+    {
+        var fixture = Fixture.Create(
+            RuntimeNames.Codex,
+            approvalStatus: ApprovalStatuses.Orphaned,
+            resolution: ApprovalResolutions.Local);
+
+        var result = await fixture.Coordinator.HandleAsync(
+            Intent(FeishuIntentTypes.ApprovalResolve, ApprovalResolutions.Allow),
+            fixture.Store);
+
+        Assert.AreEqual("warning", result.ToastType);
+        Assert.AreEqual(0, fixture.Runtime.Commands.Count);
+        Assert.AreEqual(2, fixture.Gateway.Patches.Count);
+        foreach (var patch in fixture.Gateway.Patches)
+        {
+            StringAssert.Contains(CardText(patch.Card), "审批已失效，无需再处理");
+            var json = patch.Card.Content.ToJsonString();
+            Assert.IsFalse(json.Contains("approval_allow", StringComparison.Ordinal));
+            Assert.IsFalse(json.Contains("approval_deny", StringComparison.Ordinal));
+            Assert.IsFalse(json.Contains("approval_desktop", StringComparison.Ordinal));
+        }
+    }
+
     private static FeishuIntent Intent(
         string intentType,
         string? resolution = null,
@@ -316,9 +341,13 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
         RecordingFeishuGateway Gateway,
         NodeStoreSnapshot Store)
     {
-        public static Fixture Create(string runtime, bool ready = true)
+        public static Fixture Create(
+            string runtime,
+            bool ready = true,
+            string approvalStatus = ApprovalStatuses.Pending,
+            string? resolution = null)
         {
-            var store = StoreSnapshot(runtime);
+            var store = StoreSnapshot(runtime, approvalStatus, resolution);
             var state = new RecordingApprovalStateOwner(store);
             var commands = new RecordingRuntimeCommandGateway { Ready = ready };
             var gateway = new RecordingFeishuGateway();
@@ -335,7 +364,10 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
         }
     }
 
-    private static NodeStoreSnapshot StoreSnapshot(string runtime)
+    private static NodeStoreSnapshot StoreSnapshot(
+        string runtime,
+        string approvalStatus,
+        string? resolution)
     {
         var session = new SessionStoreRecord
         {
@@ -358,8 +390,12 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
             ToolPreview = "git status",
             CreatedAt = Origin.ToString("O"),
             ExpiresAt = Origin.AddMinutes(10).ToString("O"),
-            Status = ApprovalStatuses.Pending,
+            Status = approvalStatus,
             MessageIds = ["card-owner", "card-group"],
+            Resolution = resolution,
+            ResolvedAt = approvalStatus == ApprovalStatuses.Pending
+                ? null
+                : Origin.AddMinutes(2).ToString("O"),
             ExtensionData = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
             {
                 ["riskLevel"] = JsonSerializer.SerializeToElement("normal"),

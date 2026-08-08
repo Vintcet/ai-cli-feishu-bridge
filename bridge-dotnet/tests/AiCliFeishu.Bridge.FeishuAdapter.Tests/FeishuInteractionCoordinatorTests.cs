@@ -120,6 +120,31 @@ public sealed class FeishuInteractionCoordinatorTests
     }
 
     [TestMethod]
+    public async Task OrphanedApprovalPatchesAsInvalidWithoutActions()
+    {
+        var gateway = new RecordingFeishuGateway();
+        var coordinator = Coordinator(gateway);
+        var orphaned = new ApprovalState(
+            "approval-1",
+            "session-1",
+            ApprovalStatuses.Orphaned,
+            Origin,
+            Origin.AddMinutes(10),
+            ["card-1"],
+            ApprovalResolutions.Local,
+            Origin.AddMinutes(2));
+
+        await coordinator.SynchronizeApprovalAsync(orphaned, Session(), Approval());
+
+        Assert.AreEqual(1, gateway.Patches.Count);
+        var json = gateway.Patches[0].Card.Content.ToJsonString();
+        StringAssert.Contains(CardText(gateway.Patches[0].Card), "审批已失效，无需再处理");
+        Assert.IsFalse(json.Contains("approval_allow", StringComparison.Ordinal));
+        Assert.IsFalse(json.Contains("approval_deny", StringComparison.Ordinal));
+        Assert.IsFalse(json.Contains("approval_desktop", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
     public async Task DeferredApprovalUsesDesktopCardWithoutResolvingPendingState()
     {
         var gateway = new RecordingFeishuGateway();
@@ -425,6 +450,27 @@ public sealed class FeishuInteractionCoordinatorTests
                 FeishuCardActions.ApprovalDesktop,
             },
             actions);
+    }
+
+    [TestMethod]
+    public void TerminalApprovalCopyMakesTimeoutAndLocalCompletionFinal()
+    {
+        var renderer = new FeishuCardRenderer();
+        var timeout = renderer.ResolvedApproval(
+            Session(),
+            Approval(),
+            ApprovalResolutions.Timeout,
+            ApprovalStatuses.Resolved);
+        var local = renderer.ResolvedApproval(
+            Session(),
+            Approval(),
+            ApprovalResolutions.Local,
+            ApprovalStatuses.Resolved);
+
+        StringAssert.Contains(CardText(timeout), "审批已过期，无需再处理");
+        StringAssert.Contains(CardText(local), "已在电脑端处理，无需再操作");
+        Assert.AreEqual(0, ActionRows(timeout).Count());
+        Assert.AreEqual(0, ActionRows(local).Count());
     }
 
     [TestMethod]

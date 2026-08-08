@@ -190,25 +190,34 @@ public sealed partial class FeishuCardRenderer : IFeishuCardRenderer
     public FeishuCardView ResolvedApproval(
         FeishuSessionView session,
         FeishuApprovalView approval,
-        string resolution)
+        string resolution,
+        string status)
     {
         if (!ApprovalResolutions.All.Contains(resolution))
         {
             throw new ArgumentOutOfRangeException(nameof(resolution));
         }
+        if (status is not ApprovalStatuses.Resolved and not ApprovalStatuses.Orphaned)
+        {
+            throw new ArgumentOutOfRangeException(nameof(status));
+        }
         var runtime = RuntimeName(session.Runtime);
-        var template = resolution switch
+        var template = status == ApprovalStatuses.Orphaned
+            ? "grey"
+            : resolution switch
         {
             ApprovalResolutions.Allow => "green",
             ApprovalResolutions.Deny => "red",
             _ => "grey",
         };
-        var result = resolution switch
+        var result = status == ApprovalStatuses.Orphaned
+            ? "审批已失效，无需再处理。"
+            : resolution switch
         {
             ApprovalResolutions.Allow => $"已批准，{runtime} 将继续执行。",
             ApprovalResolutions.Deny => $"已拒绝，{runtime} 会收到拒绝结果。",
-            ApprovalResolutions.Local => $"已转回电脑端，请在原 {runtime} 窗口确认。",
-            _ => "飞书审批已超时，已转回电脑端确认。",
+            ApprovalResolutions.Local => "已在电脑端处理，无需再操作。",
+            _ => "审批已过期，无需再处理。",
         };
         return Card(
             template,
