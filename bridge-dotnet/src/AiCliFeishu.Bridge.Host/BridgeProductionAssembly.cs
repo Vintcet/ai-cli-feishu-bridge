@@ -221,6 +221,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IBridgeActiveRuntimeRetryCoordinator),
         typeof(IBridgeActiveApprovalStateOwner),
         typeof(IBridgeActiveInputStateOwner),
+        typeof(IBridgeActiveFileTransferCoordinator),
         typeof(IBridgeFeishuCredentialSource),
         typeof(IBridgeManagedTerminalRegistrationDirectory),
         typeof(IBridgeManagedRuntimeLaunchCoordinator),
@@ -241,6 +242,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveFeishuEventSource),
         typeof(ActiveFeishuGateway),
         typeof(ActiveFeishuPromptCoordinator),
+        typeof(ActiveFeishuFileTransferCoordinator),
         typeof(ActiveFeishuApprovalCoordinator),
         typeof(ActiveFeishuInputCoordinator),
         typeof(ActiveFeishuIntentHandler),
@@ -338,6 +340,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IBridgeActiveInputStateOwner),
         typeof(IBridgeFeishuIntentHandler),
         typeof(IFeishuIntentSink),
+        typeof(IBridgeActiveFileTransferCoordinator),
     ];
 
     public static BridgeProductionAssemblySnapshot Validate(

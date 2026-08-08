@@ -13,7 +13,8 @@ internal sealed class ActiveFeishuPromptCoordinator(
     IBridgePersistentBusinessStateOwner businessStateOwner,
     IBridgeRuntimeCommandGateway runtimeCommands,
     IBridgeActiveRuntimeRetryCoordinator runtimeRetries,
-    IFeishuGateway gateway)
+    IFeishuGateway gateway,
+    IBridgeActiveFileTransferCoordinator fileTransfers)
 {
     private const int MaximumDirectiveDepth = 3;
     private static readonly Regex QueueDirective = new(
@@ -38,17 +39,66 @@ internal sealed class ActiveFeishuPromptCoordinator(
         ArgumentNullException.ThrowIfNull(store);
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (intent.Attachments is { Count: > 0 })
+        var leading = ParseDirectives(intent.Text, MaximumDirectiveDepth);
+        var attachmentKey = fileTransfers.AttachmentKey(
+            intent.OperatorOpenId,
+            intent.ChatId);
+        var groupMatches = !string.Equals(intent.ChatType, "p2p", StringComparison.Ordinal)
+            ? store.Sessions.Sessions.Values
+                .Where(session => string.Equals(
+                    ExtensionString(session, "feishuChatId"),
+                    intent.ChatId,
+                    StringComparison.Ordinal))
+                .ToArray()
+            : [];
+        if (!string.Equals(intent.ChatType, "p2p", StringComparison.Ordinal) &&
+            groupMatches.Length != 1)
         {
-            await RejectAsync(intent, null, "附件处理尚未迁移到 C# Host。", cancellationToken);
+            await RejectAsync(
+                intent,
+                null,
+                groupMatches.Length == 0
+                    ? "当前群未绑定会话。"
+                    : "当前群绑定了多个会话，无法确定目标。",
+                cancellationToken);
             return null;
         }
 
-        var leading = ParseDirectives(intent.Text, MaximumDirectiveDepth);
-        if (leading.FileReturnRequested || IsFileReturnDirective(leading.Prompt))
+        if (intent.Attachments is { Count: > 0 })
         {
-            await RejectAsync(intent, null, "文件回传尚未迁移到 C# Host。", cancellationToken);
-            return null;
+            try
+            {
+                await fileTransfers.DownloadAndStageAsync(
+                    attachmentKey,
+                    intent.MessageId,
+                    intent.Attachments,
+                    cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                await RespondAsync(
+                    intent,
+                    $"附件接收失败：{Truncate(error.Message, 500)}",
+                    cancellationToken);
+                return null;
+            }
+            if (string.IsNullOrWhiteSpace(leading.Prompt))
+            {
+                var staged = fileTransfers.PeekAttachments(attachmentKey);
+                await RespondAsync(
+                    intent,
+                    !string.Equals(intent.ChatType, "p2p", StringComparison.Ordinal)
+                        ? $"已安全保存 {intent.Attachments.Count} 个附件（当前暂存 " +
+                          $"{staged.Count} 个）。下一条直接发送处理要求即可。"
+                        : $"已安全保存 {intent.Attachments.Count} 个附件（当前暂存 " +
+                          $"{staged.Count} 个）。下一条请发送处理要求；有多个窗口时请写成“@别名 要求”或“#短ID 要求”。",
+                    cancellationToken);
+                return null;
+            }
         }
 
         var quotedRoute = QuotedRoute(intent, store.Routes);
@@ -70,23 +120,6 @@ internal sealed class ActiveFeishuPromptCoordinator(
         SessionStoreRecord? target;
         if (!string.Equals(intent.ChatType, "p2p", StringComparison.Ordinal))
         {
-            var groupMatches = store.Sessions.Sessions.Values
-                .Where(session => string.Equals(
-                    ExtensionString(session, "feishuChatId"),
-                    intent.ChatId,
-                    StringComparison.Ordinal))
-                .ToArray();
-            if (groupMatches.Length != 1)
-            {
-                await RejectAsync(
-                    intent,
-                    null,
-                    groupMatches.Length == 0
-                        ? "当前群未绑定会话。"
-                        : "当前群绑定了多个会话，无法确定目标。",
-                    cancellationToken);
-                return null;
-            }
             target = groupMatches[0];
             if (explicitTarget is not null)
             {
@@ -152,15 +185,25 @@ internal sealed class ActiveFeishuPromptCoordinator(
             MaximumDirectiveDepth - leading.ConsumedDirectives);
         prompt = nested.Prompt;
         var queueRequested = leading.QueueRequested || nested.QueueRequested;
-        if (nested.FileReturnRequested || IsFileReturnDirective(prompt))
+        var fileReturnRequested = leading.FileReturnRequested || nested.FileReturnRequested;
+        if (IsFileReturnDirective(prompt))
         {
-            await RejectAsync(intent, target, "文件回传尚未迁移到 C# Host。", cancellationToken);
+            await RejectAsync(intent, target, "文件回传指令层级过深。", cancellationToken);
             return null;
         }
         if (string.IsNullOrWhiteSpace(prompt))
         {
             await RejectAsync(intent, target, "内容为空。", cancellationToken);
             return null;
+        }
+
+        var stagedAttachments = fileTransfers.TakeAttachments(attachmentKey);
+        prompt = BridgeFileTransferProtocol.AppendAttachmentsToPrompt(
+            prompt,
+            stagedAttachments);
+        if (fileReturnRequested)
+        {
+            prompt = BridgeFileTransferProtocol.AddFileReturnInstruction(prompt);
         }
 
         var runtime = Runtime(target);
@@ -204,6 +247,11 @@ internal sealed class ActiveFeishuPromptCoordinator(
             {
                 return null;
             }
+            fileTransfers.ObservePromptDispatch(
+                target.SessionId,
+                intent.ChatId,
+                fileReturnRequested,
+                queued: false);
             var messageId = await RespondAsync(
                 intent,
                 $"{RuntimeDisplayName(runtime)} 窗口已关闭，正在请求电脑端自动恢复；" +
@@ -257,6 +305,12 @@ internal sealed class ActiveFeishuPromptCoordinator(
         {
             return null;
         }
+
+        fileTransfers.ObservePromptDispatch(
+            target.SessionId,
+            intent.ChatId,
+            fileReturnRequested,
+            queued: string.Equals(mode, "queue", StringComparison.Ordinal));
 
         var acknowledgementId = await RespondAsync(
             intent,
@@ -551,6 +605,9 @@ internal sealed class ActiveFeishuPromptCoordinator(
         RuntimeNames.OpenCode => "OpenCode",
         _ => "Codex",
     };
+
+    private static string Truncate(string value, int maximumLength) =>
+        value.Length <= maximumLength ? value : value[..maximumLength] + "…";
 
     private sealed record PromptDirectives(
         string Prompt,

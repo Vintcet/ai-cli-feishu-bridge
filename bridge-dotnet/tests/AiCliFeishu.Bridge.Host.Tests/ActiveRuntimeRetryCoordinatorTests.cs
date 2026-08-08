@@ -256,6 +256,78 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
     }
 
     [TestMethod]
+    public async Task ExplicitFileReturnStripsDirectivesAndSendsRequestedFilesAfterCompletion()
+    {
+        await using var fixture = await RetryFixture.CreateAsync();
+        fixture.FileTransfers.ObservePromptDispatch(
+            SessionId,
+            "chat-1",
+            requestFileReturn: true,
+            queued: false);
+
+        await fixture.Coordinator.HandleAsync(Event(
+            "completed-file-return",
+            RuntimeEventTypes.TurnCompleted,
+            "turn-file-return",
+            new
+            {
+                turnId = "turn-file-return",
+                message = "报告已生成。\nBRIDGE_SEND_FILE: \"K:\\project\\report.txt\"",
+            }));
+
+        Assert.AreEqual(1, fixture.FileTransfers.SentFiles.Count);
+        Assert.AreEqual("chat-1", fixture.FileTransfers.SentFiles[0].ChatId);
+        CollectionAssert.AreEqual(
+            new[] { "K:\\project\\report.txt" },
+            fixture.FileTransfers.SentFiles[0].Paths.ToArray());
+        var cardJson = CardJson(fixture.Gateway.Sends.Single().Card);
+        StringAssert.Contains(cardJson, "报告已生成");
+        Assert.IsFalse(cardJson.Contains("BRIDGE_SEND_FILE", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public async Task DuplicateCompletionDoesNotConsumeAFileRequestForALaterTurn()
+    {
+        await using var fixture = await RetryFixture.CreateAsync();
+        fixture.FileTransfers.ObservePromptDispatch(
+            SessionId,
+            "chat-first",
+            requestFileReturn: true,
+            queued: false);
+        var first = Event(
+            "completed-file-first",
+            RuntimeEventTypes.TurnCompleted,
+            "turn-file-first",
+            new
+            {
+                turnId = "turn-file-first",
+                message = "第一份\nBRIDGE_SEND_FILE: K:\\project\\first.txt",
+            });
+        await fixture.Coordinator.HandleAsync(first);
+
+        fixture.FileTransfers.ObservePromptDispatch(
+            SessionId,
+            "chat-second",
+            requestFileReturn: true,
+            queued: false);
+        await fixture.Coordinator.HandleAsync(first);
+        Assert.AreEqual(1, fixture.FileTransfers.SentFiles.Count);
+
+        await fixture.Coordinator.HandleAsync(Event(
+            "completed-file-second",
+            RuntimeEventTypes.TurnCompleted,
+            "turn-file-second",
+            new
+            {
+                turnId = "turn-file-second",
+                message = "第二份\nBRIDGE_SEND_FILE: K:\\project\\second.txt",
+            }));
+
+        Assert.AreEqual(2, fixture.FileTransfers.SentFiles.Count);
+        Assert.AreEqual("chat-second", fixture.FileTransfers.SentFiles[1].ChatId);
+    }
+
+    [TestMethod]
     public async Task DuplicateCompletionDoesNotSendAnotherStopCard()
     {
         await using var fixture = await RetryFixture.CreateAsync();
@@ -725,7 +797,8 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             RecordingRuntimeCommandGateway runtimeCommands,
             RecordingFeishuGateway gateway,
             ConcurrentQueue<string> actions,
-            RecordingStateSink state)
+            RecordingStateSink state,
+            RecordingFileTransferCoordinator fileTransfers)
         {
             Coordinator = coordinator;
             Store = store;
@@ -733,6 +806,7 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             Gateway = gateway;
             Actions = actions;
             State = state;
+            FileTransfers = fileTransfers;
         }
 
         public ActiveRuntimeRetryCoordinator Coordinator { get; }
@@ -741,6 +815,7 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         public RecordingFeishuGateway Gateway { get; }
         public ConcurrentQueue<string> Actions { get; }
         public RecordingStateSink State { get; }
+        public RecordingFileTransferCoordinator FileTransfers { get; }
 
         public static async Task<RetryFixture> CreateAsync(
             RecordingStoreOwner? store = null,
@@ -764,6 +839,7 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             {
                 Ready = ready,
             };
+            var fileTransfers = new RecordingFileTransferCoordinator();
             var options = new BridgeHostOptions(
                 Path.GetTempPath(),
                 IPAddress.Loopback,
@@ -778,9 +854,17 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
                 gateway,
                 new FeishuCardRenderer(),
                 retryDelayOverride: retryDelay ?? TimeSpan.FromSeconds(5),
-                jitterSelector: _ => 0);
+                jitterSelector: _ => 0,
+                fileTransfers: fileTransfers);
             await coordinator.StartAsync(CancellationToken.None);
-            return new(coordinator, store, runtimeCommands, gateway, actions, state);
+            return new(
+                coordinator,
+                store,
+                runtimeCommands,
+                gateway,
+                actions,
+                state,
+                fileTransfers);
         }
 
         public async ValueTask DisposeAsync()

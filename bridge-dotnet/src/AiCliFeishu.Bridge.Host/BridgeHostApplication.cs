@@ -149,6 +149,9 @@ public static class BridgeHostApplication
                 .GetRequiredService<IBridgeFeishuCredentialSource>());
         services.AddSingleton<IFeishuEventSource, ActiveFeishuEventSource>();
         services.AddSingleton<IFeishuGateway, ActiveFeishuGateway>();
+        services.AddSingleton<ActiveFeishuFileTransferCoordinator>();
+        services.AddSingleton<IBridgeActiveFileTransferCoordinator>(services =>
+            services.GetRequiredService<ActiveFeishuFileTransferCoordinator>());
         services.AddSingleton<ActiveFeishuPromptCoordinator>();
         services.AddSingleton<ActiveFeishuApprovalCoordinator>();
         services.AddSingleton<ActiveFeishuInputCoordinator>();
@@ -209,7 +212,8 @@ public static class BridgeHostApplication
             () => services.GetRequiredService<IBridgeRuntimeCommandGateway>(),
             services.GetRequiredService<IFeishuGateway>(),
             services.GetRequiredService<IFeishuCardRenderer>(),
-            activity: services.GetRequiredService<ActiveRuntimeActivityCoordinator>()));
+            activity: services.GetRequiredService<ActiveRuntimeActivityCoordinator>(),
+            fileTransfers: services.GetRequiredService<IBridgeActiveFileTransferCoordinator>()));
         services.AddSingleton<IBridgeActiveRuntimeRetryCoordinator>(services =>
             services.GetRequiredService<ActiveRuntimeRetryCoordinator>());
         services.AddSingleton<IBridgeRuntimeEventHandler>(services =>

@@ -61,6 +61,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
     private readonly IFeishuGateway gateway;
     private readonly IFeishuCardRenderer renderer;
     private readonly ActiveRuntimeActivityCoordinator? activity;
+    private readonly IBridgeActiveFileTransferCoordinator? fileTransfers;
     private readonly TimeProvider clock;
     private readonly TimeSpan? retryDelayOverride;
     private readonly Func<int, int> selectJitter;
@@ -85,7 +86,8 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         TimeProvider? timeProvider = null,
         TimeSpan? retryDelayOverride = null,
         Func<int, int>? jitterSelector = null,
-        ActiveRuntimeActivityCoordinator? activity = null)
+        ActiveRuntimeActivityCoordinator? activity = null,
+        IBridgeActiveFileTransferCoordinator? fileTransfers = null)
         : this(
             options,
             stateSink,
@@ -96,7 +98,8 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             timeProvider,
             retryDelayOverride,
             jitterSelector,
-            activity)
+            activity,
+            fileTransfers)
     {
         ArgumentNullException.ThrowIfNull(runtimeCommands);
     }
@@ -111,7 +114,8 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         TimeProvider? timeProvider = null,
         TimeSpan? retryDelayOverride = null,
         Func<int, int>? jitterSelector = null,
-        ActiveRuntimeActivityCoordinator? activity = null)
+        ActiveRuntimeActivityCoordinator? activity = null,
+        IBridgeActiveFileTransferCoordinator? fileTransfers = null)
     {
         this.options = options;
         this.stateSink = stateSink;
@@ -121,6 +125,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         this.gateway = gateway;
         this.renderer = renderer;
         this.activity = activity;
+        this.fileTransfers = fileTransfers;
         clock = timeProvider ?? TimeProvider.System;
         this.retryDelayOverride = retryDelayOverride;
         selectJitter = jitterSelector ?? (maximum => Random.Shared.Next(maximum + 1));
@@ -328,9 +333,25 @@ internal sealed class ActiveRuntimeRetryCoordinator :
                     "本轮处理完成",
                     cancellationToken);
                 Reset(runtimeEvent.Session!.ExternalId);
-                await ProcessCompletionNotificationAsync(
-                    Completion(runtimeEvent),
+                var completion = Completion(runtimeEvent);
+                var directives = BridgeFileTransferProtocol.ExtractDirectives(
+                    completion.Message);
+                completion = completion with
+                {
+                    Message = string.IsNullOrWhiteSpace(directives.DisplayMessage)
+                        ? CompletionFallback(runtimeEvent.Runtime)
+                        : directives.DisplayMessage,
+                };
+                var notificationClaimed = await ProcessCompletionNotificationAsync(
+                    completion,
                     cancellationToken);
+                if (notificationClaimed)
+                {
+                    await SendCompletedFilesBestEffortAsync(
+                        runtimeEvent.Session.ExternalId,
+                        directives.Paths,
+                        cancellationToken);
+                }
                 break;
             case RuntimeEventTypes.SessionEnded:
             case RuntimeEventTypes.RuntimeDisconnected:
@@ -339,6 +360,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
                     "会话已结束",
                     cancellationToken);
                 Reset(runtimeEvent.Session!.ExternalId);
+                fileTransfers?.RemoveSession(runtimeEvent.Session.ExternalId);
                 break;
         }
     }
@@ -590,14 +612,73 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         }
     }
 
-    private Task ProcessCompletionNotificationAsync(
+    private async Task<bool> ProcessCompletionNotificationAsync(
         RuntimeNotification notification,
-        CancellationToken cancellationToken) => RunNotificationAsync(
-        notification.SessionId,
-        notification.TurnId,
-        () => ProcessCompletionNotificationCoreAsync(notification, cancellationToken));
+        CancellationToken cancellationToken)
+    {
+        var key = $"{notification.SessionId}\0{notification.TurnId}";
+        lock (sync)
+        {
+            if (!notificationFlights.Add(key))
+            {
+                return false;
+            }
+        }
 
-    private async Task ProcessCompletionNotificationCoreAsync(
+        try
+        {
+            return await ProcessCompletionNotificationCoreAsync(
+                notification,
+                cancellationToken);
+        }
+        finally
+        {
+            lock (sync)
+            {
+                notificationFlights.Remove(key);
+            }
+        }
+    }
+
+    private async Task SendCompletedFilesBestEffortAsync(
+        string sessionId,
+        IReadOnlyList<string> paths,
+        CancellationToken cancellationToken)
+    {
+        if (fileTransfers is null)
+        {
+            return;
+        }
+        BridgeFileReturnRequest? request;
+        try
+        {
+            request = fileTransfers.AdvanceReturnRequest(sessionId);
+        }
+        catch
+        {
+            return;
+        }
+        if (request is null || paths.Count == 0)
+        {
+            return;
+        }
+        try
+        {
+            await fileTransfers.SendRequestedFilesAsync(
+                sessionId,
+                request.ChatId,
+                paths,
+                cancellationToken);
+        }
+        catch
+        {
+            // File return is a notification side channel. A failed upload or
+            // route write must not turn an already durable Runtime completion
+            // into a failed Runtime event.
+        }
+    }
+
+    private async Task<bool> ProcessCompletionNotificationCoreAsync(
         RuntimeNotification notification,
         CancellationToken cancellationToken)
     {
@@ -605,7 +686,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         if (!store.Sessions.Sessions.TryGetValue(notification.SessionId, out var session) ||
             !string.Equals(Runtime(session), notification.Runtime, StringComparison.Ordinal))
         {
-            return;
+            return false;
         }
 
         notification = notification with
@@ -617,7 +698,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
         var claim = await TryClaimNotificationAsync(notification, cancellationToken);
         if (claim is null)
         {
-            return;
+            return false;
         }
 
         var cards = renderer.RuntimeCompletion(
@@ -634,6 +715,7 @@ internal sealed class ActiveRuntimeRetryCoordinator :
             delivery,
             chats.Count * cards.Count,
             cancellationToken);
+        return true;
     }
 
     private async Task RunNotificationAsync(

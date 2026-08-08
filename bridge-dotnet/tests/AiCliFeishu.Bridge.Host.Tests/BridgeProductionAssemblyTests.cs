@@ -917,6 +917,7 @@ public sealed class BridgeProductionAssemblyTests
     private static ServiceCollection CompleteActiveServices()
     {
         var services = new ServiceCollection();
+        services.AddSingleton(ActiveOptions());
         services.AddSingleton<IHostedService, BridgeInstanceLeaseService>();
         services.AddSingleton<IHostedService, ActiveOwnerLeaseHostedService>();
         services.AddSingleton<IHostedService, BridgeRuntimeWorker>();
@@ -1002,6 +1003,9 @@ public sealed class BridgeProductionAssemblyTests
         services.AddSingleton<IBridgeActiveInputStateOwner>(provider =>
             (IBridgeActiveInputStateOwner)provider
                 .GetRequiredService<IBridgePersistentBusinessStateOwner>());
+        services.AddSingleton<ActiveFeishuFileTransferCoordinator>();
+        services.AddSingleton<IBridgeActiveFileTransferCoordinator>(provider =>
+            provider.GetRequiredService<ActiveFeishuFileTransferCoordinator>());
         services.AddSingleton<ActiveFeishuPromptCoordinator>();
         services.AddSingleton<ActiveFeishuApprovalCoordinator>();
         services.AddSingleton<ActiveFeishuInputCoordinator>();

@@ -27,8 +27,11 @@ public sealed class FeishuEventNormalizer(IFeishuInboundDeduplicator deduplicato
             return FeishuNormalizationResult.Rejected("飞书消息缺少发送者、消息或会话 ID。 ");
         }
         var messageType = Text(message, "message_type") ?? "text";
-        var content = ParseEmbeddedObject(Text(message, "content"));
-        var text = ExtractText(messageType, content).Trim();
+        var content = message.TryGetProperty("content", out var rawContent)
+            ? ParseEmbeddedObject(rawContent)
+            : EmptyObject();
+        var parsedContent = ParseMessageContent(messageType, content, message);
+        var text = parsedContent.Text.Trim();
         var parameters = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["messageType"] = messageType,
@@ -48,7 +51,7 @@ public sealed class FeishuEventNormalizer(IFeishuInboundDeduplicator deduplicato
             traceId,
             text,
             parameters,
-            ExtractAttachments(messageType, content)));
+            parsedContent.Attachments));
     }
 
     public FeishuNormalizationResult NormalizeCardAction(
@@ -245,36 +248,153 @@ public sealed class FeishuEventNormalizer(IFeishuInboundDeduplicator deduplicato
         }
     }
 
-    private static IReadOnlyList<FeishuAttachment> ExtractAttachments(
+    private static ParsedMessageContent ParseMessageContent(
         string messageType,
-        JsonElement content)
-    {
-        var result = new List<FeishuAttachment>();
-        AddAttachment(result, content, "image_key", "image");
-        AddAttachment(result, content, "file_key", messageType == "image" ? "image" : "file");
-        return result;
-    }
-
-    private static void AddAttachment(
-        List<FeishuAttachment> result,
         JsonElement content,
-        string keyName,
-        string kind)
+        JsonElement message)
     {
-        var key = Text(content, keyName);
-        if (key is not null)
+        switch (messageType)
         {
-            result.Add(new(kind, key, Text(content, "file_name")));
+            case "text":
+                return new(
+                    StripLeadingMentions(Text(content, "text") ?? string.Empty, message),
+                    []);
+            case "image" when Text(content, "image_key") is { } imageKey:
+                return new(
+                    string.Empty,
+                    [new("image", imageKey, ImageFileName(imageKey))]);
+            case "file" when Text(content, "file_key") is { } fileKey:
+                return new(
+                    string.Empty,
+                    [new(
+                        "file",
+                        fileKey,
+                        Text(content, "file_name") ?? "feishu-file.bin")]);
+            case "post":
+                return ParsePostContent(content);
+            default:
+                return new(string.Empty, []);
         }
     }
 
-    private static string ExtractText(string messageType, JsonElement content)
+    private static ParsedMessageContent ParsePostContent(JsonElement content)
     {
-        if (messageType == "text")
+        var texts = new List<string>();
+        var attachments = new List<FeishuAttachment>();
+        var seenKeys = new HashSet<string>(StringComparer.Ordinal);
+        WalkPostContent(content, texts, attachments, seenKeys);
+        return new(string.Join('\n', texts).Trim(), attachments);
+    }
+
+    private static void WalkPostContent(
+        JsonElement value,
+        List<string> texts,
+        List<FeishuAttachment> attachments,
+        HashSet<string> seenKeys)
+    {
+        if (value.ValueKind == JsonValueKind.Array)
         {
-            return Text(content, "text") ?? "";
+            foreach (var item in value.EnumerateArray())
+            {
+                WalkPostContent(item, texts, attachments, seenKeys);
+            }
+            return;
         }
-        return Text(content, "text") ?? Text(content, "title") ?? "";
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        AddPostText(value, "text", texts);
+        AddPostText(value, "title", texts);
+        if (Text(value, "image_key") is { } imageKey && seenKeys.Add(imageKey))
+        {
+            attachments.Add(new("image", imageKey, ImageFileName(imageKey)));
+        }
+        if (Text(value, "file_key") is { } fileKey && seenKeys.Add(fileKey))
+        {
+            attachments.Add(new(
+                "file",
+                fileKey,
+                Text(value, "file_name") ?? "feishu-file.bin"));
+        }
+
+        foreach (var property in value.EnumerateObject())
+        {
+            if (property.Name is not ("text" or "title"))
+            {
+                WalkPostContent(property.Value, texts, attachments, seenKeys);
+            }
+        }
+    }
+
+    private static void AddPostText(
+        JsonElement value,
+        string propertyName,
+        List<string> texts)
+    {
+        var text = Text(value, propertyName)?.Trim();
+        if (!string.IsNullOrEmpty(text))
+        {
+            texts.Add(text);
+        }
+    }
+
+    private static string StripLeadingMentions(string text, JsonElement message)
+    {
+        var normalized = text.Trim();
+        if (message.ValueKind != JsonValueKind.Object ||
+            !message.TryGetProperty("mentions", out var mentions) ||
+            mentions.ValueKind != JsonValueKind.Array)
+        {
+            return normalized;
+        }
+
+        var keys = mentions.EnumerateArray()
+            .Select(mention => Text(mention, "key"))
+            .Where(key => key is not null)
+            .Cast<string>()
+            .ToArray();
+        bool changed;
+        do
+        {
+            changed = false;
+            foreach (var key in keys)
+            {
+                if (!normalized.StartsWith(key, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                var index = key.Length;
+                while (index < normalized.Length &&
+                    (char.IsWhiteSpace(normalized[index]) ||
+                     normalized[index] is ':' or '：' or ',' or '，'))
+                {
+                    index++;
+                }
+                normalized = normalized[index..].Trim();
+                changed = true;
+            }
+        }
+        while (changed && normalized.Length != 0);
+        return normalized;
+    }
+
+    private static string ImageFileName(string imageKey)
+    {
+        var suffixLength = Math.Min(8, imageKey.Length);
+        return $"feishu-image-{imageKey[^suffixLength..]}.jpg";
+    }
+
+    private static JsonElement ParseEmbeddedObject(JsonElement value)
+    {
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            return value.Clone();
+        }
+        return value.ValueKind == JsonValueKind.String
+            ? ParseEmbeddedObject(value.GetString())
+            : EmptyObject();
     }
 
     private static JsonElement ParseEmbeddedObject(string? json)
@@ -332,4 +452,8 @@ public sealed class FeishuEventNormalizer(IFeishuInboundDeduplicator deduplicato
             ? element.GetString()
             : null;
     }
+
+    private sealed record ParsedMessageContent(
+        string Text,
+        IReadOnlyList<FeishuAttachment> Attachments);
 }

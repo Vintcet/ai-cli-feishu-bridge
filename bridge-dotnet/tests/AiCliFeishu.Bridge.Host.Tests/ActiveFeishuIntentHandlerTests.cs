@@ -487,12 +487,14 @@ public sealed class ActiveFeishuIntentHandlerTests
             var runtimeRetries = new RecordingRuntimeRetryCoordinator();
             var business = new RecordingBusinessStateOwner(BusinessSnapshot());
             var launches = new RecordingLaunchCoordinator();
+            var fileTransfers = new RecordingFileTransferCoordinator();
             var prompts = new ActiveFeishuPromptCoordinator(
                 store,
                 business,
                 runtimeCommands,
                 runtimeRetries,
-                gateway);
+                gateway,
+                fileTransfers);
             var renderer = new FeishuCardRenderer();
             var interactions = new FeishuInteractionCoordinator(
                 gateway,

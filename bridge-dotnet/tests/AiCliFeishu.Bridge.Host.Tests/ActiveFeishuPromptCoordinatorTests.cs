@@ -158,7 +158,7 @@ public sealed class ActiveFeishuPromptCoordinatorTests
     }
 
     [TestMethod]
-    public async Task AttachmentsFileReturnAndInteractiveQuotesRemainClosed()
+    public async Task AttachmentsAndFileReturnDispatchWhileInteractiveQuotesRemainClosed()
     {
         var target = Session(
             "codex-session-aaa12345",
@@ -177,11 +177,11 @@ public sealed class ActiveFeishuPromptCoordinatorTests
             readySessionIds: Set(target.SessionId));
 
         await fixture.Coordinator.HandleAsync(
-            Intent("处理附件", attachments: [new("file", "file-1", "data.txt")]),
+            Intent("", attachments: [new("file", "file-1", "data.txt")]),
             fixture.Store.Current);
         await fixture.Coordinator.HandleAsync(
             Intent(
-                "排队 queue /queue @alpha 发文件 生成报告",
+                "@alpha 发文件 生成报告",
                 messageId: "message-2"),
             fixture.Store.Current);
         await fixture.Coordinator.HandleAsync(
@@ -194,11 +194,17 @@ public sealed class ActiveFeishuPromptCoordinatorTests
                 }),
             fixture.Store.Current);
 
-        Assert.AreEqual(0, fixture.RuntimeCommands.Commands.Count);
-        Assert.AreEqual(0, fixture.Store.Updates);
+        Assert.AreEqual(1, fixture.RuntimeCommands.Commands.Count);
+        StringAssert.Contains(
+            fixture.RuntimeCommands.Commands.Single().Payload.GetProperty("prompt").GetString()!,
+            "K:\\uploads\\message-1-1-data.txt");
+        StringAssert.Contains(
+            fixture.RuntimeCommands.Commands.Single().Payload.GetProperty("prompt").GetString()!,
+            "BRIDGE_SEND_FILE");
+        Assert.AreEqual(1, fixture.FileTransfers.Downloads.Count);
+        Assert.IsTrue(fixture.FileTransfers.Dispatches.Single().FileReturn);
         Assert.AreEqual(3, fixture.Gateway.Replies.Count);
-        StringAssert.Contains(fixture.Gateway.Replies[0].Text, "附件处理尚未迁移");
-        StringAssert.Contains(fixture.Gateway.Replies[1].Text, "文件回传尚未迁移");
+        StringAssert.Contains(fixture.Gateway.Replies[0].Text, "已安全保存 1 个附件");
         StringAssert.Contains(fixture.Gateway.Replies[2].Text, "审批或问答交互尚未迁移");
     }
 
@@ -423,7 +429,8 @@ public sealed class ActiveFeishuPromptCoordinatorTests
         RecordingStoreOwner Store,
         RecordingRuntimeCommandGateway RuntimeCommands,
         RecordingRuntimeRetryCoordinator RuntimeRetries,
-        RecordingFeishuGateway Gateway)
+        RecordingFeishuGateway Gateway,
+        RecordingFileTransferCoordinator FileTransfers)
     {
         public static Fixture Create(
             IReadOnlyList<SessionStoreRecord> sessions,
@@ -459,12 +466,14 @@ public sealed class ActiveFeishuPromptCoordinatorTests
                 readySessionIds ?? new HashSet<string>(StringComparer.Ordinal));
             var runtimeRetries = new RecordingRuntimeRetryCoordinator();
             var gateway = new RecordingFeishuGateway();
+            var fileTransfers = new RecordingFileTransferCoordinator();
             return new(
-                new(store, business, runtimeCommands, runtimeRetries, gateway),
+                new(store, business, runtimeCommands, runtimeRetries, gateway, fileTransfers),
                 store,
                 runtimeCommands,
                 runtimeRetries,
-                gateway);
+                gateway,
+                fileTransfers);
         }
     }
 

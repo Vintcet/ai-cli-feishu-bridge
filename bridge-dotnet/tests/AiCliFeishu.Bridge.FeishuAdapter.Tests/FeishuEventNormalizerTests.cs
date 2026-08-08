@@ -96,6 +96,99 @@ public sealed class FeishuEventNormalizerTests
     }
 
     [TestMethod]
+    public void ObjectMessageContentIsAcceptedLikeTheFeishuStringForm()
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            sender = new { sender_id = new { open_id = "owner" } },
+            message = new
+            {
+                message_id = "message-object-content",
+                chat_id = "chat-1",
+                chat_type = "p2p",
+                message_type = "file",
+                content = new { file_key = "file-object", file_name = "object.txt" },
+            },
+        });
+
+        var result = NewNormalizer().NormalizeMessage(
+            "event-object-content",
+            "trace-object-content",
+            Json(payload));
+
+        var attachment = result.Intent!.Attachments!.Single();
+        Assert.AreEqual("file-object", attachment.Key);
+        Assert.AreEqual("object.txt", attachment.Name);
+    }
+
+    [TestMethod]
+    public void ImageAndPostMessagesNormalizeNestedTextAndAttachments()
+    {
+        var image = NewNormalizer().NormalizeMessage(
+            "event-image",
+            "trace-image",
+            Json("""
+                {
+                  "sender":{"sender_id":{"open_id":"owner"}},
+                  "message":{
+                    "message_id":"message-image",
+                    "chat_id":"chat-1",
+                    "message_type":"image",
+                    "content":"{\"image_key\":\"img_12345678\"}"
+                  }
+                }
+                """));
+        Assert.AreEqual("image", image.Intent!.Attachments!.Single().Kind);
+        Assert.AreEqual(
+            "feishu-image-12345678.jpg",
+            image.Intent.Attachments!.Single().Name);
+
+        var post = NewNormalizer().NormalizeMessage(
+            "event-post",
+            "trace-post",
+            Json("""
+                {
+                  "sender":{"sender_id":{"open_id":"owner"}},
+                  "message":{
+                    "message_id":"message-post",
+                    "chat_id":"chat-1",
+                    "message_type":"post",
+                    "content":"{\"zh_cn\":{\"title\":\"检查截图\",\"content\":[[{\"tag\":\"text\",\"text\":\"找出问题\"},{\"tag\":\"img\",\"image_key\":\"img-post-1\"},{\"tag\":\"file\",\"file_key\":\"file-post-1\",\"file_name\":\"report.pdf\"}]]}}"
+                  }
+                }
+                """));
+        StringAssert.Contains(post.Intent!.Text, "检查截图");
+        StringAssert.Contains(post.Intent.Text, "找出问题");
+        Assert.AreEqual(2, post.Intent.Attachments!.Count);
+        Assert.AreEqual("image", post.Intent.Attachments[0].Kind);
+        Assert.AreEqual("file", post.Intent.Attachments[1].Kind);
+        Assert.AreEqual("report.pdf", post.Intent.Attachments[1].Name);
+    }
+
+    [TestMethod]
+    public void GroupMentionPrefixIsRemovedBeforePromptRouting()
+    {
+        var result = NewNormalizer().NormalizeMessage(
+            "event-mention",
+            "trace-mention",
+            Json("""
+                {
+                  "sender":{"sender_id":{"open_id":"owner"}},
+                  "message":{
+                    "message_id":"message-mention",
+                    "chat_id":"chat-1",
+                    "chat_type":"group",
+                    "message_type":"text",
+                    "mentions":[{"key":"@_user_1"}],
+                    "content":"{\"text\":\"@_user_1：请继续处理\"}"
+                  }
+                }
+                """));
+
+        Assert.AreEqual("请继续处理", result.Intent!.Text);
+    }
+
+    [TestMethod]
     public void DuplicateEventIsRejectedBeforeItCanPublishAgain()
     {
         var normalizer = NewNormalizer();
