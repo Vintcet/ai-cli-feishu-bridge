@@ -6,6 +6,7 @@ namespace AiCliFeishuControl;
 internal enum BridgeHostMode
 {
     NodeProduction,
+    DotNetProduction,
     DotNetShadow,
 }
 
@@ -21,8 +22,18 @@ internal sealed record BridgeHostTarget(
     public const int CurrentManagementApiVersion = 1;
     public const int DotNetShadowPort = 8876;
     public const string DotNetShadowInstanceName = "desktop-shadow";
+    public const string DotNetProductionInstanceName = "production-dotnet";
 
-    public bool IsProduction => Mode is BridgeHostMode.NodeProduction;
+    public bool IsProduction => Mode is not BridgeHostMode.DotNetShadow;
+
+    public bool UsesNodeRuntime => Mode is BridgeHostMode.NodeProduction;
+
+    public string DisplayName => Mode switch
+    {
+        BridgeHostMode.NodeProduction => "Node 生产 Host",
+        BridgeHostMode.DotNetProduction => "C# 生产 Host",
+        _ => "C# Shadow Host",
+    };
 
     public static BridgeHostTarget NodeProduction(int port) =>
         new(
@@ -43,6 +54,18 @@ internal sealed record BridgeHostTarget(
             "passive",
             false,
             DotNetShadowInstanceName);
+
+    public static BridgeHostTarget DotNetProduction(
+        int port,
+        string instanceName = DotNetProductionInstanceName) =>
+        new(
+            BridgeHostMode.DotNetProduction,
+            "dotnet",
+            CurrentManagementApiVersion,
+            port,
+            "active",
+            true,
+            instanceName);
 
     public static BridgeHostTarget FromConfiguration(string? configured, int productionPort)
     {
@@ -71,7 +94,7 @@ internal sealed record BridgeHostTarget(
 
     public ProcessStartInfo CreateStartInfo(string bridgeRoot, string applicationDirectory)
     {
-        if (Mode is BridgeHostMode.NodeProduction)
+        if (UsesNodeRuntime)
         {
             var entryFile = Path.Combine(bridgeRoot, "dist", "index.js");
             if (!File.Exists(entryFile))
@@ -139,6 +162,6 @@ internal sealed record BridgeHostTarget(
             }
         }
         throw new FileNotFoundException(
-            "找不到 C# Shadow Host。请先构建 AiCliFeishu.Bridge.Host，或设置 AI_CLI_FEISHU_DOTNET_HOST_PATH。");
+            "找不到 C# Bridge Host。请先构建 AiCliFeishu.Bridge.Host，或设置 AI_CLI_FEISHU_DOTNET_HOST_PATH。");
     }
 }

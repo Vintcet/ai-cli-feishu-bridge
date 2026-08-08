@@ -42,6 +42,7 @@
     <Compile Include="..\BridgeHostRecoveryObserver.cs" Link="BridgeHostRecoveryObserver.cs" />
     <Compile Include="..\BridgeHostRecoveryExecutor.cs" Link="BridgeHostRecoveryExecutor.cs" />
     <Compile Include="..\ProductionBridgeStoreHandoffInspector.cs" Link="ProductionBridgeStoreHandoffInspector.cs" />
+    <Compile Include="..\BridgeHostProductionCutover.cs" Link="BridgeHostProductionCutover.cs" />
     <Compile Include="BridgeHostCutoverTransactionTests.cs" />
     <Compile Include="BridgeHostCutoverCoordinatorTests.cs" />
     <Compile Include="BridgeHostPersistentCutoverCoordinatorTests.cs" />
@@ -54,6 +55,7 @@
     <Compile Include="BridgeHostRecoveryObserverTests.cs" />
     <Compile Include="BridgeHostRecoveryExecutorTests.cs" />
     <Compile Include="ProductionBridgeStoreHandoffInspectorTests.cs" />
+    <Compile Include="BridgeHostProductionCutoverTests.cs" />
   </ItemGroup>
 
   <Target Name="CopyCutoverHostFixture" AfterTargets="Build">

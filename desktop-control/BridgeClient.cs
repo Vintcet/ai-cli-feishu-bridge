@@ -33,7 +33,7 @@ internal sealed class BridgeClient : IDisposable
 
     public bool IsProductionTarget => target.IsProduction;
 
-    public string HostDisplayName => target.IsProduction ? "Node 生产 Host" : "C# Shadow Host";
+    public string HostDisplayName => target.DisplayName;
 
     public async Task<BridgeStatus?> GetStatusAsync(
         CancellationToken cancellationToken = default,
@@ -971,9 +971,9 @@ internal sealed class BridgeClient : IDisposable
         }
         catch (Win32Exception error)
         {
-            var requirement = target.IsProduction
+            var requirement = target.UsesNodeRuntime
                 ? "请确认 Node.js 20 或更高版本已安装并加入 PATH。"
-                : "请确认 C# Shadow Host 已构建，并安装对应的 .NET Runtime。";
+                : "请确认 C# Bridge Host 已构建，并安装对应的 .NET Runtime。";
             throw new InvalidOperationException(
                 $"无法启动 {target.HostKind} 桥接。{requirement}",
                 error);
