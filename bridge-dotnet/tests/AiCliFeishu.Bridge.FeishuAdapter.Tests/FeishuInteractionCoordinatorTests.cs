@@ -358,7 +358,7 @@ public sealed class FeishuInteractionCoordinatorTests
     }
 
     [TestMethod]
-    public void RuntimeSelectionMatchesNodeRuntimeChoicesAndCarriesFlowContext()
+    public void RuntimeSelectionMatchesRuntimeChoicesAndCarriesFlowContext()
     {
         var context = RuntimeContext();
         var card = new FeishuCardRenderer().RuntimeSelection("K:\\workspace", context);

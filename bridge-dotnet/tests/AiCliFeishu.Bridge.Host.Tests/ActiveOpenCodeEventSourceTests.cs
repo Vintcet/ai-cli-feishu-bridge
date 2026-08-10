@@ -12,7 +12,7 @@ public sealed class ActiveOpenCodeEventSourceTests
         "C:/repo space");
 
     [TestMethod]
-    public async Task HealthProbeUsesGlobalEndpointAndMatchesNodeHealthSemantics()
+    public async Task HealthProbeUsesGlobalEndpointAndMatchesExpectedHealthSemantics()
     {
         var handler = new QueueHandler();
         handler.Enqueue(new HttpResponseMessage(HttpStatusCode.OK)

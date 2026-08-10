@@ -17,7 +17,7 @@ public sealed record BridgeBusinessStateSnapshot(
 {
     public static BridgeBusinessStateSnapshot NotInitialized { get; } = new(
         false,
-        BridgeStoreShadowStatuses.NotLoaded,
+        BridgeStoreViewStatuses.NotLoaded,
         0,
         0,
         SessionDirectoryState.Empty,
@@ -25,7 +25,7 @@ public sealed record BridgeBusinessStateSnapshot(
         InputRegistryState.Empty);
 }
 
-public sealed class BridgeBusinessStateOwner(IBridgeStoreShadow storeShadow)
+public sealed class BridgeBusinessStateOwner(IBridgeStoreView storeView)
     : IBridgeRuntimeEventHandler,
       IBridgeFeishuIntentHandler,
       IBridgeControlBusinessStateSource,
@@ -33,7 +33,7 @@ public sealed class BridgeBusinessStateOwner(IBridgeStoreShadow storeShadow)
       IBridgeHostSubsystemHealth
 {
     private const string PassiveIntentMessage =
-        "C# Shadow 当前只读观测，未执行这次飞书操作。";
+        "C# 只读模式未执行这次飞书操作。";
     private readonly object sync = new();
     private BridgeBusinessStateSnapshot snapshot = BridgeBusinessStateSnapshot.NotInitialized;
 
@@ -59,7 +59,7 @@ public sealed class BridgeBusinessStateOwner(IBridgeStoreShadow storeShadow)
                 ? new(
                     Name,
                     "passive",
-                    $"shadow sessions={current.Sessions.Sessions.Count} " +
+                    $"readonly sessions={current.Sessions.Sessions.Count} " +
                     $"approvals={current.Approvals.Requests.Count} " +
                     $"inputs={current.Inputs.Requests.Count}")
                 : new(Name, "failed", $"source={current.SourceStatus}");
@@ -69,20 +69,20 @@ public sealed class BridgeBusinessStateOwner(IBridgeStoreShadow storeShadow)
     public Task StartAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        RefreshFromShadow();
+        RefreshFromStoreView();
         return Task.CompletedTask;
     }
 
     public Task RefreshAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        RefreshFromShadow();
+        RefreshFromStoreView();
         return Task.CompletedTask;
     }
 
-    private void RefreshFromShadow()
+    private void RefreshFromStoreView()
     {
-        var source = storeShadow.Snapshot;
+        var source = storeView.Snapshot;
         lock (sync)
         {
             snapshot = source.Core is null
@@ -269,7 +269,7 @@ public sealed class BridgeBusinessStateOwner(IBridgeStoreShadow storeShadow)
         snapshot.Initialized
             ? snapshot
             : throw new InvalidOperationException(
-                $"业务状态所有者尚未从 Node Store 初始化：{snapshot.SourceStatus}。");
+                $"业务状态所有者尚未从 Bridge Store 初始化：{snapshot.SourceStatus}。");
 
     private static SessionDirectoryState StartSession(
         SessionDirectoryState state,

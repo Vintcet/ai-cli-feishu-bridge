@@ -19,9 +19,6 @@
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="..\..\src\AiCliFeishu.Bridge.Host\AiCliFeishu.Bridge.Host.csproj" />
-    <None Include="..\..\..\protocol\ownership\v1\examples\active-owner-node.json"
-          Link="OwnershipExamples\active-owner-node.json"
-          CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\..\protocol\ownership\v1\examples\active-owner-dotnet.json"
           Link="OwnershipExamples\active-owner-dotnet.json"
           CopyToOutputDirectory="PreserveNewest" />

@@ -2,44 +2,18 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
-当前版本：`0.19.1`
+当前版本：`0.20.0`
 
 AI CLI 飞书助手是一个运行在 Windows 本机的非官方桥接器，把 Codex CLI、Claude Code 和 OpenCode 会话连接到你自己的飞书企业自建应用。每个助手会话可以绑定一个独立私有群，让你在电脑外接收完成或错误通知、处理权限审批和补充问题，并继续向原会话发送消息。
 
 桥接服务、会话索引和配置都保存在本机；项目不提供云端中转服务，也不捆绑 Codex CLI、Claude Code、OpenCode 或飞书应用。使用者需要自行安装并登录目标 CLI，并自行创建飞书应用。
 
-## 0.19.1 更新摘要
+## 0.20.0 更新摘要
 
-- 飞书审批卡片现在会与 Codex、Claude Code 本机审批状态双向同步，过期卡片会及时变为已处理，避免重复审批；
-- 新增分级的新建会话卡片，可在一张飞书卡片中选择 Codex、Claude Code 或 OpenCode；
-- 飞书原生命令会优先于会话路由处理，多会话同时活跃时仍可正常使用 `/新建`、`/状态` 等机器人命令。
-
-## 0.19.0 更新摘要
-
-- 项目正式更名为“AI CLI 飞书助手”，仓库与 npm 包改为 `ai-cli-feishu-bridge`，三种运行时作为同等入口展示；
-- 桌面窗口、托盘、飞书卡片、日志、发布包及脚本中的产品文字全部使用新名称；
-- Windows 程序、项目、命名管道、鉴权头和环境变量统一改为 `AiCliFeishu*` / `AI_CLI_FEISHU_*`，不再保留旧名称。
-
-## 0.18.2 更新摘要
-
-- 控制面板的刷新按钮会等待一次真实进程扫描，外部关闭的 Codex / Claude Code 窗口可及时从活跃列表移除；
-- 外部参数恢复的会话关闭后也会进入历史记录；从历史点击“继续对话”后会转为助手托管并获得飞书双向控制能力；
-- 历史记录不再显示会随恢复参数变化的模型列；同项目多开会话的飞书群使用稳定编号，如 `Codex｜项目`、`Codex｜项目（2）`。
-
-## 0.18.1 更新摘要
-
-- 为长期运行增加会话、审批、消息路由和去重记录的容量与保留期上限，待处理审批不会被容量清理误删；
-- Codex 转录监控会对闲置会话降低轮询频率，并正确处理文件替换、部分 UTF-8 内容及停止前最后一次扫描；
-- Windows 构建基线升级到 Node.js 24，并让路径测试兼容长路径和 8.3 短路径的等价表示。
-
-## 0.18.0 更新摘要
-
-- 本机 HTTP 控制面统一使用持久令牌鉴权，匿名健康检查不再暴露配对码或会话信息，并拒绝跨站及非 JSON 写请求；
-- Codex、Claude Code、OpenCode 共用低风险自动审批规则，高风险命令继续发送飞书人工审批；
-- 历史记录可直接设置、修改或清除别名，操作不会改变原会话 ID、飞书群绑定或恢复目录；
-- 临时 400/408/409/429/5xx、服务繁忙及超时错误使用统一自动重试策略，错误卡可随时停止本批后续重试；Codex 未触发 `Stop` Hook 时也会从活动转录补报；
-- 修复旧 PID 被其他程序复用后会话短暂重现、审批两端状态延迟、附件与审批日志无界增长等长期运行问题；
-- 桌面 EXE 直接管理 Node.js 桥接进程，支持鉴权平滑关闭；X 收进托盘、最小化留在任务栏，托盘双击直接恢复到前台。
+- 生产桥接、桌面控制、Codex Hook 和 Claude Code Hook 已全部统一为 C#/.NET 实现；
+- 发布包不再包含 JavaScript、TypeScript、npm、`dist` 或 `node_modules`；
+- 审批、补充信息和飞书交互卡片继续保留已验证的状态同步与失效处理修复；
+- 桌面助手直接启动唯一的 C# Active Host，并通过本机控制令牌完成状态读取和平滑停止。
 
 ## 功能与运行时支持
 
@@ -80,7 +54,6 @@ AI CLI 飞书助手是一个运行在 Windows 本机的非官方桥接器，把 
 
 - Windows 10/11 x64；
 - Git 仅在克隆源码或参与开发时需要；直接下载 Release ZIP 不需要；
-- Node.js 20 或更高版本；
 - PowerShell 7（命令名为 `pwsh.exe`）；
 - .NET 8 Windows Desktop Runtime；从源码编译桌面端时需要 .NET 8 SDK；
 - Codex CLI、Claude Code、OpenCode 中至少安装一个；
@@ -91,7 +64,7 @@ AI CLI 飞书助手是一个运行在 Windows 本机的非官方桥接器，把 
 
 ### 使用 Release ZIP
 
-Windows 用户可以从 [GitHub Releases](https://github.com/Vintcet/ai-cli-feishu-bridge/releases) 下载 `ai-cli-feishu-bridge-v0.19.1-windows-x64.zip`。压缩包已包含编译后的桥接服务、生产依赖和两个桌面 EXE；请完整解压后使用，不要只拿主程序一个文件。首次运行前，把 `.env.example` 复制为 `.env` 并填写飞书应用配置，然后双击根目录的 `AI CLI飞书助手.exe`。
+Windows 用户可以从 [GitHub Releases](https://github.com/Vintcet/ai-cli-feishu-bridge/releases) 下载 `ai-cli-feishu-bridge-v0.20.0-windows-x64.zip`。压缩包包含桌面助手、终端/Hook 宿主和 C# Bridge Host；请完整解压后使用，不要只拿主程序一个文件。首次运行前，把 `.env.example` 复制为 `.env` 并填写飞书应用配置，然后双击根目录的 `AI CLI飞书助手.exe`。
 
 ### 从源码构建
 
@@ -100,19 +73,17 @@ Windows 用户可以从 [GitHub Releases](https://github.com/Vintcet/ai-cli-feis
 ```powershell
 git clone https://github.com/Vintcet/ai-cli-feishu-bridge.git
 cd .\ai-cli-feishu-bridge
-npm install
 Copy-Item .\.env.example .\.env
-npm run build
-dotnet publish .\desktop-control\AiCliFeishuControl.csproj -c Release -o .\desktop-control\publish
+.\scripts\build-release.ps1
 ```
 
-然后编辑 `.env`，并运行源码构建出的程序：
+然后编辑 `.env`，解压 `release` 目录中新生成的 ZIP，运行其中的桌面助手。也可以直接运行源码发布目录中的程序：
 
 ```powershell
 .\desktop-control\publish\AiCliFeishuControl.exe
 ```
 
-`AiCliFeishuControl.exe` 是源码构建出的桌面面板，`AiCliFeishuTerminalHost.exe` 必须与它保留在同一目录。已打包版本可以把主程序显示为 `AI CLI飞书助手.exe`，功能相同。需要桌面入口时，可为实际使用的主程序手动创建快捷方式。
+`AiCliFeishuControl.exe` 是源码构建出的桌面面板，`AiCliFeishuTerminalHost.exe` 和 `AiCliFeishuBridgeHost.exe` 必须与它保留在同一目录。已打包版本把主程序显示为 `AI CLI飞书助手.exe`，功能相同。
 
 ## 飞书机器人：从创建到可用
 
@@ -429,9 +400,7 @@ Codex 和 Claude Code Hook 脚本默认连接 `http://127.0.0.1:8765`。如需�
 
 默认不安装 Windows 登录自启动。每次需要使用时，运行桌面面板 EXE 或自己的快捷方式，点击状态按钮连接；服务运行后同一个按钮会变为“断开”。无需输入命令行。
 
-桌面 EXE 会根据持久化生产切换检查点启动当前 Active Host；断开时通过带本机控制令牌的接口平滑停止，不再经过 VBS 或桥接启停 PowerShell 脚本。需要自动化但不打开面板时，可使用 `AI CLI飞书助手.exe --bridge-start` 和 `AI CLI飞书助手.exe --bridge-stop`。
-
-从 Node 生产 Host 显式切换到 C# Active Host，可在桌面面板中先连接已认证的 Node，然后点击“切换到 C#”；也可运行 `AI CLI飞书助手.exe --bridge-cutover-to-dotnet` 并在警告框中确认。隔离演练或受控自动化可额外传入 `--confirm-production-cutover`；该参数只跳过警告框，不会跳过认证身份、启动恢复、Store 刷盘、唯一 Owner 租约和耐久检查点校验。切换失败不会静默猜测回退目标。
+桌面 EXE 只会启动 C# Active Host；断开时通过带本机控制令牌的接口平滑停止。需要自动化但不打开面板时，可使用 `AI CLI飞书助手.exe --bridge-start` 和 `AI CLI飞书助手.exe --bridge-stop`。
 
 Release ZIP 仍提供可选的登录自启动安装脚本；它只为当前 Windows 用户创建一个受限权限的计划任务，不会提升权限：
 
@@ -442,33 +411,20 @@ pwsh -NoProfile -File .\scripts\uninstall-autostart.ps1
 
 ### 仅运行或调试桥接服务
 
-下面的命令只启动 Node.js 桥接服务，不包含桌面面板。需要完整的托管窗口、历史记录和自动恢复功能时，请按前文“获取程序与首次运行”同时构建并运行桌面端。
+下面的命令只启动 C# Bridge Host，不包含桌面面板：
 
 ```powershell
 cd <项目目录>\ai-cli-feishu-bridge
-npm install
-npm run build
-npm start
-```
-
-开发时也可运行：
-
-```powershell
-npm run dev
+dotnet run --project .\bridge-dotnet\src\AiCliFeishu.Bridge.Host\AiCliFeishu.Bridge.Host.csproj -- --data-directory .\data --listen 127.0.0.1 --port 8765 --ownership active --instance production-dotnet
 ```
 
 提交改动前可运行完整的本地校验：
 
 ```powershell
-npm run lint
-npm run format:check
-npm test
-npm run build
 dotnet test .\desktop-control\tests\AiCliFeishuTerminalHost.Tests.csproj -c Release
-dotnet build .\desktop-control\AiCliFeishuControl.csproj -c Release
+Get-ChildItem .\bridge-dotnet\tests -Filter *.csproj -Recurse | ForEach-Object { dotnet test $_.FullName -c Release }
+.\scripts\build-release.ps1
 ```
-
-`npm run format:check` 是零额外依赖的文本卫生检查，检查受版本控制的源码和文档是否存在行尾空白或缺少末尾换行。仓库中的 Windows CI 会执行同一组 Node.js 与 .NET 校验。
 
 桥接器会同时启动：
 
@@ -482,7 +438,7 @@ dotnet build .\desktop-control\AiCliFeishuControl.csproj -c Release
 dotnet publish .\desktop-control\AiCliFeishuControl.csproj -c Release -o .\desktop-control\publish
 ```
 
-发布结果包含两个单文件程序：界面程序 `AiCliFeishuControl.exe` 和必须与它放在同一目录的 `AiCliFeishuTerminalHost.exe`。两者都使用本机的 .NET 8 Windows Desktop Runtime。若希望沿用文档和桌面快捷方式中的名称，可以把界面程序复制或重命名为 `AI CLI飞书助手.exe`，不要改动或漏掉同步宿主。
+发布结果包含三个单文件程序：界面程序 `AiCliFeishuControl.exe`、`AiCliFeishuTerminalHost.exe` 和 `AiCliFeishuBridgeHost.exe`。三者必须放在同一目录，并使用本机的 .NET 8 Windows Desktop Runtime。若希望沿用文档和桌面快捷方式中的名称，可以把界面程序复制或重命名为 `AI CLI飞书助手.exe`。
 
 ## Codex Hooks
 
@@ -498,7 +454,7 @@ dotnet publish .\desktop-control\AiCliFeishuControl.csproj -c Release -o .\deskt
 %USERPROFILE%\.codex\hooks.json
 ```
 
-脚本只移除本桥接器自己以前安装的同名命令，保留其他 Hook。使用九类 Hook：
+脚本会把 Hook Relay 更新到 `%LOCALAPPDATA%\AiCliFeishu\hooks\AiCliFeishuTerminalHost.exe`，并让全局 Hook 通过同目录的稳定入口 `AiCliFeishuHook.cmd` 调用它。启动器原样转发 stdin、stdout 和参数，但会把 Relay 启动失败或异常退出规范化为退出码 `0`，避免飞书桥接离线影响 Codex。当前桥接目录与端口只保存在 `active-install.json` 中，因此移动或换目录解压新版时，全局 Hook 命令不再变化。脚本只移除本桥接器自己以前安装的同名命令，保留其他 Hook。使用九类 Hook：
 
 - `SessionStart`：Codex 会话启动、恢复或压缩后登记；当前 Codex 通常会在新窗口提交第一条任务时首次触发；
 - `SessionEnd`：Codex 会话结束后从活跃列表移除；
@@ -523,7 +479,7 @@ Claude Code 的用户级配置位置是：
 %USERPROFILE%\.claude\settings.json
 ```
 
-点击“连接”时，桌面助手会运行 `scripts/install-claude-code-hooks.ps1`，以 Claude Code 要求的 matcher group + `type: command` 格式合并以下事件，并保留其他插件或用户已有的 Hook：
+点击“连接”时，桌面助手会运行 `scripts/install-claude-code-hooks.ps1`，以 Claude Code 要求的 matcher group + `type: command` 格式合并以下事件，并保留其他插件或用户已有的 Hook。所有事件共用 `%LOCALAPPDATA%\AiCliFeishu\hooks\AiCliFeishuHook.cmd` 这一条稳定命令；启动器调用同目录的 Relay，Relay 再从 stdin 的 `hook_event_name` 判断事件，Claude 配置中不再保存桥接项目目录：
 
 - `SessionStart` / `SessionEnd`：登记和结束 Claude Code 会话；
 - `PermissionRequest`：等待飞书或本机审批，离线或超时则回退到 Claude Code 原生处理；
@@ -534,7 +490,7 @@ Claude Code 的用户级配置位置是：
 - `UserPromptSubmit`：同步电脑端提交的新任务；
 - `Stop`：从 `transcript_path` 指向的 JSONL 转录中读取最终 assistant 回复并发送完成通知。
 
-安装脚本会清理本桥接器早期 direct-hook 条目和旧发布目录留下的同名 Hook，但不会删除其他 Hook；重复运行不会重复添加。可以在任意隔离目录或项目目录运行 `claude doctor` 检查配置；正常结果应包含 `No installation issues found.`。配置或 `dist/hooks` 变化后，请重新点击“连接”并新开 Claude Code 窗口。
+安装脚本只替换本桥接器自己的 Hook，不会删除其他 Hook；重复运行不会重复添加。连接新版或移动后的桥接器时，脚本会原子更新稳定启动器、Relay 和 `active-install.json`，其中只有当前桥接目录、回环 HTTP 地址和 schema 版本，不包含飞书凭据或控制令牌。可以在任意隔离目录或项目目录运行 `claude doctor` 检查配置；正常结果应包含 `No installation issues found.`。Hook Relay 更新后，请重新点击“连接”并新开 Claude Code 窗口。
 
 ## 数据与安全
 
@@ -546,7 +502,7 @@ Claude Code 的用户级配置位置是：
 - `uploads/`：从飞书接收或准备回传的暂存文件。
 - `bridge-active-owner.lock/owner.json`：当前生产 Store 写入者的跨语言所有权租约；正常停止会在状态刷盘后释放，进程异常退出留下的有效残留会在下次启动时原子隔离为 `bridge-active-owner.stale-*` 墓碑后安全回收。
 
-这些文件、运行时租约、轮换备份、损坏文件隔离副本以及 `.env` 都被 `.gitignore` 排除，Release ZIP 也明确排除 `.env`、`data/` 和内部审查文件。JSON 状态使用同目录临时文件原子替换；内容无法通过结构校验时，原文件会保留为 `*.corrupt-*`，桥接器改用安全默认值，不会直接覆盖损坏证据。Active Owner 租约若路径类型或元数据损坏会拒绝自动抢占，需要人工核查，避免 Node 与未来 C# 同时写 Store。
+这些文件、运行时租约、轮换备份、损坏文件隔离副本以及 `.env` 都被 `.gitignore` 排除，Release ZIP 也明确排除 `.env`、`data/` 和内部审查文件。JSON 状态使用同目录临时文件原子替换；内容无法通过结构校验时，原文件会保留为 `*.corrupt-*`，桥接器改用安全默认值，不会直接覆盖损坏证据。Active Owner 租约若路径类型或元数据损坏会拒绝自动抢占，需要人工核查，避免多个写入者同时修改 Store。
 
 为避免长期运行后反复解析和重写无限增长的 JSON，消息路由默认保留 7 天且最多 3000 条，入站去重记录最多 5000 条；已完成或孤立审批默认保留 24 小时且最多 500 条。仍在等待决定的审批不受数量上限影响，长期审计记录继续写入会自动轮换的 `approval-events.log`。这些清理不会修改 `sessions.json` 中的会话、别名或飞书群绑定。
 

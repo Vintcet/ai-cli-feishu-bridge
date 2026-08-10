@@ -368,7 +368,7 @@ public sealed class ActiveManagedRuntimeLifecycleTests
     }
 
     private static ActiveManagedRuntimeLifecycle Lifecycle(
-        NodeStoreSnapshot store,
+        BridgeStoreSnapshot store,
         RecordingDirectory? directory = null,
         RecordingTransport? transport = null,
         MutableTimeProvider? clock = null,
@@ -394,7 +394,7 @@ public sealed class ActiveManagedRuntimeLifecycleTests
     private static string ProjectPath(string name) =>
         Path.GetFullPath(Path.Combine(Path.GetTempPath(), "bridge-runtime-tests", name));
 
-    private static NodeStoreSnapshot Store(params SessionStoreRecord[] sessions)
+    private static BridgeStoreSnapshot Store(params SessionStoreRecord[] sessions)
     {
         var sessionDocument = new SessionStoreDocument();
         foreach (var session in sessions)
@@ -429,7 +429,7 @@ public sealed class ActiveManagedRuntimeLifecycleTests
                 StringComparer.Ordinal),
         };
 
-    private sealed class RecordingStoreOwner(NodeStoreSnapshot store)
+    private sealed class RecordingStoreOwner(BridgeStoreSnapshot store)
         : IBridgeProductionStoreOwner
     {
         public BridgeProductionStoreSnapshot Snapshot => new(
@@ -440,7 +440,7 @@ public sealed class ActiveManagedRuntimeLifecycleTests
         public ValueTask OpenAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 
-        public ValueTask<NodeStoreSnapshot> ReadAsync(
+        public ValueTask<BridgeStoreSnapshot> ReadAsync(
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -451,7 +451,7 @@ public sealed class ActiveManagedRuntimeLifecycleTests
             ValueTask.CompletedTask;
 
         public ValueTask UpdateAsync(
-            Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
+            Func<BridgeStoreSnapshot, BridgeStoreSnapshot> update,
             CancellationToken cancellationToken = default) => ValueTask.CompletedTask;
 
         public ValueTask CloseAsync(CancellationToken cancellationToken = default) =>

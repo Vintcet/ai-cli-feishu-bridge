@@ -23,7 +23,7 @@ public sealed class BridgeProductionStoreOwnerTests
     }
 
     [TestMethod]
-    public async Task OpensExistingStoreOnlyWhileMatchingLeaseIsHeld()
+    public async Task OpensExistingStoreAndBootstrapsMissingLocalConfiguration()
     {
         Directory.CreateDirectory(directory!);
         var sessions = Path.Combine(directory!, "sessions.json");
@@ -38,15 +38,15 @@ public sealed class BridgeProductionStoreOwnerTests
         await owner.OpenAsync();
 
         Assert.AreEqual(BridgeProductionStoreState.Open, owner.Snapshot.State);
-        Assert.AreEqual(1, owner.Snapshot.StoreFiles);
+        Assert.AreEqual(6, owner.Snapshot.StoreFiles);
         Assert.IsNull(owner.Snapshot.Store);
         Assert.AreEqual(1, owner.CurrentSnapshot.Store!.Sessions.Sessions.Count);
         Assert.AreEqual(
-            new BridgeComponentHealth("production-store", "ready", "loaded files=1"),
+            new BridgeComponentHealth("production-store", "ready", "loaded files=6"),
             owner.ComponentHealth);
         var controlStatus = ((IBridgeControlStoreStatusSource)owner).Status;
-        Assert.AreEqual(BridgeStoreShadowStatuses.Loaded, controlStatus.Status);
-        Assert.AreEqual(1, controlStatus.Files);
+        Assert.AreEqual(BridgeStoreViewStatuses.Loaded, controlStatus.Status);
+        Assert.AreEqual(6, controlStatus.Files);
         Assert.AreEqual(1, controlStatus.Sessions);
         Assert.AreEqual(1, controlStatus.ActiveSessions);
         Assert.AreEqual(0, controlStatus.EndedSessions);
@@ -55,16 +55,44 @@ public sealed class BridgeProductionStoreOwnerTests
         Assert.AreEqual(0, controlStatus.Approvals);
         await ((IBridgeControlStoreStatusSource)owner).RefreshAsync();
         Assert.AreEqual(BridgeProductionStoreState.Open, owner.Snapshot.State);
-        Assert.AreEqual(source, await File.ReadAllTextAsync(sessions));
-        CollectionAssert.AreEquivalent(
-            new[]
-            {
-                "sessions.json",
-                ActiveOwnerLeaseObserver.MetadataFileName,
-            },
-            Directory.EnumerateFiles(directory!, "*", SearchOption.AllDirectories)
-                .Select(Path.GetFileName)
-                .ToArray());
+        Assert.AreEqual(10, owner.CurrentSnapshot.Store.Bindings.PairingCode!.Length);
+        Assert.IsTrue(owner.CurrentSnapshot.Store.Bindings.PairingCode.All(Uri.IsHexDigit));
+        Assert.AreEqual(64, owner.CurrentSnapshot.Store.ControlToken.Token!.Length);
+        Assert.IsTrue(owner.CurrentSnapshot.Store.ControlToken.Token.All(Uri.IsHexDigit));
+        Assert.IsFalse(string.IsNullOrWhiteSpace(
+            owner.CurrentSnapshot.Store.Settings.WorkspaceRoot));
+        foreach (var file in BridgeStoreFile.All)
+        {
+            Assert.IsTrue(File.Exists(Path.Combine(directory!, file.FileName)));
+        }
+        Assert.IsTrue(File.Exists(Path.Combine(directory!, ".bridge-store.commit")));
+        Assert.IsTrue(File.Exists(lease.MetadataPath));
+    }
+
+    [TestMethod]
+    public async Task PreservesValidBootstrapValuesAndClearsObsoletePairingCode()
+    {
+        Directory.CreateDirectory(directory!);
+        const string token =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        await File.WriteAllTextAsync(
+            Path.Combine(directory!, "bindings.json"),
+            "{\"users\":{},\"ownerOpenId\":\"owner\",\"pairingCode\":\"OLD-CODE\"}");
+        await File.WriteAllTextAsync(
+            Path.Combine(directory!, "settings.json"),
+            "{\"workspaceRoot\":\"K:\\\\workspace\"}");
+        await File.WriteAllTextAsync(
+            Path.Combine(directory!, "control-token.json"),
+            $"{{\"token\":\"{token}\"}}");
+        await using var lease = Lease();
+        await lease.AcquireAsync();
+        var owner = Owner(lease);
+
+        await owner.OpenAsync();
+
+        Assert.IsNull(owner.CurrentSnapshot.Store!.Bindings.PairingCode);
+        Assert.AreEqual(token, owner.CurrentSnapshot.Store.ControlToken.Token);
+        Assert.AreEqual("K:\\workspace", owner.CurrentSnapshot.Store.Settings.WorkspaceRoot);
     }
 
     [TestMethod]
@@ -101,7 +129,12 @@ public sealed class BridgeProductionStoreOwnerTests
         StringAssert.Contains(error.Message, "身份已变化");
         Assert.AreEqual(source, await File.ReadAllTextAsync(settings));
         CollectionAssert.AreEquivalent(
-            new[] { "settings.json", ActiveOwnerLeaseObserver.MetadataFileName },
+            new[]
+            {
+                "settings.json",
+                ActiveOwnerLeaseObserver.MetadataFileName,
+                ActiveOwnerLeaseObserver.OwnershipHandleFileName,
+            },
             Directory.EnumerateFiles(directory!, "*", SearchOption.AllDirectories)
                 .Select(Path.GetFileName)
                 .ToArray());
@@ -127,7 +160,7 @@ public sealed class BridgeProductionStoreOwnerTests
         Assert.IsTrue(lease.IsHeld);
         Assert.IsTrue(Directory.Exists(lease.LockDirectoryPath));
         CollectionAssert.AreEquivalent(
-            NodeStoreFile.All.Select(file => file.FileName).ToArray(),
+            BridgeStoreFile.All.Select(file => file.FileName).ToArray(),
             Directory.EnumerateFiles(directory!, "*.json", SearchOption.TopDirectoryOnly)
                 .Select(Path.GetFileName)
                 .ToArray());
@@ -135,6 +168,206 @@ public sealed class BridgeProductionStoreOwnerTests
 
         await lease.ReleaseAsync();
         Assert.IsFalse(Directory.Exists(lease.LockDirectoryPath));
+    }
+
+    [TestMethod]
+    public async Task UpdateFinishesDurableCommitWhenRequestCancelsAfterLeaseCheck()
+    {
+        Directory.CreateDirectory(directory!);
+        await File.WriteAllTextAsync(
+            Path.Combine(directory!, "sessions.json"),
+            "{\"sessions\":{}}");
+        await using var lease = Lease();
+        await lease.AcquireAsync();
+        using var request = new CancellationTokenSource();
+        var inspections = 0;
+        var owner = Owner(
+            lease,
+            cancellationToken =>
+            {
+                inspections++;
+                if (inspections == 3)
+                {
+                    request.Cancel();
+                    return ValueTask.FromResult(new ActiveOwnerLeaseSnapshot(
+                        ActiveOwnerLeaseState.Live,
+                        lease.Record));
+                }
+                cancellationToken.ThrowIfCancellationRequested();
+                return ValueTask.FromResult(new ActiveOwnerLeaseSnapshot(
+                    ActiveOwnerLeaseState.Live,
+                    lease.Record));
+            });
+        await owner.OpenAsync();
+
+        await owner.UpdateAsync(
+            store => store with
+            {
+                Settings = new SettingsStoreDocument { NotifyActivity = true },
+            },
+            request.Token);
+
+        Assert.IsTrue(request.IsCancellationRequested);
+        Assert.AreEqual(BridgeProductionStoreState.Open, owner.Snapshot.State);
+        Assert.IsTrue(owner.CurrentSnapshot.Store!.Settings.NotifyActivity);
+        var persisted = await File.ReadAllTextAsync(
+            Path.Combine(directory!, "settings.json"));
+        StringAssert.Contains(persisted, "\"notifyActivity\":true");
+    }
+
+    [TestMethod]
+    public async Task UpdateRetriesATransientLeaseObservation()
+    {
+        Directory.CreateDirectory(directory!);
+        await File.WriteAllTextAsync(
+            Path.Combine(directory!, "sessions.json"),
+            "{\"sessions\":{}}");
+        await using var lease = Lease();
+        await lease.AcquireAsync();
+        var inspections = 0;
+        var owner = Owner(
+            lease,
+            _ =>
+            {
+                inspections++;
+                return ValueTask.FromResult(inspections == 4
+                    ? new ActiveOwnerLeaseSnapshot(ActiveOwnerLeaseState.Invalid)
+                    : new ActiveOwnerLeaseSnapshot(
+                        ActiveOwnerLeaseState.Live,
+                        lease.Record));
+            });
+        await owner.OpenAsync();
+
+        await owner.UpdateAsync(store => store with
+        {
+            Settings = new SettingsStoreDocument { NotifyActivity = true },
+        });
+
+        Assert.AreEqual(5, inspections);
+        Assert.AreEqual(BridgeProductionStoreState.Open, owner.Snapshot.State);
+        Assert.IsTrue(owner.CurrentSnapshot.Store!.Settings.NotifyActivity);
+    }
+
+    [TestMethod]
+    public async Task FailedUpdateRequiresReloadBeforeAnyFurtherMutation()
+    {
+        Directory.CreateDirectory(directory!);
+        await File.WriteAllTextAsync(
+            Path.Combine(directory!, "sessions.json"),
+            "{\"sessions\":{}}");
+        await using var lease = Lease();
+        await lease.AcquireAsync();
+        var inspections = 0;
+        var owner = Owner(
+            lease,
+            _ =>
+            {
+                inspections++;
+                return ValueTask.FromResult(new ActiveOwnerLeaseSnapshot(
+                    ActiveOwnerLeaseState.Live,
+                    inspections == 4
+                        ? lease.Record with { LeaseId = "replacement-owner" }
+                        : lease.Record));
+            });
+        await owner.OpenAsync();
+
+        await Assert.ThrowsExceptionAsync<InvalidOperationException>(async () =>
+            await owner.UpdateAsync(store => store with
+            {
+                Settings = new SettingsStoreDocument { NotifyActivity = true },
+            }));
+
+        Assert.AreEqual(BridgeProductionStoreState.Failed, owner.Snapshot.State);
+        StringAssert.Contains(owner.ComponentHealth.Detail!, "store-update-failed");
+        Assert.IsNotNull(owner.CurrentSnapshot.Store);
+        var projection = await owner.ReadForProjectionAsync();
+        Assert.AreNotEqual(true, projection.Settings.NotifyActivity);
+
+        await Assert.ThrowsExceptionAsync<InvalidOperationException>(async () =>
+            await owner.UpdateAsync(store => store with
+            {
+                Settings = new SettingsStoreDocument { AutoApprove = true },
+            }));
+
+        await owner.OpenAsync();
+        Assert.IsTrue(owner.CurrentSnapshot.Store!.Settings.NotifyActivity);
+        await owner.UpdateAsync(store => store with
+        {
+            Settings = new SettingsStoreDocument
+            {
+                NotifyActivity = true,
+                AutoApprove = true,
+            },
+        });
+
+        Assert.AreEqual(BridgeProductionStoreState.Open, owner.Snapshot.State);
+        Assert.IsTrue(owner.CurrentSnapshot.Store!.Settings.AutoApprove);
+    }
+
+    [TestMethod]
+    public async Task CorruptWritableStoreFailsClosedAndReportsFailedHealth()
+    {
+        Directory.CreateDirectory(directory!);
+        await File.WriteAllTextAsync(
+            Path.Combine(directory!, "sessions.json"),
+            "{\"sessions\":{\"broken\":{}}}");
+        await using var lease = Lease();
+        await lease.AcquireAsync();
+        var owner = Owner(lease);
+
+        var error = await Assert.ThrowsExceptionAsync<BridgeStoreCorruptionException>(async () =>
+            await owner.OpenAsync());
+
+        Assert.AreEqual("sessions.json", error.LogicalFile);
+        Assert.AreEqual(BridgeProductionStoreState.Failed, owner.Snapshot.State);
+        Assert.AreEqual("failed", owner.ComponentHealth.Status);
+        StringAssert.Contains(owner.ComponentHealth.Detail!, "store-open-failed");
+        Assert.AreEqual(
+            1,
+            Directory.EnumerateFiles(directory!, "sessions.json.corrupt-*").Count());
+    }
+
+    [TestMethod]
+    public async Task AuditFailureLeavesStoreCommittedButMakesHealthFail()
+    {
+        Directory.CreateDirectory(directory!);
+        await File.WriteAllTextAsync(
+            Path.Combine(directory!, "sessions.json"),
+            """
+            {"sessions":{"session-1":{"sessionId":"session-1","cwd":"K:\\project","status":"waiting","runtime":"codex","openedAt":"2026-08-06T00:00:00Z","lastSeenAt":"2026-08-06T00:00:00Z"}}}
+            """);
+        await using var lease = Lease();
+        await lease.AcquireAsync();
+        var owner = Owner(lease, audit: new FailingAuditLog());
+        await owner.OpenAsync();
+
+        await owner.UpdateAsync(store => store with
+        {
+            Approvals = new ApprovalStoreDocument
+            {
+                Requests = new Dictionary<string, ApprovalStoreRecord>(StringComparer.Ordinal)
+                {
+                    ["approval-1"] = new()
+                    {
+                        RequestId = "approval-1",
+                        SessionId = "session-1",
+                        TurnId = "turn-1",
+                        Cwd = "K:\\project",
+                        ToolName = "shell_command",
+                        ToolPreview = "preview",
+                        CreatedAt = "2026-08-06T00:00:00Z",
+                        ExpiresAt = "2026-08-06T00:10:00Z",
+                        Status = "pending",
+                    },
+                },
+            },
+        });
+
+        Assert.AreEqual(BridgeProductionStoreState.Open, owner.Snapshot.State);
+        Assert.AreEqual("failed", owner.ComponentHealth.Status);
+        StringAssert.Contains(owner.ComponentHealth.Detail!, "approval-audit-failed");
+        var persisted = await new BridgeJsonStoreRepository(directory!).LoadAsync();
+        Assert.IsTrue(persisted.Approvals.Requests.ContainsKey("approval-1"));
     }
 
     [TestMethod]
@@ -147,14 +380,14 @@ public sealed class BridgeProductionStoreOwnerTests
             _ = new ActiveProductionStoreOwner(
                 passive,
                 lease,
-                new NodeJsonStoreRepository(directory!, NodeStoreAccess.ReadWriteActiveOwner)));
+                new BridgeJsonStoreRepository(directory!, BridgeStoreAccess.ReadWriteActiveOwner)));
         StringAssert.Contains(passiveError.Message, "只能用于 Active Host");
 
         var copyError = Assert.ThrowsException<InvalidOperationException>(() =>
             _ = new ActiveProductionStoreOwner(
                 Options(),
                 lease,
-                new NodeJsonStoreRepository(directory!, NodeStoreAccess.ReadWriteCopy)));
+                new BridgeJsonStoreRepository(directory!, BridgeStoreAccess.ReadWriteCopy)));
         StringAssert.Contains(copyError.Message, "Active Owner 专用写入");
         Assert.IsFalse(Directory.Exists(directory));
     }
@@ -170,13 +403,24 @@ public sealed class BridgeProductionStoreOwnerTests
 
     private ActiveProductionStoreOwner Owner(
         ActiveOwnerLeaseAcquirer lease,
-        Func<CancellationToken, ValueTask<ActiveOwnerLeaseSnapshot>>? inspect = null) => new(
+        Func<CancellationToken, ValueTask<ActiveOwnerLeaseSnapshot>>? inspect = null,
+        IApprovalAuditLog? audit = null) => new(
             Options(),
             lease,
-            new NodeJsonStoreRepository(
+            new BridgeJsonStoreRepository(
                 directory!,
-                NodeStoreAccess.ReadWriteActiveOwner),
-            inspect);
+                BridgeStoreAccess.ReadWriteActiveOwner),
+            inspect,
+            audit);
+
+    private sealed class FailingAuditLog : IApprovalAuditLog
+    {
+        public Task AppendChangesAsync(
+            ApprovalStoreDocument before,
+            ApprovalStoreDocument after,
+            CancellationToken cancellationToken = default) =>
+            throw new IOException("audit unavailable");
+    }
 
     private sealed class RecordingLease : IBridgeActiveOwnerLeaseLifecycle
     {

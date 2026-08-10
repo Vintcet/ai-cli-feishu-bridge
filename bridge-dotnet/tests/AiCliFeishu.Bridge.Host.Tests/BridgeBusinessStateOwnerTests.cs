@@ -13,7 +13,7 @@ public sealed class BridgeBusinessStateOwnerTests
         DateTimeOffset.Parse("2026-08-06T10:00:00Z");
 
     [TestMethod]
-    public async Task OwnerInitializesFromShadowAndAppliesOrderedCoreTransitions()
+    public async Task OwnerInitializesFromStoreViewAndAppliesOrderedCoreTransitions()
     {
         var store = LoadedStore(SessionDirectoryState.Empty, ApprovalRegistryState.Empty);
         var owner = new BridgeBusinessStateOwner(store);
@@ -295,7 +295,7 @@ public sealed class BridgeBusinessStateOwnerTests
             Text: "继续"));
 
         Assert.AreEqual("warning", result!.ToastType);
-        StringAssert.Contains(result.ToastContent, "只读观测");
+        StringAssert.Contains(result.ToastContent, "只读模式");
         Assert.AreEqual(1, owner.Snapshot.RejectedFeishuIntents);
         Assert.AreEqual(0, owner.Snapshot.Revision);
         Assert.AreSame(initialSessions, owner.Snapshot.Sessions);
@@ -305,8 +305,8 @@ public sealed class BridgeBusinessStateOwnerTests
     [TestMethod]
     public async Task IncompatibleStoreKeepsOwnerUnavailable()
     {
-        var store = new FixedStoreShadow(new BridgeStoreShadowSnapshot(
-            BridgeStoreShadowStatuses.Incompatible,
+        var store = new FixedStoreView(new BridgeStoreViewSnapshot(
+            BridgeStoreViewStatuses.Incompatible,
             null,
             1,
             0,
@@ -326,9 +326,9 @@ public sealed class BridgeBusinessStateOwnerTests
     }
 
     [TestMethod]
-    public async Task RefreshReloadsTheCurrentShadowProjectionAndResetsRevision()
+    public async Task RefreshReloadsTheCurrentReadOnlyProjectionAndResetsRevision()
     {
-        var store = new MutableStoreShadow(LoadedStore(
+        var store = new MutableStoreView(LoadedStore(
             SessionDirectoryState.Empty,
             ApprovalRegistryState.Empty).Snapshot);
         var owner = new BridgeBusinessStateOwner(store);
@@ -345,9 +345,9 @@ public sealed class BridgeBusinessStateOwnerTests
             SessionStateMachine.Register(
                 SessionDirectoryState.Empty,
                 new SessionState(
-                    "shadow-session",
+                    "readonly-session",
                     RuntimeNames.OpenCode,
-                    "C:/shadow",
+                    "C:/readonly",
                     SessionStatuses.Waiting,
                     Origin,
                     Origin)),
@@ -355,7 +355,7 @@ public sealed class BridgeBusinessStateOwnerTests
         await owner.RefreshAsync(CancellationToken.None);
 
         Assert.AreEqual(0, owner.Snapshot.Revision);
-        Assert.IsTrue(owner.Snapshot.Sessions.Sessions.ContainsKey("shadow-session"));
+        Assert.IsTrue(owner.Snapshot.Sessions.Sessions.ContainsKey("readonly-session"));
         Assert.IsFalse(owner.Snapshot.Sessions.Sessions.ContainsKey("session-1"));
     }
 
@@ -379,22 +379,22 @@ public sealed class BridgeBusinessStateOwnerTests
             Payload = JsonSerializer.SerializeToElement(payload),
         };
 
-    private static FixedStoreShadow LoadedStore(
+    private static FixedStoreView LoadedStore(
         SessionDirectoryState sessions,
         ApprovalRegistryState approvals) => new(
-            new BridgeStoreShadowSnapshot(
-                BridgeStoreShadowStatuses.Loaded,
-                new NodeStoreCoreState(
+            new BridgeStoreViewSnapshot(
+                BridgeStoreViewStatuses.Loaded,
+                new BridgeStoreCoreState(
                     sessions,
                     MessageRouteRegistryState.Empty,
                     approvals),
                 4,
                 1));
 
-    private sealed class FixedStoreShadow(BridgeStoreShadowSnapshot snapshot)
-        : IBridgeStoreShadow
+    private sealed class FixedStoreView(BridgeStoreViewSnapshot snapshot)
+        : IBridgeStoreView
     {
-        public BridgeStoreShadowSnapshot Snapshot { get; } = snapshot;
+        public BridgeStoreViewSnapshot Snapshot { get; } = snapshot;
 
         public BridgeComponentHealth ComponentHealth => new(
             "fixed-store",
@@ -404,12 +404,12 @@ public sealed class BridgeBusinessStateOwnerTests
             Task.CompletedTask;
     }
 
-    private sealed class MutableStoreShadow(BridgeStoreShadowSnapshot snapshot)
-        : IBridgeStoreShadow
+    private sealed class MutableStoreView(BridgeStoreViewSnapshot snapshot)
+        : IBridgeStoreView
     {
-        public BridgeStoreShadowSnapshot Current { get; set; } = snapshot;
+        public BridgeStoreViewSnapshot Current { get; set; } = snapshot;
 
-        public BridgeStoreShadowSnapshot Snapshot => Current;
+        public BridgeStoreViewSnapshot Snapshot => Current;
 
         public BridgeComponentHealth ComponentHealth => new("mutable-store", "ready");
 

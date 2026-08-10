@@ -23,10 +23,10 @@ public sealed class BridgeProductionAssemblyTests
             port: 0);
         using var app = BridgeHostApplication.Build(options);
 
-        Assert.IsInstanceOfType<ReadOnlyNodeStoreShadow>(
-            app.Services.GetRequiredService<IBridgeStoreShadow>());
+        Assert.IsInstanceOfType<ReadOnlyBridgeStoreView>(
+            app.Services.GetRequiredService<IBridgeStoreView>());
         Assert.IsTrue(ReferenceEquals(
-            app.Services.GetRequiredService<IBridgeStoreShadow>(),
+            app.Services.GetRequiredService<IBridgeStoreView>(),
             app.Services.GetRequiredService<IBridgeControlStoreStatusSource>()));
         Assert.IsTrue(ReferenceEquals(
             app.Services.GetRequiredService<BridgeBusinessStateOwner>(),
@@ -436,7 +436,7 @@ public sealed class BridgeProductionAssemblyTests
     }
 
     [TestMethod]
-    public void ActiveAssemblyIsCompleteAndIsolatedWhileCutoverGateRemainsClosed()
+    public void ActiveAssemblyIsCompleteAndIsolated()
     {
         var options = ActiveOptions();
         var services = new ServiceCollection();
@@ -452,13 +452,13 @@ public sealed class BridgeProductionAssemblyTests
         Assert.IsFalse(services.Any(descriptor =>
             descriptor.ImplementationType?.Name.StartsWith("Passive", StringComparison.Ordinal) == true));
         Assert.IsFalse(services.Any(descriptor =>
-            descriptor.ServiceType == typeof(IBridgeStoreShadow)));
+            descriptor.ServiceType == typeof(IBridgeStoreView)));
         var storeOwner = services.Single(descriptor =>
             descriptor.ServiceType == typeof(IBridgeProductionStoreOwner));
         Assert.AreEqual(typeof(ActiveProductionStoreOwner), storeOwner.ImplementationType);
         var subsystems = services.Where(descriptor =>
             descriptor.ServiceType == typeof(IBridgeHostSubsystem)).ToArray();
-        Assert.AreEqual(12, subsystems.Length);
+        Assert.AreEqual(14, subsystems.Length);
         Assert.IsTrue(subsystems.All(descriptor =>
             descriptor.ImplementationFactory is not null));
         var hostedServices = services.Where(descriptor =>
@@ -1259,7 +1259,7 @@ public sealed class BridgeProductionAssemblyTests
             0);
 
         public BridgeControlStoreStatus Status { get; } = new(
-            BridgeStoreShadowStatuses.NotLoaded,
+            BridgeStoreViewStatuses.NotLoaded,
             0,
             0,
             0,
@@ -1279,7 +1279,7 @@ public sealed class BridgeProductionAssemblyTests
         public ValueTask OpenAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 
-        public ValueTask<NodeStoreSnapshot> ReadAsync(
+        public ValueTask<BridgeStoreSnapshot> ReadAsync(
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
@@ -1287,7 +1287,7 @@ public sealed class BridgeProductionAssemblyTests
             ValueTask.CompletedTask;
 
         public ValueTask UpdateAsync(
-            Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
+            Func<BridgeStoreSnapshot, BridgeStoreSnapshot> update,
             CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 
@@ -1524,7 +1524,9 @@ public sealed class BridgeProductionAssemblyTests
             string sessionExternalId) => null;
         public BridgeManagedTerminalIdentity? FindClaimByTerminal(
             string terminalId) => null;
+        public BridgeManagedTerminalRegistrationStatus? GetStatus(string terminalId) => null;
         public void Release(string sessionExternalId) { }
+        public bool IsAuthenticated(string terminalId, string terminalSecret) => false;
         public bool IsCurrent(ManagedTerminalTarget target) => false;
     }
 

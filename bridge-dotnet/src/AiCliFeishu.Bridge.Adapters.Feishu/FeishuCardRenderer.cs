@@ -146,6 +146,19 @@ public sealed partial class FeishuCardRenderer : IFeishuCardRenderer
             [Markdown($"未创建 {RuntimeName(runtime)} 会话。需要时可再次发送 /新建。")]);
     }
 
+    public FeishuCardView UserPrompt(FeishuSessionView session, string prompt)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        return Card(
+            "blue",
+            "电脑端已提交消息",
+            [
+                Markdown($"**会话：** {session.Label}"),
+                new JsonObject { ["tag"] = "hr" },
+                Markdown($"**你的消息**\n{Truncate(RedactSensitiveText(prompt), 2_800)}"),
+            ]);
+    }
+
     public FeishuCardView PendingApproval(
         FeishuSessionView session,
         FeishuApprovalView approval)

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using AiCliFeishu.Bridge.Adapters.Storage;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace AiCliFeishuControl;
@@ -6,6 +7,8 @@ namespace AiCliFeishuControl;
 [TestClass]
 public sealed class RuntimeAndTerminalTests
 {
+    private static readonly string TerminalSecret = new('a', 64);
+
     [TestMethod]
     public void EmptyArguments()
     {
@@ -140,6 +143,56 @@ public sealed class RuntimeAndTerminalTests
     }
 
     [TestMethod]
+    public void BridgeEnvironmentReaderParsesConfiguredCodexCommand()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"ai-cli-feishu-env-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            File.WriteAllLines(
+                Path.Combine(root, ".env"),
+                [
+                    "IGNORED=value",
+                    "CODEX_COMMAND=\"C:\\Tools\\Codex CLI\\codex.exe\" # configured",
+                ]);
+
+            Assert.AreEqual(
+                @"C:\Tools\Codex CLI\codex.exe",
+                BridgeEnvironmentReader.Read(root, "CODEX_COMMAND"));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public void BridgeEnvironmentReaderPrefersProcessEnvironment()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"ai-cli-feishu-env-{Guid.NewGuid():N}");
+        var name = $"AI_CLI_FEISHU_TEST_{Guid.NewGuid():N}";
+        Directory.CreateDirectory(root);
+        try
+        {
+            File.WriteAllText(Path.Combine(root, ".env"), $"{name}=file-value");
+            Environment.SetEnvironmentVariable(name, "environment-value");
+
+            Assert.AreEqual(
+                "environment-value",
+                BridgeEnvironmentReader.Read(root, name));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(name, null);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [TestMethod]
     public void ShellLookingTextStaysData()
     {
         var sentinel = Path.Combine(
@@ -157,7 +210,9 @@ public sealed class RuntimeAndTerminalTests
     public void TerminalInputDefaultsToSteer()
     {
         var request = TerminalInputParser.Parse(
-            "{\"type\":\"prompt\",\"prompt\":\"hello\"}");
+            $$"""{"type":"prompt","commandId":"command-1","terminalSecret":"{{TerminalSecret}}","prompt":"hello"}""");
+        Assert.AreEqual("command-1", request.CommandId);
+        Assert.AreEqual(TerminalSecret, request.TerminalSecret);
         Assert.AreEqual("hello", request.Prompt);
         Assert.AreEqual(TerminalSubmitMode.Steer, request.SubmitMode);
     }
@@ -166,7 +221,7 @@ public sealed class RuntimeAndTerminalTests
     public void TerminalInputSupportsQueue()
     {
         var request = TerminalInputParser.Parse(
-            "{\"type\":\"prompt\",\"prompt\":\"next turn\",\"submitMode\":\"queue\"}");
+            $$"""{"type":"prompt","commandId":"command-2","terminalSecret":"{{TerminalSecret}}","prompt":"next turn","submitMode":"queue"}""");
         Assert.AreEqual("next turn", request.Prompt);
         Assert.AreEqual(TerminalSubmitMode.Queue, request.SubmitMode);
     }
@@ -176,7 +231,138 @@ public sealed class RuntimeAndTerminalTests
     {
         Assert.ThrowsException<InvalidOperationException>(() =>
             TerminalInputParser.Parse(
-                "{\"type\":\"prompt\",\"prompt\":\"hello\",\"submitMode\":\"shell\"}"));
+                $$"""{"type":"prompt","commandId":"command-3","terminalSecret":"{{TerminalSecret}}","prompt":"hello","submitMode":"shell"}"""));
+    }
+
+    [TestMethod]
+    public void TerminalInputRequiresCommandIdAndSecret()
+    {
+        Assert.ThrowsException<InvalidOperationException>(() =>
+            TerminalInputParser.Parse(
+                "{\"type\":\"prompt\",\"prompt\":\"hello\"}"));
+        Assert.ThrowsException<InvalidOperationException>(() =>
+            TerminalInputParser.Parse(
+                "{\"type\":\"prompt\",\"commandId\":\"command-4\",\"terminalSecret\":\"bad\",\"prompt\":\"hello\"}"));
+    }
+
+    [TestMethod]
+    public void TerminalCommandResultCacheDeduplicatesCommandId()
+    {
+        var cache = new TerminalCommandResultCache();
+        var input = new TerminalInputRequest(
+            "command-cache",
+            TerminalSecret,
+            "hello",
+            TerminalSubmitMode.Steer);
+        var injections = 0;
+
+        var first = cache.Execute(input, () => injections++);
+        var second = cache.Execute(input, () => injections++);
+
+        Assert.IsTrue(first.Ok);
+        Assert.AreEqual(first, second);
+        Assert.AreEqual(1, injections);
+    }
+
+    [TestMethod]
+    public void TerminalCommandResultCacheRejectsChangedContent()
+    {
+        var cache = new TerminalCommandResultCache();
+        var first = new TerminalInputRequest(
+            "command-cache",
+            TerminalSecret,
+            "hello",
+            TerminalSubmitMode.Steer);
+        var changed = first with { Prompt = "different" };
+        var injections = 0;
+
+        Assert.IsTrue(cache.Execute(first, () => injections++).Ok);
+        var response = cache.Execute(changed, () => injections++);
+
+        Assert.IsFalse(response.Ok);
+        Assert.AreEqual(1, injections);
+    }
+
+    [TestMethod]
+    public async Task TerminalPipeProtocolRejectsOversizedRequest()
+    {
+        await using var stream = new MemoryStream(
+            System.Text.Encoding.UTF8.GetBytes(new string('a', 33) + "\n"));
+        await Assert.ThrowsExceptionAsync<InvalidDataException>(() =>
+            TerminalPipeProtocol.ReadLineAsync(
+                stream,
+                maximumBytes: 32,
+                timeout: TimeSpan.FromSeconds(1)));
+    }
+
+    [TestMethod]
+    public async Task TerminalPipeProtocolTimesOutIncompleteRequest()
+    {
+        await using var stream = new NeverCompletingStream();
+        await Assert.ThrowsExceptionAsync<TimeoutException>(() =>
+            TerminalPipeProtocol.ReadLineAsync(
+                stream,
+                timeout: TimeSpan.FromMilliseconds(50)));
+    }
+
+    [TestMethod]
+    public async Task ManagedTerminalLaunchWaiterRequiresReadyBoundSession()
+    {
+        var attempts = 0;
+        var status = await ManagedTerminalLaunchWaiter.WaitAsync(
+            "terminal-ready",
+            _ => Task.FromResult<ManagedTerminalLaunchStatus?>(++attempts == 1
+                ? new()
+                {
+                    Ok = true,
+                    TerminalId = "terminal-ready",
+                    Registered = true,
+                    Online = true,
+                    Ready = true,
+                }
+                : new()
+                {
+                    Ok = true,
+                    TerminalId = "terminal-ready",
+                    Registered = true,
+                    Online = true,
+                    Ready = true,
+                    SessionExternalId = "session-ready",
+                }),
+            () => null,
+            maximumAttempts: 3,
+            pollInterval: TimeSpan.Zero,
+            delay: static (_, _) => Task.CompletedTask);
+
+        Assert.AreEqual(2, attempts);
+        Assert.AreEqual("session-ready", status.SessionExternalId);
+    }
+
+    [TestMethod]
+    public async Task ManagedTerminalLaunchWaiterRejectsWrongTerminalAndEarlyExit()
+    {
+        await Assert.ThrowsExceptionAsync<TimeoutException>(() =>
+            ManagedTerminalLaunchWaiter.WaitAsync(
+                "terminal-expected",
+                _ => Task.FromResult<ManagedTerminalLaunchStatus?>(new()
+                {
+                    Ok = true,
+                    TerminalId = "terminal-other",
+                    Registered = true,
+                    Online = true,
+                    Ready = true,
+                    SessionExternalId = "session-other",
+                }),
+                () => null,
+                maximumAttempts: 1,
+                pollInterval: TimeSpan.Zero));
+
+        await Assert.ThrowsExceptionAsync<InvalidOperationException>(() =>
+            ManagedTerminalLaunchWaiter.WaitAsync(
+                "terminal-expected",
+                _ => throw new AssertFailedException("early exit should stop before probing"),
+                () => new InvalidOperationException("launcher exited"),
+                maximumAttempts: 1));
     }
 
     [TestMethod]
@@ -199,6 +385,40 @@ public sealed class RuntimeAndTerminalTests
                 System.Reflection.BindingFlags.Static);
             Assert.IsNotNull(readControlToken);
             Assert.AreEqual(token, readControlToken.Invoke(null, [bridgeRoot]));
+        }
+        finally
+        {
+            Directory.Delete(bridgeRoot, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public async Task ControlTokenReaderPrefersCommittedGenerationOverStaleMirror()
+    {
+        var bridgeRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"ai-cli-feishu-committed-token-{Guid.NewGuid():N}");
+        var dataDirectory = Path.Combine(bridgeRoot, "data");
+        var committedToken = new string('a', 64);
+        Directory.CreateDirectory(dataDirectory);
+        try
+        {
+            var repository = new BridgeJsonStoreRepository(
+                dataDirectory,
+                BridgeStoreAccess.ReadWriteActiveOwner);
+            await repository.WriteAsync(new(
+                new BindingStoreDocument(),
+                new SessionStoreDocument(),
+                new RouteStoreDocument(),
+                new ApprovalStoreDocument(),
+                new SettingsStoreDocument(),
+                new ControlTokenStoreDocument { Token = committedToken }));
+            File.WriteAllText(
+                Path.Combine(dataDirectory, "control-token.json"),
+                JsonSerializer.Serialize(new { token = new string('b', 64) }));
+
+            Assert.IsTrue(BridgeControlTokenReader.TryRead(bridgeRoot, out var actual));
+            Assert.AreEqual(committedToken, actual);
         }
         finally
         {
@@ -234,134 +454,64 @@ public sealed class RuntimeAndTerminalTests
     }
 
     [TestMethod]
-    public void ShadowStatusMapsOnlyRedactedAggregateState()
-    {
-        const string json = """
-            {
-              "ok": true,
-              "hostKind": "dotnet",
-              "managementApiVersion": 1,
-              "instanceName": "desktop-shadow",
-              "lifecycle": "ready",
-              "version": "1.2.3.4",
-              "processId": 4321,
-              "ownershipMode": "passive",
-              "activeOwner": false,
-              "store": {
-                "status": "loaded",
-                "files": 6,
-                "bindings": 2,
-                "sessions": 5,
-                "activeSessions": 3,
-                "endedSessions": 2,
-                "routes": 7,
-                "processedInbound": 8,
-                "approvals": 4,
-                "pendingApprovals": 1
-              }
-            }
-            """;
-
-        var shadow = JsonSerializer.Deserialize<BridgeShadowStatus>(json);
-        var status = shadow?.ToBridgeStatus();
-
-        Assert.IsNotNull(status);
-        Assert.AreEqual("dotnet", status.HostKind);
-        Assert.AreEqual("ready", status.Status);
-        Assert.AreEqual(2, status.Bindings);
-        Assert.AreEqual(3, status.ActiveSessions);
-        Assert.AreEqual(1, status.PendingApprovals);
-        Assert.AreEqual(0, status.Sessions.Count);
-        Assert.AreEqual(0, status.Approvals.Count);
-    }
-
-    [TestMethod]
-    public void BridgeTargetsKeepProductionAndShadowOwnershipSeparated()
+    public void BridgeTargetAlwaysSelectsDotNetProduction()
     {
         var production = BridgeHostTarget.FromConfiguration(null, 8765);
-        var explicitProduction = BridgeHostTarget.FromConfiguration("node", 9123);
-        var shadow = BridgeHostTarget.FromConfiguration("dotnet-shadow", 9123);
+        var explicitProduction = BridgeHostTarget.FromConfiguration("dotnet", 9123);
 
         Assert.IsTrue(production.IsProduction);
         Assert.AreEqual(8765, production.Port);
-        Assert.AreEqual("node", production.HostKind);
+        Assert.AreEqual("dotnet", production.HostKind);
         Assert.IsTrue(production.ActiveOwner);
-        Assert.IsFalse(shadow.IsProduction);
-        Assert.AreEqual(8876, shadow.Port);
-        Assert.AreEqual("dotnet", shadow.HostKind);
-        Assert.AreEqual("passive", shadow.OwnershipMode);
-        Assert.IsFalse(shadow.ActiveOwner);
-        Assert.AreNotEqual(production.Port, shadow.Port);
         Assert.AreEqual(9123, explicitProduction.Port);
         Assert.ThrowsException<InvalidOperationException>(() =>
-            BridgeHostTarget.FromConfiguration("dotnet", 8765));
+            BridgeHostTarget.FromConfiguration("unsupported", 8765));
     }
 
     [TestMethod]
     public void BridgeTargetRequiresExactAuthenticatedIdentity()
     {
-        var production = BridgeHostTarget.NodeProduction(8765);
-        var node = new BridgeStatus
+        var production = BridgeHostTarget.DotNetProduction(8765);
+        var status = new BridgeStatus
         {
             ProcessId = 100,
-            HostKind = "node",
+            HostKind = "dotnet",
             ManagementApiVersion = 1,
+            InstanceName = BridgeHostTarget.DotNetProductionInstanceName,
             OwnershipMode = "active",
             ActiveOwner = true,
         };
-        Assert.IsTrue(production.Matches(node));
+        Assert.IsTrue(production.Matches(status));
 
-        node.HostKind = "dotnet";
-        Assert.IsFalse(production.Matches(node));
-        node.HostKind = "node";
-        node.ActiveOwner = false;
-        Assert.IsFalse(production.Matches(node));
-
-        var shadow = BridgeHostTarget.DotNetShadow();
-        var dotnet = new BridgeStatus
-        {
-            ProcessId = 200,
-            HostKind = "dotnet",
-            ManagementApiVersion = 1,
-            InstanceName = BridgeHostTarget.DotNetShadowInstanceName,
-            OwnershipMode = "passive",
-            ActiveOwner = false,
-        };
-        Assert.IsTrue(shadow.Matches(dotnet));
-        dotnet.InstanceName = "another-shadow";
-        Assert.IsFalse(shadow.Matches(dotnet));
-        dotnet.InstanceName = BridgeHostTarget.DotNetShadowInstanceName;
-        dotnet.ProcessId = 0;
-        Assert.IsFalse(shadow.Matches(dotnet));
+        status.HostKind = "unsupported";
+        Assert.IsFalse(production.Matches(status));
+        status.HostKind = "dotnet";
+        status.ActiveOwner = false;
+        Assert.IsFalse(production.Matches(status));
     }
 
     [TestMethod]
-    public void BridgeTargetsBuildIsolatedNodeAndShadowProcesses()
+    public void BridgeTargetBuildsTheProductionProcess()
     {
         var root = Path.Combine(Path.GetTempPath(), $"ai-cli-feishu-target-{Guid.NewGuid():N}");
         var application = Path.Combine(root, "app");
-        Directory.CreateDirectory(Path.Combine(root, "dist"));
         Directory.CreateDirectory(application);
-        File.WriteAllText(Path.Combine(root, "dist", "index.js"), "");
         File.WriteAllText(Path.Combine(application, "AiCliFeishuBridgeHost.exe"), "");
         try
         {
-            var production = BridgeHostTarget.NodeProduction(9123)
+            var production = BridgeHostTarget.DotNetProduction(9123)
                 .CreateStartInfo(root, application);
-            Assert.AreEqual("node.exe", production.FileName);
-            Assert.AreEqual("9123", production.Environment["BRIDGE_HTTP_PORT"]);
-
-            var shadow = BridgeHostTarget.DotNetShadow().CreateStartInfo(root, application);
             Assert.AreEqual(
                 Path.Combine(application, "AiCliFeishuBridgeHost.exe"),
-                shadow.FileName);
-            CollectionAssert.Contains(shadow.ArgumentList.ToArray(), "8876");
-            CollectionAssert.Contains(shadow.ArgumentList.ToArray(), "passive");
+                production.FileName);
+            CollectionAssert.Contains(production.ArgumentList.ToArray(), "9123");
+            CollectionAssert.Contains(production.ArgumentList.ToArray(), "active");
             CollectionAssert.Contains(
-                shadow.ArgumentList.ToArray(),
-                BridgeHostTarget.DotNetShadowInstanceName);
-            Assert.AreEqual("Major", shadow.Environment["DOTNET_ROLL_FORWARD"]);
-            Assert.IsFalse(shadow.Environment.ContainsKey("BRIDGE_HTTP_PORT"));
+                production.ArgumentList.ToArray(),
+                BridgeHostTarget.DotNetProductionInstanceName);
+
+            Assert.AreEqual("Major", production.Environment["DOTNET_ROLL_FORWARD"]);
+            Assert.IsFalse(production.Environment.ContainsKey("BRIDGE_HTTP_PORT"));
         }
         finally
         {
@@ -443,5 +593,34 @@ public sealed class RuntimeAndTerminalTests
         IReadOnlyList<string> actual)
     {
         CollectionAssert.AreEqual(expected.ToArray(), actual.ToArray());
+    }
+
+    private sealed class NeverCompletingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
     }
 }

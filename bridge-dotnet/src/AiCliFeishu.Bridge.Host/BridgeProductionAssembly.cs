@@ -136,6 +136,11 @@ internal interface IBridgeActiveApprovalStateOwner
 {
     BridgeBusinessStateSnapshot Snapshot { get; }
 
+    ValueTask<ApprovalState?> ExpireApprovalAsync(
+        string requestId,
+        CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult<ApprovalState?>(null);
+
     ValueTask<BridgeApprovalClaim?> TryClaimApprovalAsync(
         string requestId,
         string sessionId,
@@ -357,6 +362,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveManagedHookIngress),
         typeof(ActiveManagedHookResponseSink),
         typeof(ActiveOpenCodeEndpointDirectory),
+        typeof(OpenCodeAutoDiscoverySubsystem),
         typeof(ActiveOpenCodeEventSource),
         typeof(ActiveOpenCodeTransport),
         typeof(ActiveOpenCodeRuntimeLifecycle),
@@ -364,7 +370,7 @@ internal static class BridgeProductionAssemblyPreflight
 
     private static readonly (Type Contract, Type Implementation)[] passivePorts =
     [
-        (typeof(IBridgeStoreShadow), typeof(ReadOnlyNodeStoreShadow)),
+        (typeof(IBridgeStoreView), typeof(ReadOnlyBridgeStoreView)),
         (typeof(IFeishuEventSource), typeof(PassiveFeishuEventSource)),
         (typeof(IFeishuGateway), typeof(PassiveFeishuGateway)),
         (typeof(IManagedTerminalDirectory), typeof(PassiveManagedTerminalDirectory)),
@@ -421,7 +427,7 @@ internal static class BridgeProductionAssemblyPreflight
         (typeof(IFeishuCardRenderer), typeof(FeishuCardRenderer)),
         (typeof(IFeishuCardPatchLedger), typeof(InMemoryFeishuCardPatchLedger)),
         (typeof(IFeishuInboundDeduplicator),
-            typeof(InMemoryFeishuInboundDeduplicator)),
+            typeof(PersistentFeishuInboundDeduplicator)),
         (typeof(IBridgeFeishuAdapterAssembly),
             typeof(BridgeFeishuAdapterAssembly)),
     ];
@@ -685,6 +691,18 @@ internal static class BridgeProductionAssemblyPreflight
     {
         foreach (var (contract, implementation) in activeFeishuPorts)
         {
+            if (contract == typeof(IFeishuInboundDeduplicator))
+            {
+                var deduplicators = services
+                    .Where(descriptor => descriptor.ServiceType == contract)
+                    .ToArray();
+                if (deduplicators.Length == 1 &&
+                    (deduplicators[0].ImplementationType == implementation ||
+                     deduplicators[0].ImplementationType == typeof(InMemoryFeishuInboundDeduplicator)))
+                {
+                    continue;
+                }
+            }
             RequireSingleImplementation(
                 services,
                 contract,

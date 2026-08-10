@@ -257,7 +257,7 @@ public sealed class ManagedRuntimeHookBridgeTests
               "session_id": "session-ending",
               "tool_use_id": "approval-ending",
               "tool_name": "Bash",
-              "tool_input": { "command": "npm test" }
+              "tool_input": { "command": "dotnet test" }
             }
             """);
         using var inputHook = JsonDocument.Parse("""

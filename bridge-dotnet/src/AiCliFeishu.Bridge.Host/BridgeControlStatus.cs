@@ -167,8 +167,8 @@ public sealed class BridgeControlStatusReader(
 
 internal static class BridgeControlStoreStatusProjection
 {
-    public static BridgeControlStoreStatus FromShadow(
-        BridgeStoreShadowSnapshot store)
+    public static BridgeControlStoreStatus FromStoreView(
+        BridgeStoreViewSnapshot store)
     {
         ArgumentNullException.ThrowIfNull(store);
         var core = store.Core;
@@ -194,18 +194,18 @@ internal static class BridgeControlStoreStatusProjection
         var status = store.State switch
         {
             BridgeProductionStoreState.Open when store.Store is not null =>
-                BridgeStoreShadowStatuses.Loaded,
-            BridgeProductionStoreState.Failed => BridgeStoreShadowStatuses.Failed,
-            _ => BridgeStoreShadowStatuses.NotLoaded,
+                BridgeStoreViewStatuses.Loaded,
+            BridgeProductionStoreState.Failed => BridgeStoreViewStatuses.Failed,
+            _ => BridgeStoreViewStatuses.NotLoaded,
         };
         var core = store.Store is null
             ? null
-            : NodeStoreCoreProjection.Project(store.Store);
-        var projected = new BridgeStoreShadowSnapshot(
+            : BridgeStoreCoreProjection.Project(store.Store);
+        var projected = new BridgeStoreViewSnapshot(
             status,
             core,
             store.StoreFiles,
             store.Store?.Bindings.Users.Count ?? 0);
-        return FromShadow(projected);
+        return FromStoreView(projected);
     }
 }

@@ -37,6 +37,40 @@ public sealed class FeishuEventPumpTests
     }
 
     [TestMethod]
+    public async Task PumpRunsFollowUpOnlyAfterAcknowledgementCompletes()
+    {
+        var order = new List<string>();
+        var envelope = MessageEnvelope(
+            "event-follow-up",
+            (_, _, _) =>
+            {
+                order.Add("acknowledged");
+                return Task.CompletedTask;
+            });
+        var sink = new RecordingFeishuIntentSink
+        {
+            Result = new(
+                "warning",
+                "已处理",
+                AfterAcknowledged: _ =>
+                {
+                    order.Add("follow-up");
+                    return Task.CompletedTask;
+                }),
+        };
+        var pump = new FeishuEventPump(
+            new ListFeishuEventSource(envelope),
+            new(new InMemoryFeishuInboundDeduplicator()),
+            sink);
+
+        await pump.RunAsync();
+
+        CollectionAssert.AreEqual(
+            new[] { "acknowledged", "follow-up" },
+            order);
+    }
+
+    [TestMethod]
     public async Task PumpAcknowledgesDuplicateWithoutPublishingTwice()
     {
         var statuses = new List<int>();

@@ -10,6 +10,7 @@ internal sealed class ActiveOwnerLeaseAcquirer : IBridgeActiveOwnerLeaseLifecycl
     private readonly string dataDirectory;
     private readonly ActiveOwnerLeaseObserver observer;
     private readonly ActiveOwnerLeaseRecord record;
+    private FileStream? ownershipHandle;
     private bool held;
 
     public ActiveOwnerLeaseAcquirer(BridgeHostOptions options)
@@ -90,7 +91,9 @@ internal sealed class ActiveOwnerLeaseAcquirer : IBridgeActiveOwnerLeaseLifecycl
             $"bridge-active-owner.pending-{record.LeaseId}");
         try
         {
-            await PrepareStagingDirectoryAsync(stagingDirectory, cancellationToken);
+            await PrepareStagingDirectoryAsync(
+                stagingDirectory,
+                cancellationToken);
             for (var attempt = 0; attempt < MaximumAcquireAttempts; attempt++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -113,6 +116,15 @@ internal sealed class ActiveOwnerLeaseAcquirer : IBridgeActiveOwnerLeaseLifecycl
                 try
                 {
                     Directory.Move(stagingDirectory, LockDirectoryPath);
+                    try
+                    {
+                        ownershipHandle = OpenOwnershipHandle();
+                    }
+                    catch
+                    {
+                        TryDeleteOwnedLeaseDirectory();
+                        throw;
+                    }
                     held = true;
                     return record;
                 }
@@ -148,12 +160,23 @@ internal sealed class ActiveOwnerLeaseAcquirer : IBridgeActiveOwnerLeaseLifecycl
         var snapshot = await observer.InspectAsync(cancellationToken);
         if (snapshot.Record?.LeaseId != record.LeaseId)
         {
+            if (ownershipHandle is not null)
+            {
+                await ownershipHandle.DisposeAsync();
+                ownershipHandle = null;
+            }
+            held = false;
             throw new InvalidOperationException(
                 "Active Owner 租约身份已变化，拒绝删除其他 Owner 的租约。");
         }
 
-        Directory.Delete(LockDirectoryPath, recursive: true);
+        if (ownershipHandle is not null)
+        {
+            await ownershipHandle.DisposeAsync();
+            ownershipHandle = null;
+        }
         held = false;
+        Directory.Delete(LockDirectoryPath, recursive: true);
     }
 
     public ValueTask DisposeAsync() => ReleaseAsync();
@@ -190,6 +213,40 @@ internal sealed class ActiveOwnerLeaseAcquirer : IBridgeActiveOwnerLeaseLifecycl
         await stream.WriteAsync(metadata, cancellationToken);
         await stream.WriteAsync("\n"u8.ToArray(), cancellationToken);
         stream.Flush(flushToDisk: true);
+    }
+
+    private FileStream OpenOwnershipHandle() => new(
+        Path.Combine(LockDirectoryPath, ActiveOwnerLeaseObserver.OwnershipHandleFileName),
+        FileMode.CreateNew,
+        FileAccess.ReadWrite,
+        FileShare.Read,
+        1,
+        FileOptions.WriteThrough);
+
+    private void TryDeleteOwnedLeaseDirectory()
+    {
+        try
+        {
+            if (!File.Exists(MetadataPath))
+            {
+                return;
+            }
+            var current = JsonSerializer.Deserialize<ActiveOwnerLeaseRecord>(
+                File.ReadAllText(MetadataPath),
+                new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                    PropertyNameCaseInsensitive = false,
+                });
+            if (current?.LeaseId == record.LeaseId)
+            {
+                Directory.Delete(LockDirectoryPath, recursive: true);
+            }
+        }
+        catch (Exception error) when (
+            error is IOException or UnauthorizedAccessException or JsonException)
+        {
+        }
     }
 
     private bool TryQuarantineStaleLease(ActiveOwnerLeaseRecord staleRecord)
@@ -242,14 +299,12 @@ internal sealed class ActiveOwnerLeaseAcquirer : IBridgeActiveOwnerLeaseLifecycl
 
 internal sealed class ActiveOwnerLeaseHostedService(
     IBridgeActiveOwnerLeaseLifecycle lease,
-    BridgeHealthRegistry health,
-    BridgeActiveStartupAuthorization? startupAuthorization = null) : IHostedService
+    BridgeHealthRegistry health) : IHostedService
 {
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         try
         {
-            startupAuthorization?.Confirm();
             await lease.AcquireAsync(cancellationToken);
             health.Report("production-owner", "ready", "active-owner-dotnet-held");
         }

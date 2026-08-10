@@ -5,7 +5,7 @@ namespace AiCliFeishu.Bridge.Core;
 
 /// <summary>
 /// Shared normalization and validation rules for the alias stored in the
-/// Node-compatible session document.  Keeping these rules in Core prevents a
+/// Persistent session document. Keeping these rules in Core prevents a
 /// Feishu command path and a persistence path from assigning different keys.
 /// </summary>
 public static partial class SessionAliasRules

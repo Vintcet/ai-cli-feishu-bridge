@@ -22,6 +22,7 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
             fixture.Store);
 
         Assert.AreEqual("success", result.ToastType);
+        Assert.IsNull(result.Card);
         var command = fixture.Runtime.Commands.Single();
         Assert.AreEqual(RuntimeCommandTypes.ApprovalResolve, command.CommandType);
         Assert.AreEqual(RuntimeNames.Codex, command.Runtime);
@@ -37,6 +38,9 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
         Assert.AreEqual(
             SessionStatuses.Running,
             fixture.State.Snapshot.Sessions.Sessions["session-1"].Status);
+        Assert.IsNotNull(result.AfterAcknowledged);
+        Assert.AreEqual(0, fixture.Gateway.Patches.Count);
+        await result.AfterAcknowledged(CancellationToken.None);
         CollectionAssert.AreEquivalent(
             new[] { "card-owner", "card-group" },
             fixture.Gateway.Patches.Select(item => item.MessageId).ToArray());
@@ -66,6 +70,35 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
     }
 
     [TestMethod]
+    public async Task LocalApprovalUsesTheSameCoordinatorAndDuplicateIsSuccessful()
+    {
+        var fixture = Fixture.Create(RuntimeNames.Codex);
+
+        var first = await fixture.Coordinator.HandleLocalAsync(
+            "approval-1",
+            ApprovalResolutions.Allow,
+            fixture.Store);
+        var duplicate = await fixture.Coordinator.HandleLocalAsync(
+            "approval-1",
+            ApprovalResolutions.Deny,
+            fixture.Store);
+        var missing = await fixture.Coordinator.HandleLocalAsync(
+            "missing-approval",
+            ApprovalResolutions.Allow,
+            fixture.Store);
+
+        Assert.IsTrue(first.Ok);
+        Assert.IsFalse(first.AlreadyResolved);
+        Assert.AreEqual(ApprovalResolutions.Allow, first.Resolution);
+        Assert.IsTrue(duplicate.Ok);
+        Assert.IsTrue(duplicate.AlreadyResolved);
+        Assert.AreEqual(ApprovalResolutions.Allow, duplicate.Resolution);
+        Assert.IsTrue(missing.Ok);
+        Assert.IsTrue(missing.AlreadyResolved);
+        Assert.AreEqual(1, fixture.Runtime.Commands.Count);
+    }
+
+    [TestMethod]
     public async Task DeferPersistsDesktopFlagWithoutRuntimeDecisionOrResolution()
     {
         var fixture = Fixture.Create(RuntimeNames.Codex, ready: false);
@@ -75,6 +108,7 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
             fixture.Store);
 
         Assert.AreEqual("success", result.ToastType);
+        Assert.IsNull(result.Card);
         Assert.AreEqual(0, fixture.Runtime.Commands.Count);
         Assert.AreEqual(
             ApprovalStatuses.Pending,
@@ -85,6 +119,9 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
         Assert.IsTrue(
             fixture.State.Store.Approvals.Requests["approval-1"]
                 .ExtensionData!["desktopApprovalRequested"].GetBoolean());
+        Assert.IsNotNull(result.AfterAcknowledged);
+        Assert.AreEqual(0, fixture.Gateway.Patches.Count);
+        await result.AfterAcknowledged(CancellationToken.None);
         Assert.AreEqual(2, fixture.Gateway.Patches.Count);
         Assert.IsTrue(fixture.Gateway.Patches.All(item =>
             CardText(item.Card).Contains(
@@ -246,7 +283,11 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
             fixture.Store);
 
         Assert.AreEqual("warning", result.ToastType);
+        Assert.IsNull(result.Card);
         Assert.AreEqual(0, fixture.Runtime.Commands.Count);
+        Assert.IsNotNull(result.AfterAcknowledged);
+        Assert.AreEqual(0, fixture.Gateway.Patches.Count);
+        await result.AfterAcknowledged(CancellationToken.None);
         Assert.AreEqual(2, fixture.Gateway.Patches.Count);
         foreach (var patch in fixture.Gateway.Patches)
         {
@@ -256,6 +297,34 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
             Assert.IsFalse(json.Contains("approval_deny", StringComparison.Ordinal));
             Assert.IsFalse(json.Contains("approval_desktop", StringComparison.Ordinal));
         }
+    }
+
+    [TestMethod]
+    public async Task ClickingLegacyOrphanedApprovalPatchesCallbackMessageWithoutReturningCard()
+    {
+        var fixture = Fixture.Create(
+            RuntimeNames.Codex,
+            approvalStatus: ApprovalStatuses.Orphaned,
+            resolution: ApprovalResolutions.Local,
+            messageIds: []);
+
+        var result = await fixture.Coordinator.HandleAsync(
+            Intent(FeishuIntentTypes.ApprovalResolve, ApprovalResolutions.Allow),
+            fixture.Store);
+
+        Assert.AreEqual("warning", result.ToastType);
+        Assert.IsNull(result.Card);
+        Assert.IsNotNull(result.AfterAcknowledged);
+        Assert.AreEqual(0, fixture.Runtime.Commands.Count);
+        Assert.AreEqual(0, fixture.Gateway.Patches.Count);
+        await result.AfterAcknowledged(CancellationToken.None);
+        var patch = fixture.Gateway.Patches.Single();
+        Assert.AreEqual("card-owner", patch.MessageId);
+        StringAssert.Contains(CardText(patch.Card), "审批已失效，无需再处理");
+        var json = patch.Card.Content.ToJsonString();
+        Assert.IsFalse(json.Contains("approval_allow", StringComparison.Ordinal));
+        Assert.IsFalse(json.Contains("approval_deny", StringComparison.Ordinal));
+        Assert.IsFalse(json.Contains("approval_desktop", StringComparison.Ordinal));
     }
 
     private static FeishuIntent Intent(
@@ -339,24 +408,30 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
         RecordingApprovalStateOwner State,
         RecordingRuntimeCommandGateway Runtime,
         RecordingFeishuGateway Gateway,
-        NodeStoreSnapshot Store)
+        BridgeStoreSnapshot Store)
     {
         public static Fixture Create(
             string runtime,
             bool ready = true,
             string approvalStatus = ApprovalStatuses.Pending,
-            string? resolution = null)
+            string? resolution = null,
+            IReadOnlyList<string>? messageIds = null)
         {
-            var store = StoreSnapshot(runtime, approvalStatus, resolution);
+            var store = StoreSnapshot(
+                runtime,
+                approvalStatus,
+                resolution,
+                messageIds ?? ["card-owner", "card-group"]);
             var state = new RecordingApprovalStateOwner(store);
             var commands = new RecordingRuntimeCommandGateway { Ready = ready };
             var gateway = new RecordingFeishuGateway();
+            var renderer = new FeishuCardRenderer();
             var interactions = new FeishuInteractionCoordinator(
                 gateway,
-                new FeishuCardRenderer(),
+                renderer,
                 new InMemoryFeishuCardPatchLedger());
             return new(
-                new(state, commands, interactions),
+                new(state, commands, interactions, renderer),
                 state,
                 commands,
                 gateway,
@@ -364,10 +439,11 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
         }
     }
 
-    private static NodeStoreSnapshot StoreSnapshot(
+    private static BridgeStoreSnapshot StoreSnapshot(
         string runtime,
         string approvalStatus,
-        string? resolution)
+        string? resolution,
+        IReadOnlyList<string> messageIds)
     {
         var session = new SessionStoreRecord
         {
@@ -391,7 +467,7 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
             CreatedAt = Origin.ToString("O"),
             ExpiresAt = Origin.AddMinutes(10).ToString("O"),
             Status = approvalStatus,
-            MessageIds = ["card-owner", "card-group"],
+            MessageIds = [.. messageIds],
             Resolution = resolution,
             ResolvedAt = approvalStatus == ApprovalStatuses.Pending
                 ? null
@@ -451,10 +527,10 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
         private readonly object sync = new();
         private BridgeBusinessStateSnapshot snapshot;
 
-        public RecordingApprovalStateOwner(NodeStoreSnapshot store)
+        public RecordingApprovalStateOwner(BridgeStoreSnapshot store)
         {
             Store = store;
-            var core = NodeStoreCoreProjection.Project(store);
+            var core = BridgeStoreCoreProjection.Project(store);
             snapshot = new(
                 true,
                 "production",
@@ -465,7 +541,7 @@ public sealed class ActiveFeishuApprovalCoordinatorTests
                 InputRegistryState.Empty);
         }
 
-        public NodeStoreSnapshot Store { get; private set; }
+        public BridgeStoreSnapshot Store { get; private set; }
 
         public BridgeBusinessStateSnapshot Snapshot
         {

@@ -12,7 +12,8 @@ public sealed record ManagedTerminalTarget(
     string TerminalId,
     string SessionExternalId,
     bool Ready,
-    long Generation = 0);
+    long Generation = 0,
+    string TerminalSecret = "");
 
 public interface IManagedTerminalDirectory
 {

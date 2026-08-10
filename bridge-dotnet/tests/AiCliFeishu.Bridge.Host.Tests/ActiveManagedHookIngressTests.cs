@@ -13,6 +13,7 @@ public sealed class ActiveManagedHookIngressTests
 {
     private static readonly string Cwd = Path.GetFullPath(
         Path.Combine(Path.GetTempPath(), "managed-hook-ingress-project"));
+    private static readonly string TerminalSecret = new('a', 64);
 
     [TestMethod]
     public async Task SessionStartClaimsPublishesCanonicalIdentityThenDrains()
@@ -374,6 +375,7 @@ public sealed class ActiveManagedHookIngressTests
                 JsonSerializer.SerializeToElement(new
                 {
                     terminalId,
+                    terminalSecret = TerminalSecret,
                     cwd = Cwd,
                     runtime = RuntimeNames.Codex,
                     elevated,
@@ -428,7 +430,7 @@ public sealed class ActiveManagedHookIngressTests
 
     private sealed class RecordingStoreOwner : IBridgeProductionStoreOwner
     {
-        private readonly NodeStoreSnapshot store = new(
+        private readonly BridgeStoreSnapshot store = new(
             new BindingStoreDocument(),
             new SessionStoreDocument(),
             new RouteStoreDocument(),
@@ -442,12 +444,12 @@ public sealed class ActiveManagedHookIngressTests
             0);
         public ValueTask OpenAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
-        public ValueTask<NodeStoreSnapshot> ReadAsync(
+        public ValueTask<BridgeStoreSnapshot> ReadAsync(
             CancellationToken cancellationToken = default) => ValueTask.FromResult(store);
         public ValueTask FlushAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
         public ValueTask UpdateAsync(
-            Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
+            Func<BridgeStoreSnapshot, BridgeStoreSnapshot> update,
             CancellationToken cancellationToken = default) => ValueTask.CompletedTask;
         public ValueTask CloseAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;

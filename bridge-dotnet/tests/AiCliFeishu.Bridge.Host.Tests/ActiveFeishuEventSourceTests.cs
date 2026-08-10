@@ -125,7 +125,7 @@ public sealed class ActiveFeishuEventSourceTests
     }
 
     [TestMethod]
-    public void CreatesNodeCompatibleFeishuWebSocketOptionsWithoutRedactionLoss()
+    public void CreatesCompatibleFeishuWebSocketOptionsWithoutRedactionLoss()
     {
         var credentials = new BridgeFeishuCredentials(
             "cli_event_stream",

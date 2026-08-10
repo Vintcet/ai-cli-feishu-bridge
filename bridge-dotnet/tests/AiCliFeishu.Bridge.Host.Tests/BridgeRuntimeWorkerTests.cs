@@ -13,6 +13,7 @@ public sealed class BridgeRuntimeWorkerTests
         var health = new BridgeHealthRegistry(BridgeHostOptions.Passive(Path.GetTempPath()));
         var lifetime = new RecordingApplicationLifetime();
         var worker = new BridgeRuntimeWorker(
+            () =>
             [
                 new RecordingSubsystem("first", operations),
                 new RecordingSubsystem("second", operations),
@@ -40,6 +41,7 @@ public sealed class BridgeRuntimeWorkerTests
         var health = new BridgeHealthRegistry(BridgeHostOptions.Passive(Path.GetTempPath()));
         var lifetime = new RecordingApplicationLifetime();
         var worker = new BridgeRuntimeWorker(
+            () =>
             [
                 new RecordingSubsystem("started", operations),
                 new RecordingSubsystem("broken", operations, failOnStart: true),
@@ -67,6 +69,7 @@ public sealed class BridgeRuntimeWorkerTests
         var lifetime = new RecordingApplicationLifetime();
         var background = new RecordingBackgroundSubsystem("background", operations);
         var worker = new BridgeRuntimeWorker(
+            () =>
             [
                 new RecordingSubsystem("first", operations),
                 background,

@@ -56,7 +56,7 @@ internal sealed class ActiveOpenCodeRuntimeLifecycle :
             directory,
             desktopLifecycle,
             new LoopbackOpenCodePortAllocator(MinimumPort, MaximumPort),
-            DefaultReadyTimeout,
+            ConfiguredDuration(options, "RUNTIME_AUTO_LAUNCH_TIMEOUT_MS", DefaultReadyTimeout),
             DefaultPollInterval,
             static (duration, cancellationToken) =>
                 Task.Delay(duration, cancellationToken))
@@ -335,6 +335,14 @@ internal sealed class ActiveOpenCodeRuntimeLifecycle :
             throw new InvalidOperationException(
                 "OpenCode 生产生命周期只能用于 Active Host。");
         }
+    }
+
+    private static TimeSpan ConfiguredDuration(BridgeHostOptions options, string name, TimeSpan fallback)
+    {
+        var raw = BridgeLocalConfiguration.Read(options, name);
+        return long.TryParse(raw, out var milliseconds) && milliseconds > 0
+            ? TimeSpan.FromMilliseconds(milliseconds)
+            : fallback;
     }
 
     private void ThrowIfDisposed()

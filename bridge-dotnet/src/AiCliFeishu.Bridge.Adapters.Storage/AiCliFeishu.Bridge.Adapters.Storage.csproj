@@ -8,6 +8,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="AiCliFeishu.Bridge.Storage.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\AiCliFeishu.Bridge.Core\AiCliFeishu.Bridge.Core.csproj" />
   </ItemGroup>
 </Project>

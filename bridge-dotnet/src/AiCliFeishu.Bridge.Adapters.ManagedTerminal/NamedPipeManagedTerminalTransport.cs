@@ -45,6 +45,14 @@ public sealed class NamedPipeManagedTerminalTransport : IManagedTerminalTranspor
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(prompt);
+        if (string.IsNullOrWhiteSpace(context.CommandId) ||
+            context.CommandId.Length > 256 ||
+            context.CommandId.Any(char.IsControl))
+        {
+            throw new ArgumentException(
+                "托管终端命令 ID 无效。",
+                nameof(context));
+        }
         ValidateTarget(target);
         if (submitMode is not ManagedTerminalSubmitMode.Steer and
             not ManagedTerminalSubmitMode.Queue)
@@ -84,6 +92,8 @@ public sealed class NamedPipeManagedTerminalTransport : IManagedTerminalTranspor
             var request = JsonSerializer.Serialize(new
             {
                 type = "prompt",
+                commandId = context.CommandId,
+                terminalSecret = target.TerminalSecret,
                 prompt = normalizedPrompt,
                 submitMode = submitMode == ManagedTerminalSubmitMode.Queue ? "queue" : "steer",
             });
@@ -113,6 +123,18 @@ public sealed class NamedPipeManagedTerminalTransport : IManagedTerminalTranspor
             if (root.ValueKind is not JsonValueKind.Object)
             {
                 throw new JsonException("托管终端返回结果必须是 JSON 对象。");
+            }
+            var responseCommandId = root.TryGetProperty("commandId", out var commandId) &&
+                commandId.ValueKind == JsonValueKind.String
+                    ? commandId.GetString()
+                    : null;
+            if (!string.Equals(
+                    responseCommandId,
+                    context.CommandId,
+                    StringComparison.Ordinal))
+            {
+                throw new ManagedTerminalRejectedException(
+                    "托管终端返回了不匹配的命令确认，已拒绝该结果。");
             }
             if (root.TryGetProperty("ok", out var ok) &&
                 ok.ValueKind == JsonValueKind.True)
@@ -179,6 +201,14 @@ public sealed class NamedPipeManagedTerminalTransport : IManagedTerminalTranspor
             target.SessionExternalId.Any(char.IsControl))
         {
             throw new ArgumentException("托管终端会话 ID 无效。", nameof(target));
+        }
+        if (target.TerminalSecret.Length != 64 ||
+            target.TerminalSecret.Any(character =>
+                character is not (>= '0' and <= '9') and
+                not (>= 'a' and <= 'f') and
+                not (>= 'A' and <= 'F')))
+        {
+            throw new ArgumentException("托管终端请求密钥无效。", nameof(target));
         }
     }
 

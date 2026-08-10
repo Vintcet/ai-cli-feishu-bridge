@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.Json;
 using AiCliFeishu.Bridge.Adapters.Feishu;
+using AiCliFeishu.Bridge.Adapters.ManagedTerminal;
 using AiCliFeishu.Bridge.Adapters.Storage;
 using AiCliFeishu.Bridge.Core;
 using AiCliFeishu.Bridge.Protocol;
@@ -94,6 +95,194 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
                 StringComparison.Ordinal)));
     }
 
+    [TestMethod]
+    public async Task SendsInputCardsPersistsQuestionRoutesAndRemovesButtonsWhenResolved()
+    {
+        var store = new RecordingStoreOwner(StoreSnapshot());
+        var state = new ActivePersistentBusinessStateOwner(
+            Options(),
+            store,
+            new FixedTimeProvider(Origin));
+        await state.StartAsync(CancellationToken.None);
+        await state.HandleAsync(InputEvent());
+        var gateway = new RecordingFeishuGateway();
+        var renderer = new FeishuCardRenderer();
+        var coordinator = new ActiveFeishuApprovalNotificationCoordinator(
+            state,
+            store,
+            gateway,
+            renderer,
+            new FeishuInteractionCoordinator(
+                gateway,
+                renderer,
+                new InMemoryFeishuCardPatchLedger()),
+            new RecordingSessionGroupCoordinator(["chat-owner"]),
+            state);
+
+        await coordinator.NotifyPendingInputAsync("input-1", "session-1");
+        await coordinator.NotifyPendingInputAsync("input-1", "session-1");
+
+        Assert.AreEqual(1, gateway.Sends.Count);
+        var route = store.Current.Routes.Messages[gateway.Sends[0].MessageId];
+        Assert.AreEqual("input", route.Kind);
+        Assert.AreEqual("input-1", route.RequestId);
+        Assert.AreEqual(
+            "q1",
+            route.ExtensionData!["questionId"].GetString());
+        Assert.AreEqual(
+            "chat-owner",
+            route.ExtensionData["selectionKey"].GetString());
+
+        await state.HandleAsync(InputResolvedEvent());
+        await coordinator.SynchronizeInputAsync("input-1", "session-1");
+
+        Assert.AreEqual(1, gateway.Patches.Count);
+        StringAssert.Contains(CardText(gateway.Patches[0].Card), "已转回电脑端");
+        Assert.IsFalse(gateway.Patches[0].Card.Content.ToJsonString().Contains(
+            FeishuCardActions.InputAnswer,
+            StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public async Task MissingInputRecipientImmediatelyReturnsManagedHookToLocalAnswering()
+    {
+        var store = new RecordingStoreOwner(StoreSnapshot());
+        var state = new ActivePersistentBusinessStateOwner(
+            Options(),
+            store,
+            new FixedTimeProvider(Origin));
+        await state.StartAsync(CancellationToken.None);
+        await state.HandleAsync(InputEvent());
+        var gateway = new RecordingFeishuGateway();
+        var renderer = new FeishuCardRenderer();
+        var managedHooks = new RecordingManagedHookResponseSink();
+        var coordinator = new ActiveFeishuApprovalNotificationCoordinator(
+            state,
+            store,
+            gateway,
+            renderer,
+            new FeishuInteractionCoordinator(
+                gateway,
+                renderer,
+                new InMemoryFeishuCardPatchLedger()),
+            new RecordingSessionGroupCoordinator([]),
+            state,
+            () => managedHooks);
+
+        await coordinator.NotifyPendingInputAsync("input-1", "session-1");
+
+        Assert.AreEqual(0, gateway.Sends.Count);
+        Assert.AreEqual(
+            InputRequestStatuses.Local,
+            state.Snapshot.Inputs.Requests["input-1"].Status,
+            state.Snapshot.Sessions.Sessions["session-1"].Runtime);
+        Assert.AreEqual(
+            1,
+            managedHooks.Deferred.Count,
+            string.Join(" | ", managedHooks.Deferred));
+        Assert.AreEqual(
+            $"{RuntimeNames.Codex}:session-1:input-1",
+            managedHooks.Deferred[0]);
+    }
+
+    [TestMethod]
+    public async Task AutoApprovesOnlyLowRiskRequestAndSendsProcessedCardWhenConfigured()
+    {
+        var snapshot = StoreSnapshot();
+        snapshot.Settings.AutoApprove = true;
+        snapshot.Settings.NotifyAutoApprovals = true;
+        var store = new RecordingStoreOwner(snapshot);
+        var state = new ActivePersistentBusinessStateOwner(
+            Options(),
+            store,
+            new FixedTimeProvider(Origin));
+        await state.StartAsync(CancellationToken.None);
+        await state.HandleAsync(ApprovalEvent("{\"command\":\"git status\"}"));
+        var gateway = new RecordingFeishuGateway();
+        var renderer = new FeishuCardRenderer();
+        var interactions = new FeishuInteractionCoordinator(
+            gateway,
+            renderer,
+            new InMemoryFeishuCardPatchLedger());
+        var runtime = new RecordingRuntimeCommandGateway();
+        var approvals = new ActiveFeishuApprovalCoordinator(
+            state,
+            runtime,
+            interactions,
+            renderer);
+        var coordinator = new ActiveFeishuApprovalNotificationCoordinator(
+            state,
+            store,
+            gateway,
+            renderer,
+            interactions,
+            new RecordingSessionGroupCoordinator(["chat-owner"]),
+            approvals: approvals);
+
+        await coordinator.NotifyPendingAsync("approval-1", "session-1");
+
+        Assert.AreEqual("low", store.Current.Approvals.Requests["approval-1"]
+            .ExtensionData!["riskLevel"].GetString());
+        Assert.AreEqual(1, runtime.Commands.Count);
+        Assert.AreEqual(
+            "allow_once",
+            runtime.Commands[0].Payload.GetProperty("decision").GetString());
+        Assert.AreEqual(
+            ApprovalStatuses.Resolved,
+            state.Snapshot.Approvals.Requests["approval-1"].Status);
+        Assert.AreEqual(1, gateway.Sends.Count);
+        Assert.IsFalse(gateway.Sends[0].Card.Content.ToJsonString().Contains(
+            FeishuCardActions.ApprovalAllow,
+            StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public async Task HighRiskRequestNeverAutoApprovesEvenWhenEnabled()
+    {
+        var snapshot = StoreSnapshot();
+        snapshot.Settings.AutoApprove = true;
+        var store = new RecordingStoreOwner(snapshot);
+        var state = new ActivePersistentBusinessStateOwner(
+            Options(),
+            store,
+            new FixedTimeProvider(Origin));
+        await state.StartAsync(CancellationToken.None);
+        await state.HandleAsync(ApprovalEvent("{\"command\":\"git reset --hard\"}"));
+        var gateway = new RecordingFeishuGateway();
+        var renderer = new FeishuCardRenderer();
+        var interactions = new FeishuInteractionCoordinator(
+            gateway,
+            renderer,
+            new InMemoryFeishuCardPatchLedger());
+        var runtime = new RecordingRuntimeCommandGateway();
+        var approvals = new ActiveFeishuApprovalCoordinator(
+            state,
+            runtime,
+            interactions,
+            renderer);
+        var coordinator = new ActiveFeishuApprovalNotificationCoordinator(
+            state,
+            store,
+            gateway,
+            renderer,
+            interactions,
+            new RecordingSessionGroupCoordinator(["chat-owner"]),
+            approvals: approvals);
+
+        await coordinator.NotifyPendingAsync("approval-1", "session-1");
+
+        Assert.AreEqual("high", store.Current.Approvals.Requests["approval-1"]
+            .ExtensionData!["riskLevel"].GetString());
+        Assert.AreEqual(0, runtime.Commands.Count);
+        Assert.AreEqual(
+            ApprovalStatuses.Pending,
+            state.Snapshot.Approvals.Requests["approval-1"].Status);
+        Assert.AreEqual(1, gateway.Sends.Count);
+        Assert.IsTrue(gateway.Sends[0].Card.Content.ToJsonString().Contains(
+            FeishuCardActions.ApprovalAllow,
+            StringComparison.Ordinal));
+    }
+
     private static string CardText(FeishuCardView card) => string.Join(
         '\n',
         card.Content["elements"]!.AsArray()
@@ -107,7 +296,8 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
         BridgeOwnershipMode.Active,
         "approval-notification-test");
 
-    private static RuntimeEventEnvelope ApprovalEvent() => new()
+    private static RuntimeEventEnvelope ApprovalEvent(
+        string description = "git status") => new()
     {
         ProtocolVersion = BridgeProtocolVersion.Current,
         Runtime = RuntimeNames.Codex,
@@ -125,12 +315,65 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
         {
             requestId = "approval-1",
             title = "shell_command",
-            description = "git status",
+            description,
             expiresAt = Origin.AddMinutes(22).ToString("O"),
         }),
     };
 
-    private static NodeStoreSnapshot StoreSnapshot()
+    private static RuntimeEventEnvelope InputEvent() => new()
+    {
+        ProtocolVersion = BridgeProtocolVersion.Current,
+        Runtime = RuntimeNames.Codex,
+        Session = new RuntimeSessionReference
+        {
+            ExternalId = "session-1",
+            Cwd = "K:/repo",
+        },
+        TraceId = "trace-input-1",
+        CorrelationId = "turn-input-1",
+        EventId = "event-input-1",
+        EventType = RuntimeEventTypes.InputRequested,
+        OccurredAt = Origin.AddMinutes(2).ToString("O"),
+        Payload = JsonSerializer.SerializeToElement(new
+        {
+            requestId = "input-1",
+            questions = new[]
+            {
+                new
+                {
+                    id = "q1",
+                    header = "选择环境",
+                    prompt = "请选择环境",
+                    multiple = false,
+                    allowsCustom = false,
+                    options = new[] { "测试" },
+                },
+            },
+            expiresAt = Origin.AddMinutes(22).ToString("O"),
+        }),
+    };
+
+    private static RuntimeEventEnvelope InputResolvedEvent() => new()
+    {
+        ProtocolVersion = BridgeProtocolVersion.Current,
+        Runtime = RuntimeNames.Codex,
+        Session = new RuntimeSessionReference
+        {
+            ExternalId = "session-1",
+            Cwd = "K:/repo",
+        },
+        TraceId = "trace-input-1",
+        CorrelationId = "turn-input-1",
+        EventId = "event-input-resolved-1",
+        EventType = RuntimeEventTypes.InputResolvedExternally,
+        OccurredAt = Origin.AddMinutes(3).ToString("O"),
+        Payload = JsonSerializer.SerializeToElement(new
+        {
+            requestId = "input-1",
+        }),
+    };
+
+    private static BridgeStoreSnapshot StoreSnapshot()
     {
         var session = new SessionStoreRecord
         {
@@ -171,7 +414,7 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
             new ControlTokenStoreDocument());
     }
 
-    private static NodeStoreSnapshot TerminalStoreSnapshot()
+    private static BridgeStoreSnapshot TerminalStoreSnapshot()
     {
         var store = StoreSnapshot();
         store.Approvals.Requests = new Dictionary<string, ApprovalStoreRecord>(
@@ -211,12 +454,12 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
         return store;
     }
 
-    private sealed class RecordingStoreOwner(NodeStoreSnapshot current) :
+    private sealed class RecordingStoreOwner(BridgeStoreSnapshot current) :
         IBridgeProductionStoreOwner
     {
-        private NodeStoreSnapshot current = current;
+        private BridgeStoreSnapshot current = current;
 
-        public NodeStoreSnapshot Current => current;
+        public BridgeStoreSnapshot Current => current;
 
         public BridgeProductionStoreSnapshot Snapshot => new(
             BridgeProductionStoreState.Open,
@@ -226,7 +469,7 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
         public ValueTask OpenAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 
-        public ValueTask<NodeStoreSnapshot> ReadAsync(
+        public ValueTask<BridgeStoreSnapshot> ReadAsync(
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -237,7 +480,7 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
             ValueTask.CompletedTask;
 
         public ValueTask UpdateAsync(
-            Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
+            Func<BridgeStoreSnapshot, BridgeStoreSnapshot> update,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -353,6 +596,59 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
 
         private static Task<T> Unexpected<T>() => Task.FromException<T>(
             new AssertFailedException("审批通知不应调用这个飞书端口。"));
+    }
+
+    private sealed class RecordingManagedHookResponseSink : IManagedHookResponseSink
+    {
+        public List<string> Deferred { get; } = [];
+
+        public bool IsReady(string runtime, string sessionExternalId) => true;
+
+        public Task ResolveApprovalAsync(
+            RuntimeCommandContext context,
+            string runtime,
+            string sessionExternalId,
+            string requestId,
+            string decision,
+            CancellationToken cancellationToken = default) => Unexpected();
+
+        public Task ResolveInputAsync(
+            RuntimeCommandContext context,
+            string runtime,
+            string sessionExternalId,
+            string requestId,
+            IReadOnlyDictionary<string, IReadOnlyList<string>> answers,
+            CancellationToken cancellationToken = default) => Unexpected();
+
+        public Task DeferInputToLocalAsync(
+            string runtime,
+            string sessionExternalId,
+            string requestId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Deferred.Add($"{runtime}:{sessionExternalId}:{requestId}");
+            return Task.CompletedTask;
+        }
+
+        private static Task Unexpected() => Task.FromException(
+            new AssertFailedException("本测试只允许把补充问题转回本机。"));
+    }
+
+    private sealed class RecordingRuntimeCommandGateway : IBridgeRuntimeCommandGateway
+    {
+        public List<RuntimeCommandEnvelope> Commands { get; } = [];
+
+        public bool IsReady(string runtime, RuntimeSession session) => true;
+
+        public Task DispatchAsync(
+            RuntimeCommandEnvelope command,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Commands.Add(command);
+            return Task.CompletedTask;
+        }
     }
 
     private sealed record SentCard(

@@ -509,10 +509,10 @@ public sealed class ActiveFeishuPromptCoordinatorTests
                 StringComparer.Ordinal)));
     }
 
-    private sealed class RecordingStoreOwner(NodeStoreSnapshot current) :
+    private sealed class RecordingStoreOwner(BridgeStoreSnapshot current) :
         IBridgeProductionStoreOwner
     {
-        public NodeStoreSnapshot Current { get; private set; } = current;
+        public BridgeStoreSnapshot Current { get; private set; } = current;
         public int Updates { get; private set; }
 
         public BridgeProductionStoreSnapshot Snapshot => new(
@@ -523,7 +523,7 @@ public sealed class ActiveFeishuPromptCoordinatorTests
         public ValueTask OpenAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 
-        public ValueTask<NodeStoreSnapshot> ReadAsync(
+        public ValueTask<BridgeStoreSnapshot> ReadAsync(
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(Current);
 
@@ -531,7 +531,7 @@ public sealed class ActiveFeishuPromptCoordinatorTests
             ValueTask.CompletedTask;
 
         public ValueTask UpdateAsync(
-            Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
+            Func<BridgeStoreSnapshot, BridgeStoreSnapshot> update,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();

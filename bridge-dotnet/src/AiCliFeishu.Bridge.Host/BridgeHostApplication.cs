@@ -15,9 +15,7 @@ public static class BridgeHostApplication
         Action<IServiceCollection>? configureServices = null)
     {
         options = options.Validate();
-        var activeAuthorization = options.OwnershipMode is BridgeOwnershipMode.Active
-            ? BridgeActiveStartupGate.Authorize(options)
-            : null;
+        BridgeLocalConfiguration.LoadIntoProcessEnvironment(options);
         var builder = WebApplication.CreateSlimBuilder(args ?? []);
         builder.WebHost.ConfigureKestrel(server =>
         {
@@ -28,7 +26,7 @@ public static class BridgeHostApplication
             });
         });
 
-        AddInfrastructure(builder.Services, options, activeAuthorization);
+        AddInfrastructure(builder.Services, options);
         AddOwnershipAssembly(builder.Services, options);
         configureServices?.Invoke(builder.Services);
         _ = BridgeProductionAssemblyPreflight.Validate(options, builder.Services);
@@ -40,16 +38,16 @@ public static class BridgeHostApplication
 
     private static void AddInfrastructure(
         IServiceCollection services,
-        BridgeHostOptions options,
-        BridgeActiveStartupAuthorization? activeAuthorization)
+        BridgeHostOptions options)
     {
         services.AddSingleton(options);
-        if (activeAuthorization is not null)
-        {
-            services.AddSingleton(activeAuthorization);
-        }
         services.AddSingleton<BridgeHealthRegistry>();
         services.AddSingleton<IBridgeInstanceLease, FileBridgeInstanceLease>();
+        services.AddSingleton<Func<IReadOnlyList<IBridgeHostSubsystem>>>(provider =>
+            () => provider.GetRequiredService<BridgeHostOptions>().OwnershipMode is
+                BridgeOwnershipMode.Active
+                ? ResolveActiveSubsystems(provider)
+                : provider.GetServices<IBridgeHostSubsystem>().ToArray());
         services.AddSingleton(services =>
             new ActiveOwnerLeaseObserver(
                 services.GetRequiredService<BridgeHostOptions>().DataDirectory));
@@ -107,10 +105,10 @@ public static class BridgeHostApplication
         services.AddSingleton<IOpenCodeTransport, PassiveOpenCodeTransport>();
         services.AddSingleton<IOpenCodeRuntimeLifecycle, PassiveOpenCodeRuntimeLifecycle>();
         AddRuntimeCommandAssembly(services);
-        services.AddSingleton<IBridgeStoreShadow, ReadOnlyNodeStoreShadow>();
+        services.AddSingleton<IBridgeStoreView, ReadOnlyBridgeStoreView>();
         services.AddSingleton<IBridgeControlStoreStatusSource>(services =>
             (IBridgeControlStoreStatusSource)services
-                .GetRequiredService<IBridgeStoreShadow>());
+                .GetRequiredService<IBridgeStoreView>());
         services.AddSingleton<IBridgeControlBusinessStateSource>(services =>
             (IBridgeControlBusinessStateSource)services
                 .GetRequiredService<BridgeBusinessStateOwner>());
@@ -119,7 +117,7 @@ public static class BridgeHostApplication
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             services.GetRequiredService<BridgeBoundarySubsystem>());
         services.AddSingleton<IBridgeHostSubsystem>(services =>
-            (IBridgeHostSubsystem)services.GetRequiredService<IBridgeStoreShadow>());
+            (IBridgeHostSubsystem)services.GetRequiredService<IBridgeStoreView>());
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             services.GetRequiredService<BridgeBusinessStateOwner>());
         services.AddSingleton<IBridgeHostSubsystem>(services =>
@@ -133,8 +131,14 @@ public static class BridgeHostApplication
     {
         services.AddSingleton<IBridgeActiveOwnerLeaseLifecycle,
             ActiveOwnerLeaseAcquirer>();
+        services.AddSingleton<ApprovalAuditLog>();
+        services.AddSingleton<IApprovalAuditLog>(services =>
+            services.GetRequiredService<ApprovalAuditLog>());
         services.AddSingleton<IBridgeProductionStoreOwner,
             ActiveProductionStoreOwner>();
+        services.AddSingleton<IBridgeProductionStoreProjectionReader>(services =>
+            (IBridgeProductionStoreProjectionReader)services
+                .GetRequiredService<IBridgeProductionStoreOwner>());
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             (IBridgeHostSubsystem)services.GetRequiredService<IBridgeProductionStoreOwner>());
         services.AddSingleton<IBridgePersistentBusinessStateOwner,
@@ -151,6 +155,7 @@ public static class BridgeHostApplication
         services.AddSingleton<IBridgeControlStoreStatusSource>(services =>
             (IBridgeControlStoreStatusSource)services
                 .GetRequiredService<IBridgeProductionStoreOwner>());
+        services.AddSingleton<BridgeDesktopSessionHeartbeatDirectory>();
         services.AddSingleton<BridgeControlStatusReader>();
         services.AddSingleton<IBridgeActiveRuntimeStateSink>(services =>
             (IBridgeActiveRuntimeStateSink)services
@@ -182,12 +187,27 @@ public static class BridgeHostApplication
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             services.GetRequiredService<ActiveSessionGroupCoordinator>());
         services.AddSingleton<ActiveFeishuFileTransferCoordinator>();
+        services.AddSingleton<BridgeRemotePromptLedger>();
+        services.AddSingleton<CodexTranscriptMonitor>();
         services.AddSingleton<IBridgeActiveFileTransferCoordinator>(services =>
             services.GetRequiredService<ActiveFeishuFileTransferCoordinator>());
         services.AddSingleton<ActiveFeishuPromptCoordinator>();
+        services.AddSingleton<Func<IBridgeRuntimeCommandGateway>>(services =>
+            () => services.GetRequiredService<IBridgeRuntimeCommandGateway>());
         services.AddSingleton<ActiveFeishuApprovalCoordinator>();
-        services.AddSingleton<ActiveFeishuApprovalNotificationCoordinator>();
+        services.AddSingleton<ActiveFeishuApprovalNotificationCoordinator>(services => new(
+            services.GetRequiredService<IBridgeActiveApprovalStateOwner>(),
+            services.GetRequiredService<IBridgeProductionStoreOwner>(),
+            services.GetRequiredService<IFeishuGateway>(),
+            services.GetRequiredService<IFeishuCardRenderer>(),
+            services.GetRequiredService<FeishuInteractionCoordinator>(),
+            services.GetRequiredService<IBridgeActiveSessionGroupCoordinator>(),
+            services.GetRequiredService<IBridgeActiveInputStateOwner>(),
+            () => services.GetRequiredService<IManagedHookResponseSink>(),
+            services.GetRequiredService<ActiveFeishuApprovalCoordinator>()));
         services.AddSingleton<IBridgeActiveApprovalNotifier>(services =>
+            services.GetRequiredService<ActiveFeishuApprovalNotificationCoordinator>());
+        services.AddSingleton<IBridgeActiveInputNotifier>(services =>
             services.GetRequiredService<ActiveFeishuApprovalNotificationCoordinator>());
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             services.GetRequiredService<ActiveFeishuApprovalNotificationCoordinator>());
@@ -195,7 +215,7 @@ public static class BridgeHostApplication
         services.AddSingleton<ActiveFeishuIntentHandler>();
         services.AddSingleton<IBridgeFeishuIntentHandler>(services =>
             services.GetRequiredService<ActiveFeishuIntentHandler>());
-        AddFeishuAdapterAssembly(services);
+        AddFeishuAdapterAssembly(services, active: true);
         services.AddSingleton<IManagedTerminalDirectory,
             ActiveManagedTerminalDirectory>();
         services.AddSingleton<IBridgeManagedTerminalRegistrationDirectory>(services =>
@@ -256,7 +276,11 @@ public static class BridgeHostApplication
             sessionGroups:
                 services.GetRequiredService<IBridgeActiveSessionGroupCoordinator>(),
             approvalNotifications:
-                services.GetRequiredService<IBridgeActiveApprovalNotifier>()));
+                services.GetRequiredService<IBridgeActiveApprovalNotifier>(),
+            inputNotifications:
+                services.GetRequiredService<IBridgeActiveInputNotifier>(),
+            remotePrompts: services.GetRequiredService<BridgeRemotePromptLedger>(),
+            transcriptMonitor: services.GetRequiredService<CodexTranscriptMonitor>()));
         services.AddSingleton<IBridgeActiveRuntimeRetryCoordinator>(services =>
             services.GetRequiredService<ActiveRuntimeRetryCoordinator>());
         services.AddSingleton<IBridgeRuntimeEventHandler>(services =>
@@ -267,16 +291,22 @@ public static class BridgeHostApplication
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             (IBridgeHostSubsystem)services
                 .GetRequiredService<IOpenCodeEndpointDirectory>());
+        services.AddSingleton<OpenCodeAutoDiscoverySubsystem>();
+        services.AddSingleton<IBridgeHostSubsystem>(services =>
+            services.GetRequiredService<OpenCodeAutoDiscoverySubsystem>());
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             services.GetRequiredService<ActiveRuntimeActivityCoordinator>());
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             services.GetRequiredService<ActiveRuntimeRetryCoordinator>());
         services.AddSingleton<IBridgeHostSubsystem>(services =>
+            services.GetRequiredService<CodexTranscriptMonitor>());
+        services.AddSingleton<IBridgeHostSubsystem>(services =>
             services.GetRequiredService<BridgeBoundarySubsystem>());
         services.AddSingleton<IBridgeHostSubsystem>(services =>
             services.GetRequiredService<BridgeFeishuEventSubsystem>());
+        services.AddSingleton<BridgeOpenCodeEventSubsystem>();
         services.AddSingleton<IBridgeHostSubsystem>(services =>
-            ActivatorUtilities.CreateInstance<BridgeOpenCodeEventSubsystem>(services));
+            services.GetRequiredService<BridgeOpenCodeEventSubsystem>());
         services.AddHostedService<BridgeInstanceLeaseService>();
         services.AddHostedService<ActiveOwnerLeaseHostedService>();
         services.AddHostedService<BridgeRuntimeWorker>();
@@ -328,8 +358,7 @@ public static class BridgeHostApplication
                 BridgeProductionCapability.OpenCodeRuntimeLifecycle,
                 typeof(ActiveOpenCodeRuntimeLifecycle)),
         ]));
-        // Production owners and the audited adapter roots are assembled here, but
-        // the Active cutover gate stays closed until full behavior parity is proven.
+        // The production owners and audited adapter roots are assembled here.
     }
 
     private static void AddRuntimeCommandAssembly(IServiceCollection services)
@@ -353,15 +382,58 @@ public static class BridgeHostApplication
             services.GetRequiredService<BridgeRuntimeCommandIngress>());
     }
 
-    private static void AddFeishuAdapterAssembly(IServiceCollection services)
+    private static IReadOnlyList<IBridgeHostSubsystem> ResolveActiveSubsystems(
+        IServiceProvider services)
+    {
+        var result = new List<IBridgeHostSubsystem>();
+        Add("production-store", () => (IBridgeHostSubsystem)
+            services.GetRequiredService<IBridgeProductionStoreOwner>());
+        Add("persistent-business-state", () => (IBridgeHostSubsystem)
+            services.GetRequiredService<IBridgePersistentBusinessStateOwner>());
+        Add("feishu-credentials", () => (IBridgeHostSubsystem)
+            services.GetRequiredService<IBridgeFeishuCredentialSource>());
+        Add("session-groups", () => services.GetRequiredService<ActiveSessionGroupCoordinator>());
+        Add("approval-notifications", () => services.GetRequiredService<ActiveFeishuApprovalNotificationCoordinator>());
+        Add("managed-terminal-directory", () => (IBridgeHostSubsystem)
+            services.GetRequiredService<IManagedTerminalDirectory>());
+        Add("opencode-endpoint-directory", () => (IBridgeHostSubsystem)
+            services.GetRequiredService<IOpenCodeEndpointDirectory>());
+        Add("opencode-auto-discovery", () => services.GetRequiredService<OpenCodeAutoDiscoverySubsystem>());
+        Add("runtime-activity", () => services.GetRequiredService<ActiveRuntimeActivityCoordinator>());
+        // Retry startup restores watches for already-running Codex sessions.
+        // The monitor therefore has to be running before the coordinator starts.
+        Add("codex-transcript-monitor", () => services.GetRequiredService<CodexTranscriptMonitor>());
+        Add("runtime-retry", () => services.GetRequiredService<ActiveRuntimeRetryCoordinator>());
+        Add("boundaries", () => services.GetRequiredService<BridgeBoundarySubsystem>());
+        Add("feishu-events", () => services.GetRequiredService<BridgeFeishuEventSubsystem>());
+        Add("opencode-events", () => services.GetRequiredService<BridgeOpenCodeEventSubsystem>());
+        return result;
+
+        void Add(string _, Func<IBridgeHostSubsystem> resolve)
+        {
+            result.Add(resolve());
+        }
+    }
+
+    private static void AddFeishuAdapterAssembly(
+        IServiceCollection services,
+        bool active = false)
     {
         services.AddSingleton<BridgeFeishuIntentIngress>();
         services.AddSingleton<IFeishuIntentSink>(services =>
             services.GetRequiredService<BridgeFeishuIntentIngress>());
         services.AddSingleton<IFeishuCardRenderer, FeishuCardRenderer>();
         services.AddSingleton<IFeishuCardPatchLedger, InMemoryFeishuCardPatchLedger>();
-        services.AddSingleton<IFeishuInboundDeduplicator,
-            InMemoryFeishuInboundDeduplicator>();
+        if (active)
+        {
+            services.AddSingleton<IFeishuInboundDeduplicator,
+                PersistentFeishuInboundDeduplicator>();
+        }
+        else
+        {
+            services.AddSingleton<IFeishuInboundDeduplicator,
+                InMemoryFeishuInboundDeduplicator>();
+        }
         services.AddSingleton<FeishuEventNormalizer>();
         services.AddSingleton<FeishuInteractionCoordinator>();
         services.AddSingleton<FeishuEventPump>();

@@ -66,6 +66,7 @@ internal sealed class ActiveManagedHookIngress(
     {
         var registration = new BridgeManagedTerminalRegistration(
             RequiredString(payload, "terminalId", 64),
+            RequiredString(payload, "terminalSecret", 64),
             RequiredString(payload, "cwd", 32_768),
             RequiredRuntime(payload),
             RequiredBoolean(payload, "elevated"),

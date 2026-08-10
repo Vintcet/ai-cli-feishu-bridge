@@ -176,7 +176,8 @@ public sealed record FeishuRuntimeRetryView(
 public sealed record FeishuCallbackResult(
     string ToastType,
     string ToastContent,
-    FeishuCardView? Card = null);
+    FeishuCardView? Card = null,
+    Func<CancellationToken, Task>? AfterAcknowledged = null);
 
 public sealed record FeishuSessionGroup(
     string ChatId,

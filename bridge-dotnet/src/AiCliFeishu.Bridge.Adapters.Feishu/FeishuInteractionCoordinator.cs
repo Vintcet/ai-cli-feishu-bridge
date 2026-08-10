@@ -54,6 +54,30 @@ public sealed class FeishuInteractionCoordinator(
         await PatchAllAsync(approval.MessageIds, revision, card, cancellationToken);
     }
 
+    public Task SynchronizeApprovalMessageAsync(
+        ApprovalState approval,
+        FeishuSessionView session,
+        FeishuApprovalView view,
+        string messageId,
+        CancellationToken cancellationToken = default)
+    {
+        if (approval.Status is not ApprovalStatuses.Resolved and
+                not ApprovalStatuses.Orphaned ||
+            approval.Resolution is null ||
+            string.IsNullOrWhiteSpace(messageId))
+        {
+            return Task.CompletedTask;
+        }
+        var card = renderer.ResolvedApproval(
+            session,
+            view,
+            approval.Resolution,
+            approval.Status);
+        var revision =
+            $"approval:{approval.RequestId}:{approval.Status}:{approval.Resolution}:{approval.ResolvedAt:O}";
+        return PatchAllAsync([messageId], revision, card, cancellationToken);
+    }
+
     public Task SynchronizeDeferredApprovalAsync(
         ApprovalState approval,
         FeishuSessionView session,

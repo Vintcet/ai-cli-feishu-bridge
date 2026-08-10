@@ -66,7 +66,7 @@ public sealed class ActiveOpenCodeTransportTests
     }
 
     [TestMethod]
-    public async Task ApprovalUsesNodeCompatibleFallbackOrderAndDecisionMapping()
+    public async Task ApprovalUsesCompatibleFallbackOrderAndDecisionMapping()
     {
         var (directory, _) = await ReadyDirectoryAsync(5_302);
         var handler = new QueueHandler();

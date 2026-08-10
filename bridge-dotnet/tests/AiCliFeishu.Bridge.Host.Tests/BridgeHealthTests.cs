@@ -37,4 +37,33 @@ public sealed class BridgeHealthTests
 
         Assert.IsTrue(health.Snapshot().Ok);
     }
+
+    [TestMethod]
+    public void TrackedComponentHealthIsReadLive()
+    {
+        var health = new BridgeHealthRegistry(BridgeHostOptions.Passive(Path.GetTempPath()));
+        var component = new MutableComponentHealth("dynamic", "ready", "count=0");
+        health.Track(component);
+        health.SetLifecycle(BridgeHostLifecycleState.Ready);
+
+        Assert.AreEqual("count=0", health.Snapshot().Components.Single().Detail);
+
+        component.Detail = "count=1";
+        Assert.AreEqual("count=1", health.Snapshot().Components.Single().Detail);
+
+        component.Status = "failed";
+        Assert.IsFalse(health.Snapshot().Ok);
+    }
+
+    private sealed class MutableComponentHealth(
+        string name,
+        string status,
+        string? detail) : IBridgeHostSubsystemHealth
+    {
+        public string Status { get; set; } = status;
+
+        public string? Detail { get; set; } = detail;
+
+        public BridgeComponentHealth ComponentHealth => new(name, Status, Detail);
+    }
 }

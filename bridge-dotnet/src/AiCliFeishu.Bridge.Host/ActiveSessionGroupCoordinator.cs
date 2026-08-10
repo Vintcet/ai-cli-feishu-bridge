@@ -66,8 +66,8 @@ internal sealed class ActiveSessionGroupCoordinator :
         this.stateOwner = stateOwner ?? throw new ArgumentNullException(nameof(stateOwner));
         this.gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
         clock = timeProvider ?? TimeProvider.System;
-        this.inactiveAge = inactiveAge ?? DefaultInactiveAge;
-        this.cleanupInterval = cleanupInterval ?? DefaultCleanupInterval;
+        this.inactiveAge = inactiveAge ?? ConfiguredDuration(options, "FEISHU_SESSION_GROUP_INACTIVE_MS", DefaultInactiveAge);
+        this.cleanupInterval = cleanupInterval ?? ConfiguredDuration(options, "FEISHU_SESSION_GROUP_CLEANUP_INTERVAL_MS", DefaultCleanupInterval);
         if (this.inactiveAge <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(
@@ -794,6 +794,14 @@ internal sealed class ActiveSessionGroupCoordinator :
         }
     }
 
+    private static TimeSpan ConfiguredDuration(BridgeHostOptions options, string name, TimeSpan fallback)
+    {
+        var raw = BridgeLocalConfiguration.Read(options, name);
+        return long.TryParse(raw, out var milliseconds) && milliseconds > 0
+            ? TimeSpan.FromMilliseconds(milliseconds)
+            : fallback;
+    }
+
     private void EnsureStarted()
     {
         lock (sync)
@@ -862,7 +870,7 @@ internal sealed class ActiveSessionGroupCoordinator :
     }
 
     private bool IsCurrentCleanupCandidate(
-        NodeStoreSnapshot store,
+        BridgeStoreSnapshot store,
         SessionGroupCleanupCandidate candidate,
         DateTimeOffset now) =>
         store.Sessions.Sessions.TryGetValue(candidate.SessionId, out var session) &&

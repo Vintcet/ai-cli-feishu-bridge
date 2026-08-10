@@ -5,7 +5,7 @@
   "type": "object",
   "properties": {
     "schemaVersion": { "const": 1 },
-    "hostKind": { "type": "string", "enum": ["node", "dotnet"] },
+    "hostKind": { "const": "dotnet" },
     "ownershipMode": { "const": "active" },
     "processId": {
       "type": "integer",

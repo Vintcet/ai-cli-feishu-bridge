@@ -1,9 +1,0 @@
-{
-  "schemaVersion": 1,
-  "hostKind": "node",
-  "ownershipMode": "active",
-  "processId": 3210,
-  "instanceName": "production",
-  "leaseId": "node-production-example",
-  "acquiredAt": "2026-08-06T10:00:00.000Z"
-}

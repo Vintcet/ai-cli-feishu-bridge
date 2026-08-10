@@ -283,7 +283,7 @@ public sealed class ActiveSessionGroupCoordinatorTests
                         JsonSerializer.SerializeToElement(Origin.ToString("O")),
                 })));
         store.BeforeUpdate = current =>
-            NodeStoreBusinessStateMerger.PatchSessionExtensions(
+            BridgeStoreBusinessStateMerger.PatchSessionExtensions(
                 current,
                 "session-retry-race",
                 new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
@@ -640,7 +640,7 @@ public sealed class ActiveSessionGroupCoordinatorTests
             Session("session-race", Origin)));
         var gateway = new RecordingGateway();
         gateway.OnCreated = group => store.Replace(
-            NodeStoreBusinessStateMerger.PatchSessionExtensions(
+            BridgeStoreBusinessStateMerger.PatchSessionExtensions(
                 store.Current,
                 "session-race",
                 new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
@@ -671,7 +671,7 @@ public sealed class ActiveSessionGroupCoordinatorTests
             Session("session-alias-race", Origin)));
         var gateway = new RecordingGateway();
         gateway.OnCreated = _ => store.Replace(
-            NodeStoreBusinessStateMerger.PatchSessionExtensions(
+            BridgeStoreBusinessStateMerger.PatchSessionExtensions(
                 store.Current,
                 "session-alias-race",
                 new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
@@ -763,7 +763,7 @@ public sealed class ActiveSessionGroupCoordinatorTests
                 TimeSpan.FromDays(7)));
     }
 
-    private static NodeStoreSnapshot Snapshot(
+    private static BridgeStoreSnapshot Snapshot(
         string? ownerOpenId,
         params SessionStoreRecord[] sessions) => new(
         new BindingStoreDocument
@@ -822,13 +822,13 @@ public sealed class ActiveSessionGroupCoordinatorTests
         };
     }
 
-    private static int Ordinal(NodeStoreSnapshot store, string sessionId) =>
+    private static int Ordinal(BridgeStoreSnapshot store, string sessionId) =>
         store.Sessions.Sessions[sessionId]
             .ExtensionData!["feishuChatOrdinal"]
             .GetInt32();
 
     private static string? ExtensionString(
-        NodeStoreSnapshot store,
+        BridgeStoreSnapshot store,
         string sessionId,
         string name) =>
         ExtensionString(store.Sessions.Sessions[sessionId], name);
@@ -842,13 +842,13 @@ public sealed class ActiveSessionGroupCoordinatorTests
             ? value.GetString()
             : null;
 
-    private sealed class RecordingStoreOwner(NodeStoreSnapshot store)
+    private sealed class RecordingStoreOwner(BridgeStoreSnapshot store)
         : IBridgeProductionStoreOwner
     {
         private readonly object sync = new();
-        private NodeStoreSnapshot current = store;
+        private BridgeStoreSnapshot current = store;
 
-        public NodeStoreSnapshot Current
+        public BridgeStoreSnapshot Current
         {
             get
             {
@@ -864,10 +864,10 @@ public sealed class ActiveSessionGroupCoordinatorTests
             null,
             0);
 
-        public Func<NodeStoreSnapshot, NodeStoreSnapshot>? BeforeUpdate { get; set; }
+        public Func<BridgeStoreSnapshot, BridgeStoreSnapshot>? BeforeUpdate { get; set; }
         public Exception? UpdateError { get; set; }
 
-        public void Replace(NodeStoreSnapshot value)
+        public void Replace(BridgeStoreSnapshot value)
         {
             lock (sync)
             {
@@ -878,7 +878,7 @@ public sealed class ActiveSessionGroupCoordinatorTests
         public ValueTask OpenAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 
-        public ValueTask<NodeStoreSnapshot> ReadAsync(
+        public ValueTask<BridgeStoreSnapshot> ReadAsync(
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -889,7 +889,7 @@ public sealed class ActiveSessionGroupCoordinatorTests
             ValueTask.CompletedTask;
 
         public ValueTask UpdateAsync(
-            Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
+            Func<BridgeStoreSnapshot, BridgeStoreSnapshot> update,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();

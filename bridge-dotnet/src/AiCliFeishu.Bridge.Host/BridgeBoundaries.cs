@@ -103,7 +103,7 @@ public sealed class BridgeRuntimeCommandIngress : IBridgeRuntimeCommandGateway, 
         if (options.OwnershipMode is not BridgeOwnershipMode.Active)
         {
             throw new BridgeRuntimeCommandUnavailableException(
-                "C# Bridge Host 当前是 Shadow，不允许执行 Runtime 命令。");
+                "C# Bridge Host 当前是只读模式，不允许执行 Runtime 命令。");
         }
 
         await dispatchGate.WaitAsync(cancellationToken);

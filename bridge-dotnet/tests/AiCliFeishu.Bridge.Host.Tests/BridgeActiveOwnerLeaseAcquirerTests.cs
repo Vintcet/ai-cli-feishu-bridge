@@ -39,7 +39,7 @@ public sealed class BridgeActiveOwnerLeaseAcquirerTests
         Assert.AreEqual("dotnet", record.HostKind);
         Assert.AreEqual("active", record.OwnershipMode);
         Assert.AreEqual(61001, record.ProcessId);
-        Assert.AreEqual("cutover-test", record.InstanceName);
+        Assert.AreEqual("production-dotnet", record.InstanceName);
         Assert.AreEqual("dotnet-lease-1", record.LeaseId);
         CollectionAssert.AreEquivalent(
             new[]
@@ -54,6 +54,12 @@ public sealed class BridgeActiveOwnerLeaseAcquirerTests
             },
             json.RootElement.EnumerateObject().Select(property => property.Name).ToArray());
         Assert.AreEqual("dotnet", json.RootElement.GetProperty("hostKind").GetString());
+        Assert.IsTrue(File.Exists(Path.Combine(
+            lease.LockDirectoryPath,
+            ActiveOwnerLeaseObserver.OwnershipHandleFileName)));
+        Assert.AreEqual(
+            ActiveOwnerLeaseState.Live,
+            (await Observer(_ => false).InspectAsync()).State);
         Assert.IsFalse(Directory.EnumerateFileSystemEntries(directory!, "*pending*").Any());
 
         await lease.ReleaseAsync();
@@ -78,7 +84,7 @@ public sealed class BridgeActiveOwnerLeaseAcquirerTests
 
         Assert.AreEqual(ActiveOwnerLeaseState.Live, snapshot.State);
         Assert.AreEqual("dotnet", snapshot.Record?.HostKind);
-        Assert.AreEqual("cutover-test", snapshot.Record?.InstanceName);
+        Assert.AreEqual("production-dotnet", snapshot.Record?.InstanceName);
         Assert.AreEqual("dotnet-lease-1", snapshot.Record?.LeaseId);
     }
 
@@ -104,13 +110,10 @@ public sealed class BridgeActiveOwnerLeaseAcquirerTests
     }
 
     [TestMethod]
-    public async Task ReclaimsADeadNodeLeaseIntoADeterministicTombstone()
+    public async Task ReclaimsADeadDotNetLeaseIntoADeterministicTombstone()
     {
         var observer = Observer(processId => processId == 61022);
-        var stale = Record(
-            hostKind: "node",
-            processId: 61021,
-            leaseId: "dead-node");
+        var stale = Record(processId: 61021, leaseId: "dead-dotnet");
         await WriteRecordAsync(observer, stale);
         await using var replacement = Acquirer(
             processId: 61022,
@@ -120,7 +123,7 @@ public sealed class BridgeActiveOwnerLeaseAcquirerTests
         var acquired = await replacement.AcquireAsync();
         var tombstone = Path.Combine(
             directory!,
-            "bridge-active-owner.stale-dead-node",
+            "bridge-active-owner.stale-dead-dotnet",
             ActiveOwnerLeaseObserver.MetadataFileName);
 
         Assert.AreEqual("dotnet-replacement", acquired.LeaseId);
@@ -137,7 +140,7 @@ public sealed class BridgeActiveOwnerLeaseAcquirerTests
         var observer = Observer(processId => processId is 61032 or 61033);
         await WriteRecordAsync(
             observer,
-            Record(hostKind: "node", processId: 61031, leaseId: "dead-race"));
+            Record(processId: 61031, leaseId: "dead-race"));
         var left = Acquirer(
             processId: 61032,
             liveProcesses: [61032, 61033],
@@ -195,9 +198,8 @@ public sealed class BridgeActiveOwnerLeaseAcquirerTests
             leaseId: "original-dotnet");
         await lease.AcquireAsync();
         var replacement = Record(
-            hostKind: "node",
             processId: 61052,
-            leaseId: "replacement-node");
+            leaseId: "replacement-dotnet");
         await WriteRecordAsync(Observer(_ => true), replacement);
 
         var error = await Assert.ThrowsExceptionAsync<InvalidOperationException>(async () =>
@@ -206,7 +208,7 @@ public sealed class BridgeActiveOwnerLeaseAcquirerTests
         StringAssert.Contains(error.Message, "身份已变化");
         Assert.IsTrue(File.Exists(lease.MetadataPath));
         var snapshot = await Observer(_ => true).InspectAsync();
-        Assert.AreEqual("replacement-node", snapshot.Record?.LeaseId);
+        Assert.AreEqual("replacement-dotnet", snapshot.Record?.LeaseId);
     }
 
     [TestMethod]
@@ -258,9 +260,11 @@ public sealed class BridgeActiveOwnerLeaseAcquirerTests
             "active-lifecycle");
         var observer = Observer(processId => processId == Environment.ProcessId);
         var existing = Record(
-            hostKind: "node",
             processId: Environment.ProcessId,
-            leaseId: "live-node-owner");
+            leaseId: "live-dotnet-owner") with
+        {
+            AcquiredAt = DateTimeOffset.UtcNow,
+        };
         await WriteRecordAsync(observer, existing);
         await using var lease = new ActiveOwnerLeaseAcquirer(options);
         var health = new BridgeHealthRegistry(options);
@@ -306,7 +310,7 @@ public sealed class BridgeActiveOwnerLeaseAcquirerTests
         int[] liveProcesses,
         string leaseId) => new(
             directory!,
-            "cutover-test",
+            "production-dotnet",
             processId,
             new FixedTimeProvider(DateTimeOffset.Parse("2026-08-06T10:00:00.000Z")),
             candidate => liveProcesses.Contains(candidate),
@@ -316,11 +320,10 @@ public sealed class BridgeActiveOwnerLeaseAcquirerTests
         new(directory!, processAlive);
 
     private static ActiveOwnerLeaseRecord Record(
-        string hostKind,
         int processId,
         string leaseId) => new(
             ActiveOwnerLeaseObserver.SchemaVersion,
-            hostKind,
+            "dotnet",
             "active",
             processId,
             "production",

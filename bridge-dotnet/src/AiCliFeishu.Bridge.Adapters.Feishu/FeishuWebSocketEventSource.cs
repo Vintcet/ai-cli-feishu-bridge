@@ -457,6 +457,26 @@ public sealed class FeishuEventPump(
                 continue;
             }
             await TryAcknowledgeAsync(envelope, result, cancellationToken);
+            await TryRunAfterAcknowledgedAsync(result, cancellationToken);
+        }
+    }
+
+    private static async Task TryRunAfterAcknowledgedAsync(
+        FeishuCallbackResult? result,
+        CancellationToken cancellationToken)
+    {
+        if (result?.AfterAcknowledged is null)
+        {
+            return;
+        }
+        try
+        {
+            await result.AfterAcknowledged(cancellationToken);
+        }
+        catch when (!cancellationToken.IsCancellationRequested)
+        {
+            // The callback acknowledgement is already complete. A failed follow-up
+            // synchronization must not stop the event pump.
         }
     }
 

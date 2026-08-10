@@ -14,7 +14,7 @@ namespace AiCliFeishu.Bridge.Host.Tests;
 public sealed class SessionGroupControlApiTests
 {
     [TestMethod]
-    public async Task ActiveRetryRouteValidatesAndReturnsNodeCompatibleShape()
+    public async Task ActiveRetryRouteValidatesAndReturnsCompatibleShape()
     {
         var business = new RecordingBusinessState(initialized: true);
         var coordinator = new RecordingSessionGroupCoordinator

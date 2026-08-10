@@ -85,6 +85,8 @@ public interface IFeishuCardRenderer
 
     FeishuCardView RuntimeLaunchCancelled(string runtime);
 
+    FeishuCardView UserPrompt(FeishuSessionView session, string prompt);
+
     FeishuCardView PendingApproval(
         FeishuSessionView session,
         FeishuApprovalView approval);

@@ -16,31 +16,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
-
-      - name: Install Node.js dependencies
-        run: npm ci
-
-      - name: Lint TypeScript
-        run: npm run lint
-
-      - name: Check formatting
-        run: npm run format:check
-
-      - name: Run Node.js tests
-        run: npm test
-
-      - name: Build Node.js service
-        run: npm run build
 
       - name: Run desktop tests
         run: dotnet test .\desktop-control\tests\AiCliFeishuTerminalHost.Tests.csproj -c Release
@@ -57,6 +36,6 @@ jobs:
               }
             }
 
-      - name: Verify desktop and passive .NET Host release
+      - name: Build and audit the pure .NET release
         shell: pwsh
-        run: .\scripts\verify-dotnet-shadow-release.ps1
+        run: .\scripts\build-release.ps1

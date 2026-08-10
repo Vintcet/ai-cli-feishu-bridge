@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using AiCliFeishu.Bridge.Adapters.ManagedTerminal;
 using AiCliFeishu.Bridge.Adapters.Storage;
 using AiCliFeishu.Bridge.Protocol;
@@ -7,6 +9,7 @@ namespace AiCliFeishu.Bridge.Host;
 
 internal sealed record BridgeManagedTerminalRegistration(
     string TerminalId,
+    string TerminalSecret,
     string Cwd,
     string Runtime,
     bool Elevated,
@@ -34,6 +37,13 @@ internal sealed record BridgeManagedTerminalDirectorySnapshot(
     int Ready,
     int Claimed);
 
+internal sealed record BridgeManagedTerminalRegistrationStatus(
+    string TerminalId,
+    bool Online,
+    bool Ready,
+    string? SessionExternalId,
+    DateTimeOffset LastSeenAt);
+
 internal interface IBridgeManagedTerminalRegistrationDirectory
 {
     BridgeManagedTerminalDirectorySnapshot Snapshot { get; }
@@ -58,9 +68,13 @@ internal interface IBridgeManagedTerminalRegistrationDirectory
 
     BridgeManagedTerminalIdentity? FindClaimByTerminal(string terminalId);
 
+    BridgeManagedTerminalRegistrationStatus? GetStatus(string terminalId);
+
     void Release(string sessionExternalId);
 
     bool IsCurrent(ManagedTerminalTarget target);
+
+    bool IsAuthenticated(string terminalId, string terminalSecret);
 }
 
 internal sealed class ActiveManagedTerminalDirectory(
@@ -227,10 +241,32 @@ internal sealed class ActiveManagedTerminalDirectory(
         }
     }
 
+    public BridgeManagedTerminalRegistrationStatus? GetStatus(string terminalId)
+    {
+        terminalId = RequireTerminalId(terminalId);
+        lock (sync)
+        {
+            EnsureInitializedLocked();
+            var now = clock.GetUtcNow();
+            Prune(now);
+            if (!registrations.TryGetValue(terminalId, out var registration))
+            {
+                return null;
+            }
+            return new(
+                registration.TerminalId,
+                IsOnline(registration, now),
+                registration.Ready,
+                registration.SessionExternalId,
+                registration.LastSeenAt);
+        }
+    }
+
     public void Register(BridgeManagedTerminalRegistration registration)
     {
         ArgumentNullException.ThrowIfNull(registration);
         var terminalId = RequireTerminalId(registration.TerminalId);
+        var terminalSecret = RequireTerminalSecret(registration.TerminalSecret);
         var cwd = NormalizeCwd(registration.Cwd);
         var runtime = RequireRuntime(registration.Runtime);
         lock (sync)
@@ -242,7 +278,8 @@ internal sealed class ActiveManagedTerminalDirectory(
             {
                 if (!string.Equals(current.NormalizedCwd, cwd, CwdComparison) ||
                     !string.Equals(current.Runtime, runtime, StringComparison.Ordinal) ||
-                    current.Elevated != registration.Elevated)
+                    current.Elevated != registration.Elevated ||
+                    !SecretEquals(current.TerminalSecret, terminalSecret))
                 {
                     throw new InvalidOperationException(
                         "托管终端心跳与已登记身份不一致。");
@@ -269,6 +306,7 @@ internal sealed class ActiveManagedTerminalDirectory(
                 terminalId,
                 new Registration(
                     terminalId,
+                    terminalSecret,
                     cwd,
                     runtime,
                     registration.Elevated,
@@ -395,12 +433,30 @@ internal sealed class ActiveManagedTerminalDirectory(
             Prune(now);
             return registrations.TryGetValue(target.TerminalId, out var registration) &&
                 registration.Generation == target.Generation &&
+                SecretEquals(registration.TerminalSecret, target.TerminalSecret) &&
                 registration.Ready &&
                 IsOnline(registration, now) &&
                 string.Equals(
                     registration.SessionExternalId,
                     target.SessionExternalId,
                     StringComparison.Ordinal);
+        }
+    }
+
+    public bool IsAuthenticated(string terminalId, string terminalSecret)
+    {
+        if (!ValidTerminalId(terminalId) || !ValidTerminalSecret(terminalSecret))
+        {
+            return false;
+        }
+        lock (sync)
+        {
+            EnsureInitializedLocked();
+            var now = clock.GetUtcNow();
+            Prune(now);
+            return registrations.TryGetValue(terminalId, out var registration) &&
+                IsOnline(registration, now) &&
+                SecretEquals(registration.TerminalSecret, terminalSecret);
         }
     }
 
@@ -530,7 +586,8 @@ internal sealed class ActiveManagedTerminalDirectory(
         registration.TerminalId,
         registration.SessionExternalId!,
         registration.Ready,
-        registration.Generation);
+        registration.Generation,
+        registration.TerminalSecret);
 
     private static BridgeManagedTerminalIdentity Identity(
         Registration registration,
@@ -595,6 +652,24 @@ internal sealed class ActiveManagedTerminalDirectory(
         terminalId.Length is >= 8 and <= 64 &&
         terminalId.All(character =>
             char.IsAsciiLetterOrDigit(character) || character is '_' or '-');
+
+    private static string RequireTerminalSecret(string terminalSecret) =>
+        ValidTerminalSecret(terminalSecret)
+            ? terminalSecret
+            : throw new ArgumentException(
+                "托管终端密钥无效。",
+                nameof(terminalSecret));
+
+    private static bool ValidTerminalSecret(string terminalSecret) =>
+        terminalSecret?.Length == 64 && terminalSecret.All(Uri.IsHexDigit);
+
+    private static bool SecretEquals(string left, string right)
+    {
+        var leftBytes = Encoding.ASCII.GetBytes(left);
+        var rightBytes = Encoding.ASCII.GetBytes(right);
+        return leftBytes.Length == rightBytes.Length &&
+            CryptographicOperations.FixedTimeEquals(leftBytes, rightBytes);
+    }
 
     private static string RequireSessionId(string sessionExternalId) =>
         ValidSessionId(sessionExternalId)
@@ -696,6 +771,7 @@ internal sealed class ActiveManagedTerminalDirectory(
 
     private sealed class Registration(
         string terminalId,
+        string terminalSecret,
         string normalizedCwd,
         string runtime,
         bool elevated,
@@ -706,6 +782,7 @@ internal sealed class ActiveManagedTerminalDirectory(
         long generation)
     {
         public string TerminalId { get; } = terminalId;
+        public string TerminalSecret { get; } = terminalSecret;
         public string NormalizedCwd { get; } = normalizedCwd;
         public string Runtime { get; } = runtime;
         public bool Elevated { get; } = elevated;

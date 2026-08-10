@@ -11,7 +11,7 @@ namespace AiCliFeishu.Bridge.Host.Tests;
 public sealed class BridgeActiveHostProcessIntegrationTests
 {
     [TestMethod]
-    public async Task PublishedActiveHostStartsAndStopsOnlyWithIsolatedDurableEvidence()
+    public async Task PublishedActiveHostStartsAndStopsWithAnIsolatedSingleOwnerLease()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -34,6 +34,28 @@ public sealed class BridgeActiveHostProcessIntegrationTests
         await File.WriteAllTextAsync(
             Path.Combine(dataDirectory, "control-token.json"),
             JsonSerializer.Serialize(new { token = controlToken }));
+        var transcriptPath = Path.Combine(root, "existing-rollout.jsonl");
+        await File.WriteAllTextAsync(transcriptPath, "");
+        await File.WriteAllTextAsync(
+            Path.Combine(dataDirectory, "sessions.json"),
+            JsonSerializer.Serialize(new
+            {
+                sessions = new Dictionary<string, object>
+                {
+                    ["existing-codex-session"] = new
+                    {
+                        sessionId = "existing-codex-session",
+                        shortId = "existing",
+                        cwd = root,
+                        projectName = "existing-project",
+                        status = "running",
+                        runtime = "codex",
+                        openedAt = "2026-08-11T00:00:00.000Z",
+                        lastSeenAt = "2026-08-11T00:00:00.000Z",
+                        transcriptPath,
+                    },
+                },
+            }));
 
         using var proxyCancellation = new CancellationTokenSource();
         var blockedProxyListener = new TcpListener(IPAddress.Loopback, 0);
@@ -44,7 +66,6 @@ public sealed class BridgeActiveHostProcessIntegrationTests
             blockedProxyListener,
             proxyCancellation.Token);
         var port = ReservePort(excluding: blockedProxyPort);
-        const string operationId = "isolated-active-startup";
         const string instanceName = "isolated-active";
         Process? process = null;
         Task<string>? outputTask = null;
@@ -66,7 +87,6 @@ public sealed class BridgeActiveHostProcessIntegrationTests
             AddArgument(startInfo, "--port", port.ToString(CultureInfo.InvariantCulture));
             AddArgument(startInfo, "--ownership", "active");
             AddArgument(startInfo, "--instance", instanceName);
-            AddArgument(startInfo, "--cutover-operation", operationId);
             startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
             startInfo.Environment["FEISHU_APP_ID"] = "isolated-app-id";
             startInfo.Environment["FEISHU_APP_SECRET"] = "isolated-app-secret";
@@ -90,11 +110,6 @@ public sealed class BridgeActiveHostProcessIntegrationTests
                 throw new InvalidOperationException("真实 C# Active Host 未能启动。");
             outputTask = process.StandardOutput.ReadToEndAsync();
             errorTask = process.StandardError.ReadToEndAsync();
-            await WriteBoundCheckpointAsync(
-                dataDirectory,
-                operationId,
-                instanceName,
-                process.Id);
 
             using var handler = new HttpClientHandler
             {
@@ -123,13 +138,23 @@ public sealed class BridgeActiveHostProcessIntegrationTests
                 .EnumerateArray()
                 .ToDictionary(
                     item => item.GetProperty("name").GetString()!,
-                    item => item.GetProperty("status").GetString()!,
+                    item => item.Clone(),
                     StringComparer.Ordinal);
-            Assert.AreEqual("ready", components["production-owner"]);
-            Assert.AreEqual("ready", components["production-store"]);
-            Assert.AreEqual("ready", components["persistent-business-state-owner"]);
-            Assert.AreEqual("ready", components["feishu-credentials"]);
-            Assert.AreEqual("ready", components["feishu-event-pump"]);
+            Assert.AreEqual(
+                "ready",
+                components["production-owner"].GetProperty("status").GetString());
+            Assert.AreEqual(
+                "ready",
+                components["production-store"].GetProperty("status").GetString());
+            Assert.AreEqual(
+                "ready",
+                components["persistent-business-state-owner"].GetProperty("status").GetString());
+            Assert.AreEqual(
+                "ready",
+                components["feishu-credentials"].GetProperty("status").GetString());
+            Assert.AreEqual(
+                "ready",
+                components["feishu-event-pump"].GetProperty("status").GetString());
 
             using var statusRequest = new HttpRequestMessage(
                 HttpMethod.Get,
@@ -147,6 +172,14 @@ public sealed class BridgeActiveHostProcessIntegrationTests
             Assert.IsTrue(
                 status.RootElement.GetProperty("businessState")
                     .GetProperty("initialized").GetBoolean());
+            Assert.AreEqual(
+                1,
+                status.RootElement.GetProperty("businessState")
+                    .GetProperty("sessions").GetInt32());
+            Assert.AreEqual(
+                "watches=1",
+                components["codex-transcript-monitor"].GetProperty("detail").GetString(),
+                components["active-runtime-retry"].GetProperty("detail").GetString());
             Assert.IsTrue(
                 status.RootElement.GetProperty("boundaries")
                     .GetProperty("runtimeCommandsEnabled").GetBoolean());
@@ -232,7 +265,13 @@ public sealed class BridgeActiveHostProcessIntegrationTests
                     var document = JsonDocument.Parse(
                         await response.Content.ReadAsStringAsync());
                     if (document.RootElement.TryGetProperty("ok", out var ok) &&
-                        ok.ValueKind is JsonValueKind.True)
+                        ok.ValueKind is JsonValueKind.True &&
+                        document.RootElement.TryGetProperty("hostKind", out var hostKind) &&
+                        hostKind.ValueKind is JsonValueKind.String &&
+                        string.Equals(
+                            hostKind.GetString(),
+                            BridgeHostManagementContract.HostKind,
+                            StringComparison.Ordinal))
                     {
                         return document;
                     }
@@ -255,41 +294,6 @@ public sealed class BridgeActiveHostProcessIntegrationTests
             "真实 C# Active Host 未在截止时间前就绪。\n" +
             await FailureOutputAsync(outputTask, errorTask));
         throw new InvalidOperationException("unreachable");
-    }
-
-    private static async Task WriteBoundCheckpointAsync(
-        string dataDirectory,
-        string operationId,
-        string instanceName,
-        int processId)
-    {
-        var checkpoint = new
-        {
-            schemaVersion = 1,
-            operationId,
-            updatedAt = DateTimeOffset.UtcNow,
-            stage = "DotNetStartRequested",
-            requiresRollback = false,
-            failureReason = "None",
-            expectedNode = new
-            {
-                processId = 81001,
-                hostKind = "node",
-                managementApiVersion = 1,
-                ownershipMode = "active",
-                activeOwner = true,
-                instanceName = "production",
-            },
-            expectedDotNetInstanceName = instanceName,
-            dotNetProcessId = processId,
-            nodeRollbackProcessId = 0,
-        };
-        var target = Path.Combine(
-            dataDirectory,
-            BridgeActiveStartupGate.CheckpointFileName);
-        var temporary = $"{target}.test-{Guid.NewGuid():N}.tmp";
-        await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(checkpoint) + "\n");
-        File.Move(temporary, target);
     }
 
     private static int ReservePort(int? excluding = null)

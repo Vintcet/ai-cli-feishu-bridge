@@ -24,6 +24,12 @@ public static class ApprovalRetention
         var claims = state.Claims
             .Where(requests.ContainsKey)
             .ToHashSet(StringComparer.Ordinal);
+        if (requests.Count == state.Requests.Count &&
+            requests.Keys.All(state.Requests.ContainsKey) &&
+            claims.SetEquals(state.Claims))
+        {
+            return state;
+        }
         return state with { Requests = requests, Claims = claims };
     }
 }

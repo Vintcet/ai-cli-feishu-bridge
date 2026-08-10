@@ -25,7 +25,7 @@ public sealed class BridgeOpenCodeEventSubsystemTests
             {
                 "production-owner",
                 "standard-boundaries",
-                "node-store-shadow",
+                "bridge-store-readonly",
                 "business-state-owner",
                 "feishu-event-pump",
                 "opencode-event-pump",

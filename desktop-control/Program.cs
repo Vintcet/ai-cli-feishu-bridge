@@ -14,12 +14,6 @@ internal static class Program
         {
             return ManagedTerminalHost.Run(args);
         }
-        if (args.Contains(
-                "--bridge-cutover-to-dotnet",
-                StringComparer.OrdinalIgnoreCase))
-        {
-            return RunBridgeProductionCutover(args);
-        }
         if (args.Contains("--bridge-start", StringComparer.OrdinalIgnoreCase))
         {
             return RunBridgeCommand(start: true);
@@ -56,87 +50,6 @@ internal static class Program
         return 0;
     }
 
-    private static int RunBridgeProductionCutover(string[] args)
-    {
-        var confirmed = args.Contains(
-            "--confirm-production-cutover",
-            StringComparer.OrdinalIgnoreCase);
-        try
-        {
-            using var bridgeClient = new BridgeClient();
-            AppLog.Initialize(Path.Combine(bridgeClient.BridgeRoot, "data"));
-            if (!confirmed)
-            {
-                var confirmation = MessageBox.Show(
-                    BridgeHostProductionCutoverResult.ConfirmationMessage,
-                    "确认切换生产 Host",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Warning,
-                    MessageBoxDefaultButton.Button2);
-                if (confirmation is not DialogResult.Yes)
-                {
-                    AppLog.Info("用户取消了显式生产 Host 切换。");
-                    return 2;
-                }
-            }
-            else
-            {
-                Console.WriteLine(
-                    BridgeHostProductionCutoverResult.ConfirmationMessage);
-            }
-
-            AppLog.Warn(
-                $"开始显式生产 Host 切换。{BridgeHostProductionCutoverResult.ConfirmationMessage}");
-            var result = bridgeClient.CutoverProductionHostAsync()
-                .AsTask()
-                .GetAwaiter()
-                .GetResult();
-            if (result.Completed)
-            {
-                AppLog.Info(result.UserMessage);
-            }
-            else
-            {
-                AppLog.Warn(result.UserMessage);
-            }
-
-            if (confirmed)
-            {
-                Console.WriteLine(result.UserMessage);
-            }
-            else
-            {
-                MessageBox.Show(
-                    result.UserMessage,
-                    result.Completed ? "生产 Host 切换完成" : "生产 Host 切换未完成",
-                    MessageBoxButtons.OK,
-                    result.Completed
-                        ? MessageBoxIcon.Information
-                        : MessageBoxIcon.Warning);
-            }
-            return result.Completed ? 0 : 1;
-        }
-        catch (Exception error)
-        {
-            var result = new BridgeHostProductionCutoverResult(
-                BridgeHostProductionCutoverState.Unavailable);
-            AppLog.Error("显式生产 Host 切换失败", error);
-            if (confirmed)
-            {
-                Console.Error.WriteLine(result.UserMessage);
-            }
-            else
-            {
-                MessageBox.Show(
-                    result.UserMessage,
-                    "生产 Host 切换失败",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
-            }
-            return 1;
-        }
-    }
-
     private static int RunBridgeCommand(bool start)
     {
         try
@@ -145,7 +58,6 @@ internal static class Program
             AppLog.Initialize(Path.Combine(bridgeClient.BridgeRoot, "data"));
             if (start)
             {
-                RequireSafeStartupRecovery(bridgeClient);
                 bridgeClient.StartAsync().GetAwaiter().GetResult();
                 for (var attempt = 0; attempt < 25; attempt += 1)
                 {
@@ -182,25 +94,12 @@ internal static class Program
         {
             using var bridgeClient = new BridgeClient();
             AppLog.Initialize(Path.Combine(bridgeClient.BridgeRoot, "data"));
-            RequireSafeStartupRecovery(bridgeClient);
             return bridgeClient.RunBridgeService();
         }
         catch (Exception error)
         {
             AppLog.Error("后台桥接宿主失败", error);
             return 1;
-        }
-    }
-
-    private static void RequireSafeStartupRecovery(BridgeClient bridgeClient)
-    {
-        var recovery = bridgeClient.RecoverProductionHostOnStartupAsync()
-            .AsTask()
-            .GetAwaiter()
-            .GetResult();
-        if (!recovery.CanContinue)
-        {
-            throw new InvalidOperationException(recovery.UserMessage);
         }
     }
 

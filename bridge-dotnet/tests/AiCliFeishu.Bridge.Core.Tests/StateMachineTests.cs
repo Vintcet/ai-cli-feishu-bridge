@@ -270,7 +270,7 @@ public sealed class StateMachineTests
     }
 
     [TestMethod]
-    public void RuntimeErrorClassifierMatchesNodeRetryContract()
+    public void RuntimeErrorClassifierMatchesRetryContract()
     {
         Assert.IsTrue(RuntimeErrorClassifier.IsRetryable("HTTP 429 Too Many Requests"));
         Assert.IsTrue(RuntimeErrorClassifier.IsRetryable(

@@ -4,7 +4,7 @@ using AiCliFeishu.Bridge.Protocol;
 namespace AiCliFeishu.Bridge.Core;
 
 /// <summary>
-/// Node-compatible names for assistant-created Feishu session groups.
+/// Stable names for assistant-created Feishu session groups.
 /// Keeping the calculation in Core makes every Active command path use the
 /// same runtime prefix, alias fallback and ordinal rules.
 /// </summary>
@@ -52,7 +52,7 @@ public static class SessionGroupNameRules
             return value;
         }
 
-        // Keep the UTF-16 length cap used by the Node implementation while
+        // Keep the established UTF-16 length cap while
         // avoiding a dangling surrogate when a project name contains emoji.
         var length = 0;
         foreach (var rune in value.EnumerateRunes())

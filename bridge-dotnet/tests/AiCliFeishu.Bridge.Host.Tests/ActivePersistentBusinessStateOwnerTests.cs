@@ -55,7 +55,7 @@ public sealed class ActivePersistentBusinessStateOwnerTests
             SessionStatuses.LocalApproval,
             owner.Snapshot.Sessions.Sessions["session-1"].Status);
         Assert.AreEqual(0, owner.Snapshot.Inputs.Requests.Count);
-        var reloaded = await new NodeJsonStoreRepository(directory!).LoadAsync();
+        var reloaded = await new BridgeJsonStoreRepository(directory!).LoadAsync();
         Assert.AreEqual(
             ApprovalStatuses.Orphaned,
             reloaded.Approvals.Requests["approval-1"].Status);
@@ -92,7 +92,7 @@ public sealed class ActivePersistentBusinessStateOwnerTests
         Assert.AreEqual(
             SessionStatuses.Running,
             owner.Snapshot.Sessions.Sessions["session-1"].Status);
-        var reloaded = await new NodeJsonStoreRepository(directory!).LoadAsync();
+        var reloaded = await new BridgeJsonStoreRepository(directory!).LoadAsync();
         Assert.AreEqual(
             SessionStatuses.Running,
             reloaded.Sessions.Sessions["session-1"].Status);
@@ -135,7 +135,7 @@ public sealed class ActivePersistentBusinessStateOwnerTests
         Assert.AreEqual(
             SessionStatuses.Ready,
             owner.Snapshot.Sessions.Sessions["session-1"].Status);
-        var reloaded = await new NodeJsonStoreRepository(directory!).LoadAsync();
+        var reloaded = await new BridgeJsonStoreRepository(directory!).LoadAsync();
         var extensions = reloaded.Sessions.Sessions["session-1"].ExtensionData!;
         Assert.AreEqual(
             "terminal-managed",
@@ -171,7 +171,7 @@ public sealed class ActivePersistentBusinessStateOwnerTests
     }
 
     [TestMethod]
-    public async Task ApprovalRequestPersistsRequiredNodeCompatibilityFields()
+    public async Task ApprovalRequestPersistsRequiredCompatibilityFields()
     {
         await WriteStoreAsync(SessionStatuses.Waiting, approvalStatus: null);
         await using var lease = new ActiveOwnerLeaseAcquirer(Options());
@@ -193,7 +193,7 @@ public sealed class ActivePersistentBusinessStateOwnerTests
                 expiresAt = Origin.AddMinutes(22).ToString("O"),
             }));
 
-        var reloaded = await new NodeJsonStoreRepository(directory!).LoadAsync();
+        var reloaded = await new BridgeJsonStoreRepository(directory!).LoadAsync();
         var approval = reloaded.Approvals.Requests["approval-new"];
         Assert.AreEqual("turn-1", approval.TurnId);
         Assert.AreEqual("K:/repo", approval.Cwd);
@@ -244,7 +244,7 @@ public sealed class ActivePersistentBusinessStateOwnerTests
         Assert.AreEqual(SessionStatuses.Running, resolved.Session.Status);
         Assert.AreEqual(2, owner.Snapshot.Revision);
         Assert.IsFalse(owner.Snapshot.Approvals.Claims.Contains("approval-new"));
-        var reloaded = await new NodeJsonStoreRepository(directory!).LoadAsync();
+        var reloaded = await new BridgeJsonStoreRepository(directory!).LoadAsync();
         Assert.AreEqual(
             ApprovalStatuses.Resolved,
             reloaded.Approvals.Requests["approval-new"].Status);
@@ -254,6 +254,50 @@ public sealed class ActivePersistentBusinessStateOwnerTests
 
         await store.CloseAsync();
         await lease.ReleaseAsync();
+    }
+
+    [TestMethod]
+    public async Task ExpiredApprovalCommitsTimeoutAndReleasesAnyClaimDurably()
+    {
+        var store = new RecordingStoreOwner(SnapshotFromMemory());
+        var owner = Owner(store, Origin.AddMinutes(30));
+        await owner.StartAsync(CancellationToken.None);
+        await owner.HandleAsync(Event(
+            "session-started",
+            RuntimeEventTypes.SessionStarted,
+            Origin,
+            new { }));
+        await owner.HandleAsync(Event(
+            "approval-requested",
+            RuntimeEventTypes.ApprovalRequested,
+            Origin.AddMinutes(2),
+            new
+            {
+                requestId = "approval-expired",
+                title = "shell_command",
+                description = "echo test",
+                expiresAt = Origin.AddMinutes(22).ToString("O"),
+            }));
+        Assert.IsNotNull(await owner.TryClaimApprovalAsync(
+            "approval-expired",
+            "session-1"));
+
+        var expired = await owner.ExpireApprovalAsync("approval-expired");
+
+        Assert.IsNotNull(expired);
+        Assert.AreEqual(ApprovalStatuses.Resolved, expired.Status);
+        Assert.AreEqual(ApprovalResolutions.Timeout, expired.Resolution);
+        Assert.IsFalse(owner.Snapshot.Approvals.Claims.Contains("approval-expired"));
+        Assert.AreEqual(
+            SessionStatuses.Waiting,
+            owner.Snapshot.Sessions.Sessions["session-1"].Status);
+        Assert.AreEqual(
+            ApprovalResolutions.Timeout,
+            store.Current.Approvals.Requests["approval-expired"].Resolution);
+        Assert.AreEqual(
+            SessionStatuses.Waiting,
+            store.Current.Sessions.Sessions["session-1"].Status);
+        Assert.IsNull(await owner.ExpireApprovalAsync("approval-expired"));
     }
 
     [TestMethod]
@@ -291,7 +335,7 @@ public sealed class ActivePersistentBusinessStateOwnerTests
             SessionStatuses.PendingApproval,
             owner.Snapshot.Sessions.Sessions["session-1"].Status);
         Assert.IsFalse(owner.Snapshot.Approvals.Claims.Contains("approval-new"));
-        var reloaded = await new NodeJsonStoreRepository(directory!).LoadAsync();
+        var reloaded = await new BridgeJsonStoreRepository(directory!).LoadAsync();
         var approval = reloaded.Approvals.Requests["approval-new"];
         Assert.AreEqual(ApprovalStatuses.Pending, approval.Status);
         Assert.IsTrue(
@@ -326,7 +370,7 @@ public sealed class ActivePersistentBusinessStateOwnerTests
     }
 
     [TestMethod]
-    public async Task InputStateRemainsRuntimeOnlyAndDoesNotCreateASeventhStoreFile()
+    public async Task InputStatePersistsInSessionsExtensionWithoutCreatingASeventhStoreFile()
     {
         await WriteStoreAsync(SessionStatuses.Waiting, approvalStatus: null);
         await using var lease = new ActiveOwnerLeaseAcquirer(Options());
@@ -357,14 +401,90 @@ public sealed class ActivePersistentBusinessStateOwnerTests
             }));
 
         Assert.AreEqual(1, owner.Snapshot.Inputs.Requests.Count);
+        var reloaded = await new BridgeJsonStoreRepository(directory!).LoadAsync();
+        var persisted = BridgeStoreCoreProjection.ProjectInputs(reloaded);
+        Assert.AreEqual(1, persisted.Requests.Count);
+        Assert.AreEqual("input-1", persisted.Requests["input-1"].RequestId);
         CollectionAssert.AreEquivalent(
-            NodeStoreFile.All.Select(file => file.FileName).ToArray(),
+            BridgeStoreFile.All.Select(file => file.FileName).ToArray(),
             Directory.EnumerateFiles(directory!, "*.json", SearchOption.TopDirectoryOnly)
                 .Select(Path.GetFileName)
                 .ToArray());
 
         await store.CloseAsync();
         await lease.ReleaseAsync();
+    }
+
+    [TestMethod]
+    public async Task PendingInputAndPartialAnswersSurviveStoreRoundTripAndOwnerRestart()
+    {
+        await WriteStoreAsync(SessionStatuses.Waiting, approvalStatus: null);
+        var firstStore = new RecordingStoreOwner(SnapshotFromDisk());
+        var firstOwner = Owner(firstStore, Origin.AddMinutes(3));
+        await firstOwner.StartAsync(CancellationToken.None);
+        await firstOwner.HandleAsync(Event(
+            "input-requested",
+            RuntimeEventTypes.InputRequested,
+            Origin.AddMinutes(2),
+            new
+            {
+                requestId = "input-1",
+                expiresAt = Origin.AddMinutes(22).ToString("O"),
+                questions = new object[]
+                {
+                    new
+                    {
+                        id = "mode",
+                        header = "模式",
+                        prompt = "请选择模式",
+                        multiple = false,
+                        allowsCustom = false,
+                        options = new[] { "safe", "fast" },
+                        isSecret = false,
+                    },
+                    new
+                    {
+                        id = "scope",
+                        header = "范围",
+                        prompt = "请选择范围",
+                        multiple = true,
+                        allowsCustom = false,
+                        options = new[] { "code", "docs" },
+                        isSecret = false,
+                    },
+                },
+            }));
+        var progress = await firstOwner.TryRecordInputAnswerAsync(
+            "input-1",
+            "session-1",
+            "mode",
+            ["safe"]);
+        Assert.IsNotNull(progress);
+        Assert.IsFalse(progress.Complete);
+
+        var disk = new BridgeJsonStoreRepository(
+            directory!,
+            BridgeStoreAccess.ReadWriteCopy);
+        await disk.WriteAsync(firstStore.Current);
+        var roundTripped = await new BridgeJsonStoreRepository(directory!).LoadAsync();
+        var restarted = Owner(
+            new RecordingStoreOwner(roundTripped),
+            Origin.AddMinutes(4));
+
+        await restarted.StartAsync(CancellationToken.None);
+
+        var restored = restarted.Snapshot.Inputs.Requests["input-1"];
+        Assert.AreEqual(InputRequestStatuses.Pending, restored.Status);
+        Assert.AreEqual("session-1", restored.SessionId);
+        Assert.AreEqual("模式", restored.Questions[0].Header);
+        Assert.AreEqual("请选择模式", restored.Questions[0].Prompt);
+        CollectionAssert.AreEqual(new[] { "safe" }, restored.Answers["mode"].ToArray());
+        Assert.IsFalse(restored.Answers.ContainsKey("scope"));
+        CollectionAssert.AreEquivalent(
+            BridgeStoreFile.All.Select(file => file.FileName).ToArray(),
+            Directory.EnumerateFiles(directory!, "*.json", SearchOption.TopDirectoryOnly)
+                .Select(Path.GetFileName)
+                .ToArray());
     }
 
     [TestMethod]
@@ -433,8 +553,9 @@ public sealed class ActivePersistentBusinessStateOwnerTests
         Assert.AreEqual(SessionStatuses.Running, resolved.Session.Status);
         Assert.AreEqual("模式", resolved.Input.Questions[0].Header);
         Assert.AreEqual("请选择模式", resolved.Input.Questions[0].Prompt);
-        var reloaded = await new NodeJsonStoreRepository(directory!).LoadAsync();
+        var reloaded = await new BridgeJsonStoreRepository(directory!).LoadAsync();
         Assert.AreEqual(SessionStatuses.Running, reloaded.Sessions.Sessions["session-1"].Status);
+        Assert.AreEqual(0, BridgeStoreCoreProjection.ProjectInputs(reloaded).Requests.Count);
 
         await store.CloseAsync();
         await lease.ReleaseAsync();
@@ -531,8 +652,9 @@ public sealed class ActivePersistentBusinessStateOwnerTests
         Assert.AreEqual(InputRequestStatuses.Local, deferred.Input.Status);
         Assert.AreEqual(SessionStatuses.Waiting, deferred.Session.Status);
         Assert.AreEqual(0, deferred.Input.Answers.Count);
-        var reloaded = await new NodeJsonStoreRepository(directory!).LoadAsync();
+        var reloaded = await new BridgeJsonStoreRepository(directory!).LoadAsync();
         Assert.AreEqual(SessionStatuses.Waiting, reloaded.Sessions.Sessions["session-1"].Status);
+        Assert.AreEqual(0, BridgeStoreCoreProjection.ProjectInputs(reloaded).Requests.Count);
 
         await store.CloseAsync();
         await lease.ReleaseAsync();
@@ -880,7 +1002,7 @@ public sealed class ActivePersistentBusinessStateOwnerTests
                     ["feishuChatName"] = JsonSerializer.SerializeToElement("old"),
                 })))
         {
-            BeforeUpdate = current => NodeStoreBusinessStateMerger.PatchSessionExtensions(
+            BeforeUpdate = current => BridgeStoreBusinessStateMerger.PatchSessionExtensions(
                 current,
                 "session-target",
                 new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
@@ -946,14 +1068,14 @@ public sealed class ActivePersistentBusinessStateOwnerTests
                         OwnerOpenId = "owner-new",
                     },
                 },
-                "ordinal" => NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                "ordinal" => BridgeStoreBusinessStateMerger.PatchSessionExtensions(
                     current,
                     "session-target",
                     new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
                     {
                         ["feishuChatOrdinal"] = JsonSerializer.SerializeToElement(2),
                     }),
-                "binding" => NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                "binding" => BridgeStoreBusinessStateMerger.PatchSessionExtensions(
                     current,
                     "session-target",
                     new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
@@ -1013,7 +1135,7 @@ public sealed class ActivePersistentBusinessStateOwnerTests
     private ActiveProductionStoreOwner StoreOwner(ActiveOwnerLeaseAcquirer lease) => new(
         Options(),
         lease,
-        new NodeJsonStoreRepository(directory!, NodeStoreAccess.ReadWriteActiveOwner),
+        new BridgeJsonStoreRepository(directory!, BridgeStoreAccess.ReadWriteActiveOwner),
         new ActiveOwnerLeaseObserver(directory!).InspectAsync);
 
     private BridgeHostOptions Options() => new(
@@ -1086,10 +1208,10 @@ public sealed class ActivePersistentBusinessStateOwnerTests
             "{\"future\":\"keep-settings\"}");
     }
 
-    private NodeStoreSnapshot SnapshotFromDisk() =>
-        new NodeJsonStoreRepository(directory!).LoadAsync().GetAwaiter().GetResult();
+    private BridgeStoreSnapshot SnapshotFromDisk() =>
+        new BridgeJsonStoreRepository(directory!).LoadAsync().GetAwaiter().GetResult();
 
-    private static NodeStoreSnapshot SnapshotFromMemory() => new(
+    private static BridgeStoreSnapshot SnapshotFromMemory() => new(
         new BindingStoreDocument(),
         new SessionStoreDocument(),
         new RouteStoreDocument(),
@@ -1097,7 +1219,7 @@ public sealed class ActivePersistentBusinessStateOwnerTests
         new SettingsStoreDocument(),
         new ControlTokenStoreDocument());
 
-    private static NodeStoreSnapshot AliasSnapshot(
+    private static BridgeStoreSnapshot AliasSnapshot(
         params SessionStoreRecord[] sessions) => new(
         new BindingStoreDocument(),
         new SessionStoreDocument
@@ -1145,15 +1267,15 @@ public sealed class ActivePersistentBusinessStateOwnerTests
         return result.Count == 0 ? null : result;
     }
 
-    private sealed class RecordingStoreOwner(NodeStoreSnapshot store)
+    private sealed class RecordingStoreOwner(BridgeStoreSnapshot store)
         : IBridgeProductionStoreOwner
     {
-        private NodeStoreSnapshot current = store;
+        private BridgeStoreSnapshot current = store;
 
         public bool IsOpen { get; set; } = true;
         public Exception? UpdateError { get; set; }
-        public Func<NodeStoreSnapshot, NodeStoreSnapshot>? BeforeUpdate { get; set; }
-        public NodeStoreSnapshot Current => current;
+        public Func<BridgeStoreSnapshot, BridgeStoreSnapshot>? BeforeUpdate { get; set; }
+        public BridgeStoreSnapshot Current => current;
         public int Updates { get; private set; }
         public BridgeProductionStoreSnapshot Snapshot => new(
             IsOpen ? BridgeProductionStoreState.Open : BridgeProductionStoreState.NotOpened,
@@ -1163,18 +1285,18 @@ public sealed class ActivePersistentBusinessStateOwnerTests
         public ValueTask OpenAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 
-        public ValueTask<NodeStoreSnapshot> ReadAsync(
+        public ValueTask<BridgeStoreSnapshot> ReadAsync(
             CancellationToken cancellationToken = default) =>
             IsOpen
                 ? ValueTask.FromResult(current)
-                : ValueTask.FromException<NodeStoreSnapshot>(
+                : ValueTask.FromException<BridgeStoreSnapshot>(
                     new InvalidOperationException("生产 Store 尚未成功打开。"));
 
         public ValueTask FlushAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 
         public ValueTask UpdateAsync(
-            Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
+            Func<BridgeStoreSnapshot, BridgeStoreSnapshot> update,
             CancellationToken cancellationToken = default)
         {
             if (UpdateError is not null)

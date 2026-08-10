@@ -2,10 +2,13 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using AiCliFeishu.Bridge.Adapters.ManagedTerminal;
 using AiCliFeishu.Bridge.Protocol;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -95,6 +98,44 @@ public sealed class BridgeControlApiTests
         request.Headers.Add("Sec-Fetch-Site", "cross-site");
         using var crossSite = await client.SendAsync(request);
         Assert.AreEqual(HttpStatusCode.Forbidden, crossSite.StatusCode);
+    }
+
+    [TestMethod]
+    public async Task DesktopPresenceRequiresAuthenticationAndActiveOwnership()
+    {
+        using var missingToken = await client!.GetAsync("/control/desktop-presence");
+        Assert.AreEqual(HttpStatusCode.Unauthorized, missingToken.StatusCode);
+
+        using var crossSite = new HttpRequestMessage(
+            HttpMethod.Get,
+            "/control/desktop-presence");
+        crossSite.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        crossSite.Headers.Add("Sec-Fetch-Site", "cross-site");
+        using var crossSiteResponse = await client!.SendAsync(crossSite);
+        Assert.AreEqual(HttpStatusCode.Forbidden, crossSiteResponse.StatusCode);
+
+        using var passive = new HttpRequestMessage(
+            HttpMethod.Get,
+            "/control/desktop-presence");
+        passive.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var passiveResponse = await client.SendAsync(passive);
+        Assert.AreEqual(HttpStatusCode.ServiceUnavailable, passiveResponse.StatusCode);
+
+        using var localPresence = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/hooks/local-presence")
+        {
+            Content = JsonContent.Create(new
+            {
+                session_id = "session-local",
+                client_process_id = Environment.ProcessId,
+            }),
+        };
+        localPresence.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var localPresenceResponse = await client.SendAsync(localPresence);
+        Assert.AreEqual(
+            HttpStatusCode.ServiceUnavailable,
+            localPresenceResponse.StatusCode);
     }
 
     [TestMethod]
@@ -296,7 +337,7 @@ public sealed class BridgeControlApiTests
     }
 
     [TestMethod]
-    public async Task FeishuIntentEndpointAuthenticatesValidatesAndReturnsShadowDecision()
+    public async Task FeishuIntentEndpointAuthenticatesValidatesAndReturnsReadOnlyDecision()
     {
         using var missingToken = new HttpRequestMessage(
             HttpMethod.Post,
@@ -330,7 +371,7 @@ public sealed class BridgeControlApiTests
         Assert.AreEqual("warning", body.RootElement.GetProperty("toastType").GetString());
         StringAssert.Contains(
             body.RootElement.GetProperty("toastContent").GetString()!,
-            "只读观测");
+            "只读模式");
     }
 
     [TestMethod]
@@ -471,6 +512,58 @@ public sealed class BridgeControlApiTests
     }
 
     [TestMethod]
+    public async Task LocalApprovalEndpointAuthenticatesValidatesAndFailsClosedInPassiveHost()
+    {
+        using var missingToken = await client!.PostAsJsonAsync(
+            "/approvals/resolve",
+            new { requestId = "approval-1", resolution = "allow" });
+        Assert.AreEqual(HttpStatusCode.Unauthorized, missingToken.StatusCode);
+
+        using var crossSite = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/approvals/resolve")
+        {
+            Content = JsonContent.Create(new
+            {
+                requestId = "approval-1",
+                resolution = "allow",
+            }),
+        };
+        crossSite.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        crossSite.Headers.Add("Sec-Fetch-Site", "cross-site");
+        using var crossSiteResponse = await client!.SendAsync(crossSite);
+        Assert.AreEqual(HttpStatusCode.Forbidden, crossSiteResponse.StatusCode);
+
+        using var invalid = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/approvals/resolve")
+        {
+            Content = JsonContent.Create(new
+            {
+                requestId = "approval-1",
+                resolution = "allow_session",
+            }),
+        };
+        invalid.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var invalidResponse = await client!.SendAsync(invalid);
+        Assert.AreEqual(HttpStatusCode.BadRequest, invalidResponse.StatusCode);
+
+        using var valid = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/approvals/resolve")
+        {
+            Content = JsonContent.Create(new
+            {
+                requestId = "approval-1",
+                resolution = "deny",
+            }),
+        };
+        valid.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var validResponse = await client!.SendAsync(valid);
+        Assert.AreEqual(HttpStatusCode.ServiceUnavailable, validResponse.StatusCode);
+    }
+
+    [TestMethod]
     public async Task ManagedIngressRoutesAuthenticateAndFailClosedInPassiveHost()
     {
         var paths = new[]
@@ -523,6 +616,56 @@ public sealed class BridgeControlApiTests
         wrongMediaType.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
         using var mediaResponse = await client.SendAsync(wrongMediaType);
         Assert.AreEqual(HttpStatusCode.UnsupportedMediaType, mediaResponse.StatusCode);
+    }
+
+    [TestMethod]
+    public async Task ManagedTerminalStatusRequiresAuthenticationAndReturnsExactTerminal()
+    {
+        var terminalDirectory = new RecordingManagedTerminalRegistrationDirectory
+        {
+            Status = new(
+            "terminal-status",
+            Online: true,
+            Ready: true,
+            SessionExternalId: "session-status",
+            LastSeenAt: DateTimeOffset.Parse("2026-08-11T00:00:00Z")),
+        };
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseUrls("http://127.0.0.1:0");
+        builder.Services.AddSingleton<IBridgeControlTokenProvider>(
+            new FixedTokenProvider("secret-token"));
+        builder.Services.AddSingleton<IBridgeManagedTerminalRegistrationDirectory>(
+            terminalDirectory);
+        await using var statusApp = builder.Build();
+        statusApp.MapGet(
+            "/managed-terminals/{terminalId}/status",
+            (Func<HttpContext, Task<IResult>>)BridgeControlApi
+                .HandleManagedTerminalStatusAsync);
+        await statusApp.StartAsync();
+        var server = statusApp.Services.GetRequiredService<IServer>();
+        var address = server.Features.Get<IServerAddressesFeature>()!.Addresses.Single();
+        using var statusClient = new HttpClient { BaseAddress = new Uri(address) };
+
+        using var unauthorized = await statusClient.GetAsync(
+            "/managed-terminals/terminal-status/status");
+        Assert.AreEqual(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
+
+        using var request = new HttpRequestMessage(
+            HttpMethod.Get,
+            "/managed-terminals/terminal-status/status");
+        request.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var response = await statusClient.SendAsync(request);
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+
+        Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
+        Assert.IsTrue(body.RootElement.GetProperty("registered").GetBoolean());
+        Assert.IsTrue(body.RootElement.GetProperty("online").GetBoolean());
+        Assert.IsTrue(body.RootElement.GetProperty("ready").GetBoolean());
+        Assert.AreEqual(
+            "session-status",
+            body.RootElement.GetProperty("sessionExternalId").GetString());
+        Assert.AreEqual("terminal-status", terminalDirectory.RequestedTerminalId);
+        await statusApp.StopAsync();
     }
 
     [TestMethod]
@@ -593,7 +736,7 @@ public sealed class BridgeControlApiTests
     [TestMethod]
     public async Task ShutdownRequiresMatchingHostApiAndProcessIdentity()
     {
-        using var wrongHost = ShutdownRequest("node", Environment.ProcessId);
+        using var wrongHost = ShutdownRequest("unsupported", Environment.ProcessId);
         using var wrongHostResponse = await client!.SendAsync(wrongHost);
         Assert.AreEqual(HttpStatusCode.Conflict, wrongHostResponse.StatusCode);
 
@@ -704,5 +847,46 @@ public sealed class BridgeControlApiTests
     {
         public ValueTask<string?> ReadAsync(CancellationToken cancellationToken = default) =>
             ValueTask.FromResult<string?>(token);
+    }
+
+    private sealed class RecordingManagedTerminalRegistrationDirectory
+        : IBridgeManagedTerminalRegistrationDirectory
+    {
+        public BridgeManagedTerminalRegistrationStatus? Status { get; set; }
+        public string? RequestedTerminalId { get; private set; }
+        public BridgeManagedTerminalDirectorySnapshot Snapshot { get; } =
+            new(true, 0, 0, 0, 0);
+
+        public BridgeManagedTerminalRegistrationStatus? GetStatus(string terminalId)
+        {
+            RequestedTerminalId = terminalId;
+            return Status is not null && string.Equals(
+                    Status.TerminalId,
+                    terminalId,
+                    StringComparison.Ordinal)
+                ? Status
+                : null;
+        }
+
+        public void Register(BridgeManagedTerminalRegistration registration) =>
+            throw new NotSupportedException();
+        public bool Unregister(string terminalId) => throw new NotSupportedException();
+        public BridgeManagedTerminalClaim? Claim(
+            string cwd,
+            string runtime,
+            string sessionExternalId) => throw new NotSupportedException();
+        public BridgeManagedTerminalClaim? ClaimById(
+            string terminalId,
+            string cwd,
+            string runtime,
+            string sessionExternalId,
+            bool? elevated = null) => throw new NotSupportedException();
+        public BridgeManagedTerminalIdentity? FindClaimBySession(
+            string sessionExternalId) => throw new NotSupportedException();
+        public BridgeManagedTerminalIdentity? FindClaimByTerminal(
+            string terminalId) => throw new NotSupportedException();
+        public void Release(string sessionExternalId) => throw new NotSupportedException();
+        public bool IsCurrent(ManagedTerminalTarget target) => false;
+        public bool IsAuthenticated(string terminalId, string terminalSecret) => false;
     }
 }

@@ -1,5 +1,3 @@
-node_modules/
-dist/
 .env
 data/*.json
 data/*.corrupt-*
@@ -7,10 +5,7 @@ data/*.err
 data/*.out
 data/uploads/
 data/hook-test-home/
-data/migration-recordings/
 data/bridge-host-*.lock
-data/bridge-host-cutover.checkpoint.json.*.tmp
-data/bridge-host-cutover.orphaned/
 data/bridge-active-owner.lock/
 data/bridge-active-owner.pending-*/
 data/bridge-active-owner.stale-*/

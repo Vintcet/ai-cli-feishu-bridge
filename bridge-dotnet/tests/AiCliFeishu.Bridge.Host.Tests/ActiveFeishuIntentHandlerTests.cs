@@ -500,7 +500,7 @@ public sealed class ActiveFeishuIntentHandlerTests
             ordinal: 1);
         fixture.Gateway.AfterGroupRename = (_, _, cancellationToken) =>
             fixture.Store.UpdateAsync(
-                current => NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                current => BridgeStoreBusinessStateMerger.PatchSessionExtensions(
                     current,
                     "session-12345678",
                     new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
@@ -579,6 +579,57 @@ public sealed class ActiveFeishuIntentHandlerTests
         StringAssert.Contains(fixture.Gateway.Replies[0].Text, "管理员账号");
         Assert.AreEqual("warning", cardResult?.ToastType);
         Assert.AreEqual(0, fixture.Gateway.Cards.Count);
+    }
+
+    [TestMethod]
+    public async Task FirstPrivateBindingRequiresPairingCodeAndPersistsOwner()
+    {
+        var fixture = Fixture.Create(
+            bound: false,
+            ownerConfigured: false,
+            pairingCode: "A1B2C3D4E5");
+        fixture.Store.AllowUpdates = true;
+
+        await fixture.Handler.HandleAsync(BindingIntent("绑定 wrong"));
+        await fixture.Handler.HandleAsync(BindingIntent(
+            "绑定 a1b2c3d4e5",
+            eventId: "bind-valid"));
+
+        StringAssert.Contains(fixture.Gateway.Replies[0].Text, "绑定码不正确");
+        StringAssert.Contains(fixture.Gateway.Replies[1].Text, "绑定成功");
+        Assert.AreEqual("owner-1", fixture.Store.Current.Bindings.OwnerOpenId);
+        Assert.IsNull(fixture.Store.Current.Bindings.PairingCode);
+        Assert.AreEqual("chat-1", fixture.Store.Current.Bindings.Users["owner-1"].ChatId);
+    }
+
+    [TestMethod]
+    public async Task OwnerCanUnbindAndRecoverWithoutPairingCode()
+    {
+        var fixture = Fixture.Create(bound: true);
+        fixture.Store.AllowUpdates = true;
+
+        await fixture.Handler.HandleAsync(BindingIntent("解绑"));
+        await fixture.Handler.HandleAsync(BindingIntent("绑定", eventId: "bind-again"));
+
+        Assert.AreEqual("已解绑。", fixture.Gateway.Replies[0].Text);
+        StringAssert.Contains(fixture.Gateway.Replies[1].Text, "绑定已恢复");
+        Assert.AreEqual("owner-1", fixture.Store.Current.Bindings.OwnerOpenId);
+        Assert.IsTrue(fixture.Store.Current.Bindings.Users.ContainsKey("owner-1"));
+    }
+
+    [TestMethod]
+    public async Task DifferentAccountCannotTakeOverConfiguredOwner()
+    {
+        var fixture = Fixture.Create(bound: true);
+        fixture.Store.AllowUpdates = true;
+
+        await fixture.Handler.HandleAsync(BindingIntent(
+            "绑定 A1B2C3D4E5",
+            openId: "owner-2"));
+
+        StringAssert.Contains(fixture.Gateway.Replies.Single().Text, "唯一管理员");
+        Assert.AreEqual("owner-1", fixture.Store.Current.Bindings.OwnerOpenId);
+        Assert.IsFalse(fixture.Store.Current.Bindings.Users.ContainsKey("owner-2"));
     }
 
     [TestMethod]
@@ -688,6 +739,19 @@ public sealed class ActiveFeishuIntentHandlerTests
         "trace-1",
         Text: "/");
 
+    private static FeishuIntent BindingIntent(
+        string text,
+        string openId = "owner-1",
+        string eventId = "bind-event") => new(
+        eventId,
+        FeishuIntentTypes.MessagePrompt,
+        openId,
+        "chat-1",
+        $"message-{eventId}",
+        "p2p",
+        $"trace-{eventId}",
+        Text: text);
+
     private static FeishuIntent RuntimeIntent(
         string intentType,
         string flowId,
@@ -737,7 +801,7 @@ public sealed class ActiveFeishuIntentHandlerTests
         int ordinal,
         bool preserveFuture = false) =>
         fixture.Store.UpdateAsync(
-            current => NodeStoreBusinessStateMerger.PatchSessionExtensions(
+            current => BridgeStoreBusinessStateMerger.PatchSessionExtensions(
                 current,
                 "session-12345678",
                 new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
@@ -819,7 +883,9 @@ public sealed class ActiveFeishuIntentHandlerTests
         public static Fixture Create(
             bool bound,
             bool active = true,
-            string? workspaceRoot = null)
+            string? workspaceRoot = null,
+            bool ownerConfigured = true,
+            string? pairingCode = null)
         {
             var options = new BridgeHostOptions(
                 Path.GetTempPath(),
@@ -827,7 +893,11 @@ public sealed class ActiveFeishuIntentHandlerTests
                 0,
                 active ? BridgeOwnershipMode.Active : BridgeOwnershipMode.Passive,
                 "active-feishu-intent-test");
-            var store = new RecordingStoreOwner(StoreSnapshot(bound, workspaceRoot));
+            var store = new RecordingStoreOwner(StoreSnapshot(
+                bound,
+                workspaceRoot,
+                ownerConfigured,
+                pairingCode));
             var gateway = new RecordingFeishuGateway();
             var runtimeCommands = new RecordingRuntimeCommandGateway();
             var runtimeRetries = new RecordingRuntimeRetryCoordinator();
@@ -851,7 +921,8 @@ public sealed class ActiveFeishuIntentHandlerTests
             var approvals = new ActiveFeishuApprovalCoordinator(
                 new RejectingApprovalStateOwner(business.Snapshot),
                 runtimeCommands,
-                interactions);
+                interactions,
+                renderer);
             var inputs = new ActiveFeishuInputCoordinator(
                 new RejectingInputStateOwner(business.Snapshot),
                 runtimeCommands,
@@ -883,13 +954,16 @@ public sealed class ActiveFeishuIntentHandlerTests
         }
     }
 
-    private static NodeStoreSnapshot StoreSnapshot(
+    private static BridgeStoreSnapshot StoreSnapshot(
         bool bound,
-        string? workspaceRoot = null)
+        string? workspaceRoot = null,
+        bool ownerConfigured = true,
+        string? pairingCode = null)
     {
         var binding = new BindingStoreDocument
         {
-            OwnerOpenId = "owner-1",
+            OwnerOpenId = ownerConfigured ? "owner-1" : null,
+            PairingCode = pairingCode,
             Users = bound
                 ? new Dictionary<string, BindingStoreRecord>(StringComparer.Ordinal)
                 {
@@ -1012,15 +1086,15 @@ public sealed class ActiveFeishuIntentHandlerTests
                 }));
     }
 
-    private sealed class RecordingStoreOwner(NodeStoreSnapshot store) :
+    private sealed class RecordingStoreOwner(BridgeStoreSnapshot store) :
         IBridgeProductionStoreOwner
     {
-        private NodeStoreSnapshot current = store;
+        private BridgeStoreSnapshot current = store;
 
         public int Reads { get; private set; }
         public int Updates { get; private set; }
         public bool AllowUpdates { get; set; }
-        public NodeStoreSnapshot Current => current;
+        public BridgeStoreSnapshot Current => current;
 
         public BridgeProductionStoreSnapshot Snapshot => new(
             BridgeProductionStoreState.Open,
@@ -1030,7 +1104,7 @@ public sealed class ActiveFeishuIntentHandlerTests
         public ValueTask OpenAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 
-        public ValueTask<NodeStoreSnapshot> ReadAsync(
+        public ValueTask<BridgeStoreSnapshot> ReadAsync(
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -1042,7 +1116,7 @@ public sealed class ActiveFeishuIntentHandlerTests
             ValueTask.CompletedTask;
 
         public ValueTask UpdateAsync(
-            Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
+            Func<BridgeStoreSnapshot, BridgeStoreSnapshot> update,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -1099,7 +1173,7 @@ public sealed class ActiveFeishuIntentHandlerTests
                         result = new(null, null, "会话不存在或已经失效。");
                         return current;
                     }
-                    var updated = NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                    var updated = BridgeStoreBusinessStateMerger.PatchSessionExtensions(
                         current,
                         sessionId,
                         new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
@@ -1206,7 +1280,7 @@ public sealed class ActiveFeishuIntentHandlerTests
                         return current;
                     }
 
-                    var updated = NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                    var updated = BridgeStoreBusinessStateMerger.PatchSessionExtensions(
                         current,
                         sessionId,
                         new Dictionary<string, JsonElement?>(StringComparer.Ordinal)

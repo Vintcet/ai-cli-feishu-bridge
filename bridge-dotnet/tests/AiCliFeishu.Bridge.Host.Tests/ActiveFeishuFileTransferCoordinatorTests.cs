@@ -259,7 +259,7 @@ public sealed class ActiveFeishuFileTransferCoordinatorTests
         BridgeOwnershipMode.Active,
         "file-transfer-test");
 
-    private static NodeStoreSnapshot CreateStore(SessionStoreRecord? session = null) => new(
+    private static BridgeStoreSnapshot CreateStore(SessionStoreRecord? session = null) => new(
         new BindingStoreDocument(),
         new SessionStoreDocument
         {
@@ -298,10 +298,10 @@ public sealed class ActiveFeishuFileTransferCoordinatorTests
         }
     }
 
-    private sealed class RecordingStore(NodeStoreSnapshot current) :
+    private sealed class RecordingStore(BridgeStoreSnapshot current) :
         IBridgeProductionStoreOwner
     {
-        public NodeStoreSnapshot Current { get; private set; } = current;
+        public BridgeStoreSnapshot Current { get; private set; } = current;
 
         public BridgeProductionStoreSnapshot Snapshot => new(
             BridgeProductionStoreState.Open,
@@ -311,7 +311,7 @@ public sealed class ActiveFeishuFileTransferCoordinatorTests
         public ValueTask OpenAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 
-        public ValueTask<NodeStoreSnapshot> ReadAsync(
+        public ValueTask<BridgeStoreSnapshot> ReadAsync(
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -322,7 +322,7 @@ public sealed class ActiveFeishuFileTransferCoordinatorTests
             ValueTask.CompletedTask;
 
         public ValueTask UpdateAsync(
-            Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
+            Func<BridgeStoreSnapshot, BridgeStoreSnapshot> update,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();

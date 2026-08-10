@@ -89,7 +89,7 @@ internal sealed class ActiveManagedRuntimeLifecycle :
             terminals,
             terminalTransport,
             TimeProvider.System,
-            DefaultRequestLifetime)
+            ConfiguredLifetime(options, "RUNTIME_AUTO_LAUNCH_TIMEOUT_MS", DefaultRequestLifetime))
     {
     }
 
@@ -657,6 +657,14 @@ internal sealed class ActiveManagedRuntimeLifecycle :
             throw new InvalidOperationException(
                 "托管终端生产生命周期只能用于 Active Host。");
         }
+    }
+
+    private static TimeSpan ConfiguredLifetime(BridgeHostOptions options, string name, TimeSpan fallback)
+    {
+        var raw = BridgeLocalConfiguration.Read(options, name);
+        return long.TryParse(raw, out var milliseconds) && milliseconds > 0
+            ? TimeSpan.FromMilliseconds(milliseconds)
+            : fallback;
     }
 
     private void ThrowIfDisposedLocked()

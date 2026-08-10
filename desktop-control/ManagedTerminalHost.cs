@@ -72,6 +72,7 @@ internal static class ManagedTerminalHost
         Console.OutputEncoding = new UTF8Encoding(false);
 
         var elevated = IsElevated();
+        var terminalSecret = TerminalProtocolSecurity.GenerateSecret();
         var projectName = new DirectoryInfo(cwd).Name;
         SetConsoleTitle($"{runtime.DisplayName} · {projectName}{(elevated ? " · 管理员" : "")}");
 
@@ -95,16 +96,18 @@ internal static class ManagedTerminalHost
                     cwd,
                     terminalId,
                     bridgeUrl,
-                    controlToken,
+                    terminalSecret,
                     elevated,
                     runtime,
                     toolCommand,
                     toolArguments);
             }
-            RegisterTerminalAsync(
+            controlToken = RegisterTerminalAsync(
                     terminalId,
+                    terminalSecret,
                     cwd,
                     bridgeUrl,
+                    bridgeRoot,
                     controlToken,
                     elevated,
                     runtime.Id,
@@ -117,19 +120,18 @@ internal static class ManagedTerminalHost
                 cwd,
                 terminalId,
                 bridgeUrl,
-                controlToken,
+                terminalSecret,
                 elevated,
                 runtime,
                 toolCommand,
                 toolArguments);
-            if (job is not null)
-            {
-                AssignProcessToJobObject(job, powershell.Handle);
-            }
+            AssignProcessToJob(job, powershell);
             var heartbeatTask = RunRegistrationHeartbeatAsync(
                 terminalId,
+                terminalSecret,
                 cwd,
                 bridgeUrl,
+                bridgeRoot,
                 controlToken,
                 elevated,
                 runtime,
@@ -137,6 +139,7 @@ internal static class ManagedTerminalHost
                 cancellation.Token);
             var pipeTask = RunPipeServerAsync(
                 terminalId,
+                terminalSecret,
                 elevated,
                 runtime,
                 powershell,
@@ -164,6 +167,7 @@ internal static class ManagedTerminalHost
                     UnregisterTerminalAsync(
                             terminalId,
                             bridgeUrl,
+                            bridgeRoot,
                             controlToken,
                             CancellationToken.None)
                         .GetAwaiter()
@@ -182,7 +186,7 @@ internal static class ManagedTerminalHost
         string cwd,
         string terminalId,
         string bridgeUrl,
-        string controlToken,
+        string terminalSecret,
         bool elevated,
         RuntimeProfile runtime,
         string toolCommand,
@@ -193,15 +197,12 @@ internal static class ManagedTerminalHost
             cwd,
             terminalId,
             bridgeUrl,
-            controlToken,
+            terminalSecret,
             elevated,
             runtime,
             toolCommand,
             toolArguments);
-        if (job is not null)
-        {
-            AssignProcessToJobObject(job, powershell.Handle);
-        }
+        AssignProcessToJob(job, powershell);
         powershell.WaitForExit();
         if (powershell.ExitCode != 0)
         {
@@ -230,7 +231,7 @@ internal static class ManagedTerminalHost
         string cwd,
         string terminalId,
         string bridgeUrl,
-        string controlToken,
+        string terminalSecret,
         bool elevated,
         RuntimeProfile runtime,
         string toolCommand,
@@ -266,19 +267,26 @@ internal static class ManagedTerminalHost
         {
             startInfo.Environment["AI_CLI_FEISHU_MANAGED_TERMINAL_ID"] = terminalId;
             startInfo.Environment["AI_CLI_FEISHU_MANAGED_TERMINAL_ELEVATED"] = elevated ? "1" : "0";
+            startInfo.Environment["AI_CLI_FEISHU_MANAGED_TERMINAL_SECRET"] = terminalSecret;
         }
         else
         {
             startInfo.Environment.Remove("AI_CLI_FEISHU_MANAGED_TERMINAL_ID");
             startInfo.Environment.Remove("AI_CLI_FEISHU_MANAGED_TERMINAL_ELEVATED");
+            startInfo.Environment.Remove("AI_CLI_FEISHU_MANAGED_TERMINAL_SECRET");
         }
         startInfo.Environment["AI_CLI_FEISHU_BRIDGE_URL"] = bridgeUrl;
-        startInfo.Environment["AI_CLI_FEISHU_CONTROL_TOKEN"] = controlToken;
+        startInfo.Environment.Remove("AI_CLI_FEISHU_CONTROL_TOKEN");
         startInfo.Environment["AI_CLI_FEISHU_RUNTIME"] = runtime.Id;
         startInfo.Environment["AI_CLI_FEISHU_TOOL_COMMAND"] = toolCommand;
         var toolArgumentsJson = JsonSerializer.Serialize(
             runtime.InjectBridgeArguments
-                ? BuildCodexArguments(terminalId, bridgeUrl, elevated, toolArguments)
+                ? BuildCodexArguments(
+                    terminalId,
+                    terminalSecret,
+                    bridgeUrl,
+                    elevated,
+                    toolArguments)
                 : toolArguments);
         startInfo.Environment["AI_CLI_FEISHU_TOOL_ARGS_JSON"] = toolArgumentsJson;
 
@@ -290,10 +298,12 @@ internal static class ManagedTerminalHost
         return process;
     }
 
-    private static async Task RegisterTerminalAsync(
+    private static async Task<string> RegisterTerminalAsync(
         string terminalId,
+        string terminalSecret,
         string cwd,
         string bridgeUrl,
+        string bridgeRoot,
         string controlToken,
         bool elevated,
         string runtime,
@@ -301,39 +311,74 @@ internal static class ManagedTerminalHost
         CancellationToken cancellationToken)
     {
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
-        using var request = new HttpRequestMessage(
-            HttpMethod.Post,
-            $"{bridgeUrl.TrimEnd('/')}/managed-terminals/register")
+        for (var attempt = 0; attempt < 2; attempt++)
         {
-            Content = JsonContent.Create(new { terminalId, cwd, elevated, runtime, ready }),
-        };
-        request.Headers.Add("X-AI-CLI-Feishu-Control-Token", controlToken);
-        using var response = await client.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+            using var request = new HttpRequestMessage(
+                HttpMethod.Post,
+                $"{bridgeUrl.TrimEnd('/')}/managed-terminals/register")
+            {
+                Content = JsonContent.Create(new
+                {
+                    terminalId,
+                    terminalSecret,
+                    cwd,
+                    elevated,
+                    runtime,
+                    ready,
+                }),
+            };
+            request.Headers.Add("X-AI-CLI-Feishu-Control-Token", controlToken);
+            using var response = await client.SendAsync(request, cancellationToken);
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized && attempt == 0)
+            {
+                var refreshed = ReadControlToken(bridgeRoot);
+                Console.Error.WriteLine(
+                    "[ai-cli-feishu] Bridge 拒绝了托管终端登记/心跳，已重新加载控制令牌并重试。");
+                controlToken = refreshed;
+                continue;
+            }
+            response.EnsureSuccessStatusCode();
+            return controlToken;
+        }
+        throw new InvalidOperationException("托管终端登记失败。");
     }
 
     private static async Task UnregisterTerminalAsync(
         string terminalId,
         string bridgeUrl,
+        string bridgeRoot,
         string controlToken,
         CancellationToken cancellationToken)
     {
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
-        using var request = new HttpRequestMessage(
-            HttpMethod.Post,
-            $"{bridgeUrl.TrimEnd('/')}/managed-terminals/unregister")
+        for (var attempt = 0; attempt < 2; attempt++)
         {
-            Content = JsonContent.Create(new { terminalId }),
-        };
-        request.Headers.Add("X-AI-CLI-Feishu-Control-Token", controlToken);
-        using var response = await client.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+            using var request = new HttpRequestMessage(
+                HttpMethod.Post,
+                $"{bridgeUrl.TrimEnd('/')}/managed-terminals/unregister")
+            {
+                Content = JsonContent.Create(new { terminalId }),
+            };
+            request.Headers.Add("X-AI-CLI-Feishu-Control-Token", controlToken);
+            using var response = await client.SendAsync(request, cancellationToken);
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized && attempt == 0)
+            {
+                controlToken = ReadControlToken(bridgeRoot);
+                Console.Error.WriteLine(
+                    "[ai-cli-feishu] Bridge 拒绝了托管终端注销，已重新加载控制令牌并重试。");
+                continue;
+            }
+            response.EnsureSuccessStatusCode();
+            return;
+        }
     }
 
     private static async Task RunRegistrationHeartbeatAsync(
         string terminalId,
+        string terminalSecret,
         string cwd,
         string bridgeUrl,
+        string bridgeRoot,
         string controlToken,
         bool elevated,
         RuntimeProfile runtime,
@@ -345,10 +390,12 @@ internal static class ManagedTerminalHost
             try
             {
                 await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
-                await RegisterTerminalAsync(
+                controlToken = await RegisterTerminalAsync(
                     terminalId,
+                    terminalSecret,
                     cwd,
                     bridgeUrl,
+                    bridgeRoot,
                     controlToken,
                     elevated,
                     runtime.Id,
@@ -368,6 +415,7 @@ internal static class ManagedTerminalHost
 
     private static IReadOnlyList<string> BuildCodexArguments(
         string terminalId,
+        string terminalSecret,
         string bridgeUrl,
         bool elevated,
         IReadOnlyList<string> codexArguments)
@@ -383,6 +431,8 @@ internal static class ManagedTerminalHost
             "-c",
             ConfigSet("AI_CLI_FEISHU_MANAGED_TERMINAL_ID", terminalId),
             "-c",
+            ConfigSet("AI_CLI_FEISHU_MANAGED_TERMINAL_SECRET", terminalSecret),
+            "-c",
             ConfigSet("AI_CLI_FEISHU_MANAGED_TERMINAL_ELEVATED", elevated ? "1" : "0"),
             "-c",
             ConfigSet("AI_CLI_FEISHU_BRIDGE_URL", bridgeUrl),
@@ -393,40 +443,62 @@ internal static class ManagedTerminalHost
 
     private static async Task RunPipeServerAsync(
         string terminalId,
+        string terminalSecret,
         bool elevated,
         RuntimeProfile runtime,
         Process powershell,
         CancellationToken cancellationToken)
     {
         var pipeName = $"AiCliFeishu.{terminalId}";
+        var commandResults = new TerminalCommandResultCache();
+        var responseJsonOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        };
         while (!cancellationToken.IsCancellationRequested && !powershell.HasExited)
         {
             try
             {
                 await using var pipe = CreatePipeServer(pipeName, elevated);
                 await pipe.WaitForConnectionAsync(cancellationToken);
-                object response;
+                TerminalInputResponse response;
+                var responseCommandId = "";
                 try
                 {
-                    using var reader = new StreamReader(pipe, new UTF8Encoding(false), leaveOpen: true);
-                    var line = await reader.ReadLineAsync(cancellationToken);
+                    var line = await TerminalPipeProtocol.ReadLineAsync(
+                        pipe,
+                        cancellationToken: cancellationToken);
                     var input = TerminalInputParser.Parse(line);
+                    responseCommandId = input.CommandId;
+                    if (!TerminalProtocolSecurity.SecretEquals(
+                            terminalSecret,
+                            input.TerminalSecret))
+                    {
+                        throw new UnauthorizedAccessException(
+                            "托管终端请求密钥不匹配。");
+                    }
                     if (powershell.HasExited)
                     {
                         throw new InvalidOperationException("同步窗口已经关闭。");
                     }
-                    InjectPrompt(input, runtime);
-                    response = new { ok = true, error = (string?)null };
+                    response = commandResults.Execute(
+                        input,
+                        () => InjectPrompt(input, runtime));
                 }
                 catch (Exception error) when (error is not OperationCanceledException)
                 {
-                    response = new { ok = false, error = error.Message };
+                    response = new TerminalInputResponse(
+                        responseCommandId,
+                        false,
+                        error.Message);
                 }
                 await using var writer = new StreamWriter(pipe, new UTF8Encoding(false), leaveOpen: true)
                 {
                     AutoFlush = true,
                 };
-                await writer.WriteLineAsync(JsonSerializer.Serialize(response));
+                await writer.WriteLineAsync(JsonSerializer.Serialize(
+                    response,
+                    responseJsonOptions));
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -596,13 +668,14 @@ internal static class ManagedTerminalHost
         return AttachConsole(AttachParentProcess) || AllocConsole();
     }
 
-    private static SafeFileHandle? CreateKillOnCloseJob()
+    private static SafeFileHandle CreateKillOnCloseJob()
     {
         var job = CreateJobObject(IntPtr.Zero, null);
         if (job.IsInvalid)
         {
+            var error = Marshal.GetLastWin32Error();
             job.Dispose();
-            return null;
+            throw new Win32Exception(error, "无法创建托管终端进程作业。");
         }
         var information = new JobObjectExtendedLimitInformation
         {
@@ -617,10 +690,28 @@ internal static class ManagedTerminalHost
                 ref information,
                 (uint)Marshal.SizeOf<JobObjectExtendedLimitInformation>()))
         {
+            var error = Marshal.GetLastWin32Error();
             job.Dispose();
-            return null;
+            throw new Win32Exception(error, "无法配置托管终端进程作业。");
         }
         return job;
+    }
+
+    private static void AssignProcessToJob(SafeFileHandle job, Process process)
+    {
+        if (AssignProcessToJobObject(job, process.Handle))
+        {
+            return;
+        }
+        var error = Marshal.GetLastWin32Error();
+        try
+        {
+            process.Kill(entireProcessTree: true);
+        }
+        catch
+        {
+        }
+        throw new Win32Exception(error, "无法把 AI CLI 进程加入托管终端作业。");
     }
 
     private static string? ReadArgument(string[] args, string name)
@@ -636,23 +727,7 @@ internal static class ManagedTerminalHost
     }
 
     private static string ReadControlToken(string bridgeRoot)
-    {
-        var tokenPath = Path.Combine(bridgeRoot, "data", "control-token.json");
-        var value = JsonSerializer.Deserialize<ControlTokenFile>(File.ReadAllText(tokenPath));
-        if (string.IsNullOrWhiteSpace(value?.Token) ||
-            value.Token.Length != 64 ||
-            value.Token.Any(character => !Uri.IsHexDigit(character)))
-        {
-            throw new InvalidOperationException("本机控制令牌缺失或格式无效。");
-        }
-        return value.Token;
-    }
-
-    private sealed class ControlTokenFile
-    {
-        [JsonPropertyName("token")]
-        public string Token { get; set; } = "";
-    }
+        => BridgeControlTokenReader.Read(bridgeRoot);
 
     [StructLayout(LayoutKind.Explicit, CharSet = CharSet.Unicode)]
     private struct InputRecord

@@ -27,20 +27,24 @@ public sealed record ActiveOwnerLeaseSnapshot(
 
 public sealed class ActiveOwnerLeaseObserver
 {
+    private static readonly TimeSpan processStartTolerance = TimeSpan.FromSeconds(5);
     public const string LockDirectoryName = "bridge-active-owner.lock";
     public const string MetadataFileName = "owner.json";
+    public const string OwnershipHandleFileName = "owner.lck";
     public const int SchemaVersion = 1;
 
     private readonly Func<int, bool> processAlive;
+    private readonly Func<int, DateTimeOffset?> processStartedAt;
 
     public ActiveOwnerLeaseObserver(string dataDirectory) :
-        this(dataDirectory, IsProcessAlive)
+        this(dataDirectory, IsProcessAlive, TryGetProcessStartedAt)
     {
     }
 
     public ActiveOwnerLeaseObserver(
         string dataDirectory,
-        Func<int, bool> processAlive)
+        Func<int, bool> processAlive,
+        Func<int, DateTimeOffset?>? processStartedAt = null)
     {
         if (string.IsNullOrWhiteSpace(dataDirectory))
         {
@@ -54,12 +58,16 @@ public sealed class ActiveOwnerLeaseObserver
             fullDataDirectory,
             LockDirectoryName);
         MetadataPath = Path.Combine(LockDirectoryPath, MetadataFileName);
+        OwnershipHandlePath = Path.Combine(LockDirectoryPath, OwnershipHandleFileName);
         this.processAlive = processAlive;
+        this.processStartedAt = processStartedAt ?? (_ => null);
     }
 
     public string LockDirectoryPath { get; }
 
     public string MetadataPath { get; }
+
+    public string OwnershipHandlePath { get; }
 
     public async ValueTask<ActiveOwnerLeaseSnapshot> InspectAsync(
         CancellationToken cancellationToken = default)
@@ -117,15 +125,28 @@ public sealed class ActiveOwnerLeaseObserver
         {
             return new(ActiveOwnerLeaseState.Invalid);
         }
-        return processAlive(record!.ProcessId)
-            ? new(ActiveOwnerLeaseState.Live, record)
-            : new(ActiveOwnerLeaseState.Stale, record);
+        var handleHeld = IsOwnershipHandleHeld();
+        if (handleHeld is not null)
+        {
+            return handleHeld.Value
+                ? new(ActiveOwnerLeaseState.Live, record)
+                : new(ActiveOwnerLeaseState.Stale, record);
+        }
+        if (!processAlive(record!.ProcessId))
+        {
+            return new(ActiveOwnerLeaseState.Stale, record);
+        }
+        var startedAt = processStartedAt(record.ProcessId);
+        return startedAt is not null &&
+               startedAt.Value > record.AcquiredAt + processStartTolerance
+            ? new(ActiveOwnerLeaseState.Stale, record)
+            : new(ActiveOwnerLeaseState.Live, record);
     }
 
     public static bool IsValidRecord(ActiveOwnerLeaseRecord? record) =>
         record is not null &&
         record.SchemaVersion == SchemaVersion &&
-        record.HostKind is "node" or "dotnet" &&
+        record.HostKind is "dotnet" &&
         record.OwnershipMode is "active" &&
         record.ProcessId > 0 &&
         IsAsciiToken(record.InstanceName) &&
@@ -181,6 +202,43 @@ public sealed class ActiveOwnerLeaseObserver
         catch (Win32Exception)
         {
             return true;
+        }
+    }
+
+    private bool? IsOwnershipHandleHeld()
+    {
+        if (!File.Exists(OwnershipHandlePath))
+        {
+            return null;
+        }
+        try
+        {
+            using var probe = new FileStream(
+                OwnershipHandlePath,
+                FileMode.Open,
+                FileAccess.Write,
+                FileShare.ReadWrite | FileShare.Delete);
+            return false;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+
+    private static DateTimeOffset? TryGetProcessStartedAt(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return process.HasExited
+                ? null
+                : new DateTimeOffset(process.StartTime.ToUniversalTime(), TimeSpan.Zero);
+        }
+        catch (Exception error) when (
+            error is ArgumentException or InvalidOperationException or Win32Exception)
+        {
+            return null;
         }
     }
 }

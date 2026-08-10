@@ -16,30 +16,17 @@ public sealed class BridgeHostOptionsTests
     }
 
     [TestMethod]
-    public void ActiveOwnershipRequiresDurableCutoverOperation()
-    {
-        var error = Assert.ThrowsException<InvalidOperationException>(() =>
-            BridgeHostOptions.Parse(
-                ["--ownership", "active"],
-                Path.GetTempPath()));
-
-        StringAssert.Contains(error.Message, "operationId");
-    }
-
-    [TestMethod]
-    public void ActiveOwnershipParsesExplicitCutoverOperation()
+    public void ActiveOwnershipUsesTheSingleOwnerLeaseWithoutExtraArguments()
     {
         var options = BridgeHostOptions.Parse(
             [
                 "--ownership", "active",
                 "--instance", "production-dotnet",
-                "--cutover-operation", "operation-1",
             ],
             Path.GetTempPath());
 
         Assert.AreEqual(BridgeOwnershipMode.Active, options.OwnershipMode);
         Assert.AreEqual("production-dotnet", options.InstanceName);
-        Assert.AreEqual("operation-1", options.CutoverOperationId);
     }
 
     [TestMethod]

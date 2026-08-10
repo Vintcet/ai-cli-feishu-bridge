@@ -11,6 +11,7 @@ public sealed class ActiveManagedTerminalDirectoryTests
 {
     private static readonly DateTimeOffset Origin =
         DateTimeOffset.Parse("2026-08-07T08:00:00.000Z");
+    private static readonly string TerminalSecret = new('a', 64);
 
     [TestMethod]
     public async Task RestoresPersistedBindingAfterMatchingHeartbeat()
@@ -33,6 +34,7 @@ public sealed class ActiveManagedTerminalDirectoryTests
             directory.Snapshot);
         directory.Register(new(
             "terminal-restore",
+            TerminalSecret,
             cwd,
             RuntimeNames.Codex,
             Elevated: false,
@@ -42,8 +44,16 @@ public sealed class ActiveManagedTerminalDirectoryTests
         Assert.AreEqual("terminal-restore", target.TerminalId);
         Assert.AreEqual("session-restore", target.SessionExternalId);
         Assert.IsTrue(target.Ready);
+        Assert.AreEqual(TerminalSecret, target.TerminalSecret);
         Assert.IsTrue(target.Generation > 0);
         Assert.IsTrue(directory.IsCurrent(target));
+        Assert.IsTrue(directory.IsAuthenticated("terminal-restore", TerminalSecret));
+        Assert.IsFalse(directory.IsAuthenticated("terminal-restore", new string('b', 64)));
+        var status = directory.GetStatus("terminal-restore");
+        Assert.IsNotNull(status);
+        Assert.IsTrue(status.Online);
+        Assert.IsTrue(status.Ready);
+        Assert.AreEqual("session-restore", status.SessionExternalId);
         Assert.AreEqual(1, store.Reads);
     }
 
@@ -77,12 +87,14 @@ public sealed class ActiveManagedTerminalDirectoryTests
 
         directory.Register(new(
             "terminal-ended",
+            TerminalSecret,
             cwd,
             RuntimeNames.Codex,
             Elevated: false,
             Ready: true));
         directory.Register(new(
             "terminal-placeholder",
+            TerminalSecret,
             cwd,
             RuntimeNames.Codex,
             Elevated: false,
@@ -153,6 +165,7 @@ public sealed class ActiveManagedTerminalDirectoryTests
         await directory.StartAsync(CancellationToken.None);
         var heartbeat = new BridgeManagedTerminalRegistration(
             "terminal-identity",
+            TerminalSecret,
             cwd,
             RuntimeNames.Codex,
             Elevated: true,
@@ -175,6 +188,8 @@ public sealed class ActiveManagedTerminalDirectoryTests
             directory.Register(heartbeat with { Runtime = RuntimeNames.ClaudeCode }));
         Assert.ThrowsException<InvalidOperationException>(() =>
             directory.Register(heartbeat with { Elevated = false }));
+        Assert.ThrowsException<InvalidOperationException>(() =>
+            directory.Register(heartbeat with { TerminalSecret = new string('b', 64) }));
 
         Assert.IsTrue(directory.Unregister(heartbeat.TerminalId));
         clock.Advance(TimeSpan.FromSeconds(1));
@@ -199,6 +214,7 @@ public sealed class ActiveManagedTerminalDirectoryTests
         await directory.StartAsync(CancellationToken.None);
         directory.Register(new(
             "terminal-lifetime",
+            TerminalSecret,
             cwd,
             RuntimeNames.Codex,
             Elevated: false,
@@ -224,6 +240,7 @@ public sealed class ActiveManagedTerminalDirectoryTests
 
         directory.Register(new(
             "terminal-lifetime",
+            TerminalSecret,
             cwd,
             RuntimeNames.Codex,
             Elevated: false,
@@ -424,13 +441,15 @@ public sealed class ActiveManagedTerminalDirectoryTests
         await directory.StartAsync(CancellationToken.None);
 
         Assert.ThrowsException<ArgumentException>(() =>
-            directory.Register(new(null!, cwd, RuntimeNames.Codex, false, true)));
+            directory.Register(new(null!, TerminalSecret, cwd, RuntimeNames.Codex, false, true)));
         Assert.ThrowsException<ArgumentException>(() =>
-            directory.Register(new("short", cwd, RuntimeNames.Codex, false, true)));
+            directory.Register(new("short", TerminalSecret, cwd, RuntimeNames.Codex, false, true)));
         Assert.ThrowsException<ArgumentException>(() =>
-            directory.Register(new("terminal-relative", "relative", RuntimeNames.Codex, false, true)));
+            directory.Register(new("terminal-relative", TerminalSecret, "relative", RuntimeNames.Codex, false, true)));
         Assert.ThrowsException<ArgumentException>(() =>
-            directory.Register(new("terminal-runtime", cwd, "invalid", false, true)));
+            directory.Register(new("terminal-runtime", TerminalSecret, cwd, "invalid", false, true)));
+        Assert.ThrowsException<ArgumentException>(() =>
+            directory.Register(new("terminal-secret", "bad", cwd, RuntimeNames.Codex, false, true)));
         Assert.IsNull(directory.FindBySession(string.Empty));
     }
 
@@ -453,6 +472,7 @@ public sealed class ActiveManagedTerminalDirectoryTests
         string cwd,
         string runtime) => new(
             terminalId,
+            TerminalSecret,
             cwd,
             runtime,
             Elevated: false,
@@ -461,7 +481,7 @@ public sealed class ActiveManagedTerminalDirectoryTests
     private static string ProjectPath(string name) =>
         Path.GetFullPath(Path.Combine(Path.GetTempPath(), "bridge-terminal-tests", name));
 
-    private static NodeStoreSnapshot Store(params SessionStoreRecord[] sessions)
+    private static BridgeStoreSnapshot Store(params SessionStoreRecord[] sessions)
     {
         var document = new SessionStoreDocument();
         for (var index = 0; index < sessions.Length; index++)
@@ -509,7 +529,7 @@ public sealed class ActiveManagedTerminalDirectoryTests
                 StringComparer.Ordinal),
         };
 
-    private sealed class RecordingStoreOwner(NodeStoreSnapshot store)
+    private sealed class RecordingStoreOwner(BridgeStoreSnapshot store)
         : IBridgeProductionStoreOwner
     {
         public bool IsOpen { get; set; } = true;
@@ -522,13 +542,13 @@ public sealed class ActiveManagedTerminalDirectoryTests
         public ValueTask OpenAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 
-        public ValueTask<NodeStoreSnapshot> ReadAsync(
+        public ValueTask<BridgeStoreSnapshot> ReadAsync(
             CancellationToken cancellationToken = default)
         {
             Reads++;
             return IsOpen
                 ? ValueTask.FromResult(store)
-                : ValueTask.FromException<NodeStoreSnapshot>(
+                : ValueTask.FromException<BridgeStoreSnapshot>(
                     new InvalidOperationException("生产 Store 尚未成功打开。"));
         }
 
@@ -536,7 +556,7 @@ public sealed class ActiveManagedTerminalDirectoryTests
             ValueTask.CompletedTask;
 
         public ValueTask UpdateAsync(
-            Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
+            Func<BridgeStoreSnapshot, BridgeStoreSnapshot> update,
             CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 

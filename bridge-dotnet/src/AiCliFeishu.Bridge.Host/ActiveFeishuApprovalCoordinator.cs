@@ -6,14 +6,116 @@ using AiCliFeishu.Bridge.Protocol;
 
 namespace AiCliFeishu.Bridge.Host;
 
-internal sealed class ActiveFeishuApprovalCoordinator(
-    IBridgeActiveApprovalStateOwner stateOwner,
-    IBridgeRuntimeCommandGateway runtimeCommands,
-    FeishuInteractionCoordinator interactions)
+internal sealed record BridgeLocalApprovalResolveResult(
+    bool Ok,
+    bool AlreadyResolved,
+    string Resolution,
+    string Message,
+    string? Error = null);
+
+internal sealed class ActiveFeishuApprovalCoordinator
 {
+    private static readonly TimeSpan LegacyCardPatchDelay =
+        TimeSpan.FromMilliseconds(500);
+    private readonly IBridgeActiveApprovalStateOwner stateOwner;
+    private readonly Func<IBridgeRuntimeCommandGateway> runtimeCommands;
+    private readonly FeishuInteractionCoordinator interactions;
+    private readonly IFeishuCardRenderer renderer;
+
+    internal ActiveFeishuApprovalCoordinator(
+        IBridgeActiveApprovalStateOwner stateOwner,
+        IBridgeRuntimeCommandGateway runtimeCommands,
+        FeishuInteractionCoordinator interactions,
+        IFeishuCardRenderer renderer)
+        : this(stateOwner, () => runtimeCommands, interactions, renderer)
+    {
+        ArgumentNullException.ThrowIfNull(runtimeCommands);
+    }
+
+    public ActiveFeishuApprovalCoordinator(
+        IBridgeActiveApprovalStateOwner stateOwner,
+        Func<IBridgeRuntimeCommandGateway> runtimeCommands,
+        FeishuInteractionCoordinator interactions,
+        IFeishuCardRenderer renderer)
+    {
+        this.stateOwner = stateOwner ?? throw new ArgumentNullException(nameof(stateOwner));
+        this.runtimeCommands = runtimeCommands ??
+            throw new ArgumentNullException(nameof(runtimeCommands));
+        this.interactions = interactions ?? throw new ArgumentNullException(nameof(interactions));
+        this.renderer = renderer ?? throw new ArgumentNullException(nameof(renderer));
+    }
+
+    public async Task<BridgeLocalApprovalResolveResult> HandleLocalAsync(
+        string requestId,
+        string resolution,
+        BridgeStoreSnapshot store,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        cancellationToken.ThrowIfCancellationRequested();
+        requestId = requestId?.Trim() ?? string.Empty;
+        if (requestId.Length is 0 or > 128 ||
+            resolution is not ApprovalResolutions.Allow and not ApprovalResolutions.Deny)
+        {
+            return new(
+                false,
+                false,
+                string.Empty,
+                string.Empty,
+                "审批请求或处理方式不正确。");
+        }
+
+        var current = stateOwner.Snapshot;
+        if (!current.Initialized)
+        {
+            throw new InvalidOperationException("Active Host 业务状态尚未初始化。");
+        }
+        if (!current.Approvals.Requests.TryGetValue(requestId, out var approval) ||
+            approval.Status != ApprovalStatuses.Pending)
+        {
+            return AlreadyResolved(approval);
+        }
+
+        var operationId = Guid.NewGuid().ToString("N");
+        var result = await HandleAsync(
+            new FeishuIntent(
+                $"desktop-approval-{operationId}",
+                FeishuIntentTypes.ApprovalResolve,
+                "desktop-local",
+                "desktop-local",
+                "desktop-local",
+                "desktop",
+                $"desktop-approval-{operationId}",
+                Parameters: new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["requestId"] = requestId,
+                    ["sessionId"] = approval.SessionId,
+                    ["resolution"] = resolution,
+                }),
+            store,
+            cancellationToken);
+        if (string.Equals(result.ToastType, "success", StringComparison.Ordinal))
+        {
+            return new(true, false, resolution, result.ToastContent);
+        }
+
+        var observed = stateOwner.Snapshot.Approvals.Requests
+            .GetValueOrDefault(requestId);
+        return observed is null || observed.Status != ApprovalStatuses.Pending
+            ? AlreadyResolved(observed)
+            : new(
+                false,
+                false,
+                string.Empty,
+                string.Empty,
+                string.IsNullOrWhiteSpace(result.ToastContent)
+                    ? "审批状态没有改变，请刷新后重试。"
+                    : result.ToastContent);
+    }
+
     public async Task<FeishuCallbackResult> HandleAsync(
         FeishuIntent intent,
-        NodeStoreSnapshot store,
+        BridgeStoreSnapshot store,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(intent);
@@ -49,12 +151,37 @@ internal sealed class ActiveFeishuApprovalCoordinator(
 
         if (approval.Status != ApprovalStatuses.Pending)
         {
-            await SynchronizeTerminalAsync(
-                approval,
-                sessionView,
-                approvalView,
+            var terminalCard = TerminalCard(approval, sessionView, approvalView);
+            var legacyCard = IsCardAction(intent) &&
+                terminalCard is not null &&
+                !approval.MessageIds.Contains(intent.MessageId, StringComparer.Ordinal);
+            return await SynchronizeForCallbackAsync(
+                intent,
+                new(
+                    "warning",
+                    "这条审批已经处理或失效。",
+                    legacyCard ? null : terminalCard),
+                async synchronizationCancellationToken =>
+                {
+                    await SynchronizeTerminalAsync(
+                        approval,
+                        sessionView,
+                        approvalView,
+                        synchronizationCancellationToken);
+                    if (legacyCard)
+                    {
+                        await Task.Delay(
+                            LegacyCardPatchDelay,
+                            synchronizationCancellationToken);
+                        await interactions.SynchronizeApprovalMessageAsync(
+                            approval,
+                            sessionView,
+                            approvalView,
+                            intent.MessageId,
+                            synchronizationCancellationToken);
+                    }
+                },
                 cancellationToken);
-            return new("warning", "这条审批已经处理或失效。");
         }
 
         var deferToLocal = string.Equals(
@@ -75,7 +202,7 @@ internal sealed class ActiveFeishuApprovalCoordinator(
             }
             try
             {
-                if (!runtimeCommands.IsReady(
+                if (!runtimeCommands().IsReady(
                         session.Runtime,
                         new RuntimeSession(session.SessionId, session.Cwd)))
                 {
@@ -98,10 +225,14 @@ internal sealed class ActiveFeishuApprovalCoordinator(
                 .GetValueOrDefault(requestId);
             if (observed is not null)
             {
-                await SynchronizeTerminalAsync(
-                    observed,
-                    sessionView,
-                    approvalView,
+                return await SynchronizeForCallbackAsync(
+                    intent,
+                    new("warning", "这条审批已经处理或正在处理中。"),
+                    synchronizationCancellationToken => SynchronizeTerminalAsync(
+                        observed,
+                        sessionView,
+                        approvalView,
+                        synchronizationCancellationToken),
                     cancellationToken);
             }
             return new("warning", "这条审批已经处理或正在处理中。");
@@ -121,27 +252,37 @@ internal sealed class ActiveFeishuApprovalCoordinator(
                         .GetValueOrDefault(requestId);
                     if (observed is not null)
                     {
-                        await SynchronizeTerminalAsync(
-                            observed,
-                            sessionView,
-                            approvalView,
+                        return await SynchronizeForCallbackAsync(
+                            intent,
+                            new("warning", "这条审批已经处理或失效。"),
+                            synchronizationCancellationToken =>
+                                SynchronizeTerminalAsync(
+                                    observed,
+                                    sessionView,
+                                    approvalView,
+                                    synchronizationCancellationToken),
                             cancellationToken);
                     }
                     return new("warning", "这条审批已经处理或失效。");
                 }
-                await interactions.SynchronizeDeferredApprovalAsync(
-                    deferred.Approval,
-                    sessionView,
-                    approvalView,
+                return await SynchronizeForCallbackAsync(
+                    intent,
+                    new(
+                        "success",
+                        "已转回 PC 审批，请在电脑端审批窗口处理。",
+                        renderer.DeferredApproval(sessionView, approvalView)),
+                    synchronizationCancellationToken =>
+                        interactions.SynchronizeDeferredApprovalAsync(
+                            deferred.Approval,
+                            sessionView,
+                            approvalView,
+                            synchronizationCancellationToken),
                     cancellationToken);
-                return new(
-                    "success",
-                    "已转回 PC 审批，请在电脑端审批窗口处理。");
             }
 
             try
             {
-                await runtimeCommands.DispatchAsync(
+                await runtimeCommands().DispatchAsync(
                     Command(intent, claim, resolution!),
                     cancellationToken);
             }
@@ -165,24 +306,37 @@ internal sealed class ActiveFeishuApprovalCoordinator(
                     .GetValueOrDefault(requestId);
                 if (observed is not null)
                 {
-                    await SynchronizeTerminalAsync(
-                        observed,
-                        sessionView,
-                        approvalView,
+                    return await SynchronizeForCallbackAsync(
+                        intent,
+                        new("warning", "这条审批已经处理或失效。"),
+                        synchronizationCancellationToken => SynchronizeTerminalAsync(
+                            observed,
+                            sessionView,
+                            approvalView,
+                            synchronizationCancellationToken),
                         cancellationToken);
                 }
                 return new("warning", "这条审批已经处理或失效。");
             }
-            await interactions.SynchronizeApprovalAsync(
-                resolved.Approval,
-                sessionView,
-                approvalView,
+            return await SynchronizeForCallbackAsync(
+                intent,
+                new(
+                    "success",
+                    resolution == ApprovalResolutions.Allow
+                        ? $"已批准，{RuntimeDisplayName(session.Runtime)} 将继续执行。"
+                        : "已拒绝这次操作。",
+                    renderer.ResolvedApproval(
+                        sessionView,
+                        approvalView,
+                        resolved.Approval.Resolution!,
+                        resolved.Approval.Status)),
+                synchronizationCancellationToken =>
+                    interactions.SynchronizeApprovalAsync(
+                        resolved.Approval,
+                        sessionView,
+                        approvalView,
+                        synchronizationCancellationToken),
                 cancellationToken);
-            return new(
-                "success",
-                resolution == ApprovalResolutions.Allow
-                    ? $"已批准，{RuntimeDisplayName(session.Runtime)} 将继续执行。"
-                    : "已拒绝这次操作。");
         }
         finally
         {
@@ -194,7 +348,7 @@ internal sealed class ActiveFeishuApprovalCoordinator(
 
     public async Task<FeishuCallbackResult?> TryHandleQuotedReplyAsync(
         FeishuIntent intent,
-        NodeStoreSnapshot store,
+        BridgeStoreSnapshot store,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(intent);
@@ -240,6 +394,7 @@ internal sealed class ActiveFeishuApprovalCoordinator(
             },
             store,
             cancellationToken);
+        result = result with { Card = null };
         return action == "desktop" &&
             result.ToastType == "success"
             ? result with
@@ -249,6 +404,19 @@ internal sealed class ActiveFeishuApprovalCoordinator(
             }
             : result;
     }
+
+    private FeishuCardView? TerminalCard(
+        ApprovalState approval,
+        FeishuSessionView session,
+        FeishuApprovalView view) =>
+        approval.Status is ApprovalStatuses.Resolved or ApprovalStatuses.Orphaned &&
+        approval.Resolution is not null
+            ? renderer.ResolvedApproval(
+                session,
+                view,
+                approval.Resolution,
+                approval.Status)
+            : null;
 
     private static RuntimeCommandEnvelope Command(
         FeishuIntent intent,
@@ -290,9 +458,36 @@ internal sealed class ActiveFeishuApprovalCoordinator(
                 cancellationToken)
             : Task.CompletedTask;
 
+    private static async Task<FeishuCallbackResult> SynchronizeForCallbackAsync(
+        FeishuIntent intent,
+        FeishuCallbackResult result,
+        Func<CancellationToken, Task> synchronize,
+        CancellationToken cancellationToken)
+    {
+        if (!IsCardAction(intent))
+        {
+            await synchronize(cancellationToken);
+            return result;
+        }
+
+        var existing = result.AfterAcknowledged;
+        return result with
+        {
+            Card = null,
+            AfterAcknowledged = async acknowledgedCancellationToken =>
+            {
+                if (existing is not null)
+                {
+                    await existing(acknowledgedCancellationToken);
+                }
+                await synchronize(acknowledgedCancellationToken);
+            },
+        };
+    }
+
     private static bool TrySession(
         BridgeBusinessStateSnapshot current,
-        NodeStoreSnapshot store,
+        BridgeStoreSnapshot store,
         string sessionId,
         out SessionState session,
         out SessionStoreRecord stored)
@@ -323,7 +518,7 @@ internal sealed class ActiveFeishuApprovalCoordinator(
 
     private static FeishuApprovalView ApprovalView(
         ApprovalState approval,
-        NodeStoreSnapshot store)
+        BridgeStoreSnapshot store)
     {
         var stored = store.Approvals.Requests.GetValueOrDefault(approval.RequestId);
         return new(
@@ -341,6 +536,9 @@ internal sealed class ActiveFeishuApprovalCoordinator(
         !value.Any(char.IsControl)
             ? value.Trim()
             : null;
+
+    private static bool IsCardAction(FeishuIntent intent) =>
+        string.Equals(intent.ChatType, "card", StringComparison.Ordinal);
 
     private static string Runtime(SessionStoreRecord session) =>
         string.IsNullOrWhiteSpace(session.Runtime)
@@ -396,4 +594,11 @@ internal sealed class ActiveFeishuApprovalCoordinator(
             _ => null,
         };
     }
+
+    private static BridgeLocalApprovalResolveResult AlreadyResolved(
+        ApprovalState? approval) => new(
+            true,
+            true,
+            approval?.Resolution ?? ApprovalResolutions.Local,
+            "这条审批已经处理或失效。");
 }

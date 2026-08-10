@@ -399,7 +399,13 @@ public sealed class ActiveManagedHookResponseSinkTests
         public BridgeManagedTerminalIdentity? FindClaimByTerminal(string terminalId) =>
             throw new NotSupportedException();
 
+        public BridgeManagedTerminalRegistrationStatus? GetStatus(string terminalId) =>
+            throw new NotSupportedException();
+
         public void Release(string sessionExternalId) =>
+            throw new NotSupportedException();
+
+        public bool IsAuthenticated(string terminalId, string terminalSecret) =>
             throw new NotSupportedException();
 
         public bool IsCurrent(ManagedTerminalTarget target) =>

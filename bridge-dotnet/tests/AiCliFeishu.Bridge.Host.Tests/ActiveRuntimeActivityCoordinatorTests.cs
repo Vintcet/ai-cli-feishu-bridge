@@ -325,7 +325,7 @@ public sealed class ActiveRuntimeActivityCoordinatorTests
         BridgeOwnershipMode.Active,
         "activity-integration-test");
 
-    private static NodeStoreSnapshot StoreSnapshot(
+    private static BridgeStoreSnapshot StoreSnapshot(
         bool notifyActivity,
         IReadOnlyList<string> chats,
         string status = SessionStatuses.Waiting)
@@ -484,15 +484,15 @@ public sealed class ActiveRuntimeActivityCoordinatorTests
         }
     }
 
-    private sealed class RecordingStore(NodeStoreSnapshot initial) :
+    private sealed class RecordingStore(BridgeStoreSnapshot initial) :
         IBridgeProductionStoreOwner
     {
         private readonly object sync = new();
-        private NodeStoreSnapshot current = initial;
+        private BridgeStoreSnapshot current = initial;
 
         public int Updates { get; private set; }
 
-        public NodeStoreSnapshot Current
+        public BridgeStoreSnapshot Current
         {
             get
             {
@@ -511,7 +511,7 @@ public sealed class ActiveRuntimeActivityCoordinatorTests
         public ValueTask OpenAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 
-        public ValueTask<NodeStoreSnapshot> ReadAsync(
+        public ValueTask<BridgeStoreSnapshot> ReadAsync(
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -522,7 +522,7 @@ public sealed class ActiveRuntimeActivityCoordinatorTests
             ValueTask.CompletedTask;
 
         public ValueTask UpdateAsync(
-            Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
+            Func<BridgeStoreSnapshot, BridgeStoreSnapshot> update,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();

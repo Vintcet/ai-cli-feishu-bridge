@@ -2,44 +2,18 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
-Current version: `0.19.1`
+Current version: `0.20.0`
 
 AI CLI Feishu Assistant is an unofficial Windows-local bridge that connects Codex CLI, Claude Code, and OpenCode sessions to your own Feishu custom app. Each assistant session can have a private Feishu group, so you can receive completion and error notifications, handle approval or follow-up prompts, and continue the original CLI conversation while away from the computer.
 
 The bridge service, session index, credentials, and settings stay on your computer. This project does not provide a cloud relay and does not bundle Codex CLI, Claude Code, OpenCode, or a Feishu app. You install and sign in to the CLI tools yourself and create your own Feishu custom app.
 
-## What's new in 0.19.1
+## What's new in 0.20.0
 
-- Feishu approval cards now stay in sync with local Codex and Claude Code decisions, and stale cards are marked as handled to prevent duplicate approvals.
-- Added a guided new-session card that lets you choose Codex, Claude Code, or OpenCode from a single Feishu card.
-- Native Feishu commands are handled before session routing, so `/new`, `/status`, and related bot commands still work when multiple sessions are active.
-
-## What's new in 0.19.0
-
-- The project is now AI CLI Feishu Assistant, with the repository and npm package renamed to `ai-cli-feishu-bridge` and all three runtimes presented as first-class integrations.
-- Desktop, tray, Feishu card, log, release archive, and script-facing product text now uses the new name.
-- Windows binaries, projects, named pipes, authentication headers, and environment variables now consistently use `AiCliFeishu*` and `AI_CLI_FEISHU_*`; legacy names are no longer included.
-
-## What's new in 0.18.2
-
-- The desktop Refresh button now waits for a fresh process scan, so externally closed Codex and Claude Code windows leave the active list promptly.
-- Externally resumed sessions enter History after closing; continuing them from History relaunches them as managed sessions with two-way Feishu control.
-- History no longer shows a model column that can become stale across resumes, and same-project Feishu groups receive stable suffixes such as `Codex｜project` and `Codex｜project（2）`.
-
-## What's new in 0.18.1
-
-- Long-running state now has bounded retention for sessions, approvals, message routes, and inbound deduplication records without evicting pending approvals.
-- Codex transcript monitoring backs off inactive sessions and safely handles file replacement, partial UTF-8 content, and the final scan during shutdown.
-- The Windows build baseline now uses Node.js 24, and path assertions accept equivalent long and 8.3 short-path representations.
-
-## What's new in 0.18.0
-
-- All local HTTP control paths now use the persistent control token; anonymous health checks no longer expose pairing or session details, and cross-site or non-JSON writes are rejected.
-- Codex, Claude Code, and OpenCode share one low-risk automatic-approval policy, while high-risk operations still require a Feishu or local decision.
-- Aliases can be set, changed, or cleared directly from History without changing the session ID, Feishu group binding, or resume directory.
-- Temporary 400/408/409/429/5xx, busy-service, and timeout failures share one automatic-retry policy; each error card can stop the remaining attempts, and Codex transcript monitoring covers failures that skip the `Stop` hook.
-- Long-running reliability fixes cover reused process IDs, cross-device approval state, attachment quotas, approval-log rotation, storage recovery, and OpenCode reconnect behavior.
-- The desktop executable manages Node.js directly and performs authenticated graceful shutdown. X collapses to the tray, minimize stays in the taskbar, and tray activation restores the window to the foreground.
+- The production bridge, desktop controller, Codex hooks, and Claude Code hooks now use a single C#/.NET implementation.
+- Release archives no longer contain JavaScript, TypeScript, npm, `dist`, or `node_modules`.
+- The verified approval, follow-up prompt, Feishu card synchronization, and stale-card handling fixes remain included.
+- The desktop app starts the single C# Active Host directly and uses the local control token for status and graceful shutdown.
 
 ## Runtime support and features
 
@@ -74,7 +48,6 @@ Main features:
 
 - Windows 10/11 x64.
 - Git only when cloning the source or contributing; it is not required for a downloaded Release ZIP.
-- Node.js 20 or later.
 - PowerShell 7, available as `pwsh.exe`.
 - .NET 8 Windows Desktop Runtime; building the desktop app from source requires the .NET 8 SDK.
 - At least one of Codex CLI, Claude Code, or OpenCode installed and signed in.
@@ -85,7 +58,7 @@ Main features:
 
 ### Use the Release ZIP
 
-Windows users can download `ai-cli-feishu-bridge-v0.19.1-windows-x64.zip` from [GitHub Releases](https://github.com/Vintcet/ai-cli-feishu-bridge/releases). The archive includes the compiled bridge, production dependencies, and both desktop executables. Extract the complete archive instead of copying only the main executable. Before the first run, copy `.env.example` to `.env`, add your Feishu app settings, then launch `AI CLI飞书助手.exe` from the archive root.
+Windows users can download `ai-cli-feishu-bridge-v0.20.0-windows-x64.zip` from [GitHub Releases](https://github.com/Vintcet/ai-cli-feishu-bridge/releases). The archive includes the desktop app, terminal/hook host, and C# Bridge Host. Extract the complete archive instead of copying only the main executable. Before the first run, copy `.env.example` to `.env`, add your Feishu app settings, then launch `AI CLI飞书助手.exe` from the archive root.
 
 ### Build from source
 
@@ -94,19 +67,17 @@ To build from source instead, run:
 ```powershell
 git clone https://github.com/Vintcet/ai-cli-feishu-bridge.git
 cd .\ai-cli-feishu-bridge
-npm install
 Copy-Item .\.env.example .\.env
-npm run build
-dotnet publish .\desktop-control\AiCliFeishuControl.csproj -c Release -o .\desktop-control\publish
+.\scripts\build-release.ps1
 ```
 
-Edit `.env`, then run the source-built application:
+Edit `.env`, extract the new ZIP under `release`, and run its desktop app. You can also run the source publish output directly:
 
 ```powershell
 .\desktop-control\publish\AiCliFeishuControl.exe
 ```
 
-`AiCliFeishuControl.exe` is the desktop panel produced by a source build. Keep `AiCliFeishuTerminalHost.exe` in the same directory. A packaged build may display the main executable as `AI CLI飞书助手.exe`; it is the same application. Create a desktop shortcut to whichever main executable you actually use.
+`AiCliFeishuControl.exe` is the desktop panel produced by a source build. Keep `AiCliFeishuTerminalHost.exe` and `AiCliFeishuBridgeHost.exe` in the same directory. A packaged build displays the main executable as `AI CLI飞书助手.exe`.
 
 ## Create and configure the Feishu bot
 
@@ -368,9 +339,7 @@ Codex and Claude Code hook scripts connect to `http://127.0.0.1:8765` by default
 
 ## Installation and startup
 
-Windows login startup is not installed by default. For normal use, run the desktop executable or your shortcut and click Connect. The desktop executable starts the current Active Host selected by the durable production-cutover checkpoint and uses an authenticated local endpoint for graceful shutdown, without VBS or bridge lifecycle PowerShell wrappers. For automation without opening the panel, use `AI CLI飞书助手.exe --bridge-start` and `AI CLI飞书助手.exe --bridge-stop`.
-
-To explicitly cut over from the Node production Host to the C# Active Host, first connect the authenticated Node Host in the desktop panel and click “切换到 C#”, or run `AI CLI飞书助手.exe --bridge-cutover-to-dotnet` and confirm the warning dialog. Isolated drills or controlled automation may also pass `--confirm-production-cutover`; this only skips the dialog and does not bypass authenticated identity, startup recovery, Store flush, unique-owner lease, or durable-checkpoint validation. A failed cutover never guesses a fallback target silently.
+Windows login startup is not installed by default. For normal use, run the desktop executable or your shortcut and click Connect. The desktop executable starts only the C# Active Host and uses an authenticated local endpoint for graceful shutdown. For automation without opening the panel, use `AI CLI飞书助手.exe --bridge-start` and `AI CLI飞书助手.exe --bridge-stop`.
 
 The Release ZIP includes optional login-startup scripts. They create a limited, current-user scheduled task and do not elevate the bridge:
 
@@ -379,35 +348,20 @@ pwsh -NoProfile -File .\scripts\install-autostart.ps1
 pwsh -NoProfile -File .\scripts\uninstall-autostart.ps1
 ```
 
-To run or debug only the Node.js bridge service:
-
-The following commands do not provide the desktop panel. For managed windows, History, and automatic recovery, also build and run the desktop app as described in “Get the desktop app and run it for the first time”.
+To run or debug only the C# Bridge Host, without the desktop panel:
 
 ```powershell
 cd <project-directory>\ai-cli-feishu-bridge
-npm install
-npm run build
-npm start
-```
-
-Development mode:
-
-```powershell
-npm run dev
+dotnet run --project .\bridge-dotnet\src\AiCliFeishu.Bridge.Host\AiCliFeishu.Bridge.Host.csproj -- --data-directory .\data --listen 127.0.0.1 --port 8765 --ownership active --instance production-dotnet
 ```
 
 Before submitting changes, run the full local validation:
 
 ```powershell
-npm run lint
-npm run format:check
-npm test
-npm run build
 dotnet test .\desktop-control\tests\AiCliFeishuTerminalHost.Tests.csproj -c Release
-dotnet build .\desktop-control\AiCliFeishuControl.csproj -c Release
+Get-ChildItem .\bridge-dotnet\tests -Filter *.csproj -Recurse | ForEach-Object { dotnet test $_.FullName -c Release }
+.\scripts\build-release.ps1
 ```
-
-`npm run format:check` is a zero-dependency text hygiene check for trailing whitespace and final newlines. The Windows CI workflow runs the same Node.js and .NET validation.
 
 The bridge starts a Feishu WebSocket connection, a hook HTTP server bound only to `127.0.0.1`, and a health endpoint at `http://127.0.0.1:8765/health` by default.
 
@@ -417,11 +371,11 @@ The bridge starts a Feishu WebSocket connection, a hook HTTP server bound only t
 dotnet publish .\desktop-control\AiCliFeishuControl.csproj -c Release -o .\desktop-control\publish
 ```
 
-The output contains `AiCliFeishuControl.exe` and `AiCliFeishuTerminalHost.exe`. Keep both in the same directory. They use the locally installed .NET 8 Windows Desktop Runtime. You may copy or rename the main UI executable to `AI CLI飞书助手.exe` for the documented shortcut name, but do not rename or omit the terminal host.
+The output contains `AiCliFeishuControl.exe`, `AiCliFeishuTerminalHost.exe`, and `AiCliFeishuBridgeHost.exe`. Keep all three in the same directory. They use the locally installed .NET 8 Windows Desktop Runtime. You may copy or rename the main UI executable to `AI CLI飞书助手.exe` for the documented shortcut name.
 
 ## Codex hooks
 
-The user-level Codex hook file is `%USERPROFILE%\.codex\hooks.json`. Connect runs `scripts/install-hooks.ps1`, removes only older entries installed by this bridge, and preserves unrelated hooks.
+The user-level Codex hook file is `%USERPROFILE%\.codex\hooks.json`. Connect runs `scripts/install-hooks.ps1`, updates the relay at `%LOCALAPPDATA%\AiCliFeishu\hooks\AiCliFeishuTerminalHost.exe`, and registers the stable `AiCliFeishuHook.cmd` launcher beside it. The launcher forwards stdin, stdout, and arguments unchanged while normalizing relay startup failures and abnormal exits to exit code `0`, so an unavailable Feishu bridge cannot fail Codex hooks. Global commands reference only the launcher and its `active-install.json`; moving or replacing the extracted bridge updates the locator without changing the hook commands. Older bridge entries are removed while unrelated hooks are preserved.
 
 Installed hook events include `SessionStart`, `SessionEnd`, `PermissionRequest`, `Stop`, `PreToolUse` including `request_user_input`, `PostToolUse`, `PreCompact`, `PostCompact`, and `UserPromptSubmit`.
 
@@ -431,11 +385,11 @@ On the first new Codex window, Codex may ask you to review and trust the hook. V
 
 ## Claude Code hooks
 
-The user-level Claude Code settings file is `%USERPROFILE%\.claude\settings.json`. Connect runs `scripts/install-claude-code-hooks.ps1` and merges matcher-group command hooks while preserving existing user and plugin hooks.
+The user-level Claude Code settings file is `%USERPROFILE%\.claude\settings.json`. Connect runs `scripts/install-claude-code-hooks.ps1` and merges matcher-group command hooks while preserving existing user and plugin hooks. Every Claude event uses the same stable `AiCliFeishuHook.cmd` command under `%LOCALAPPDATA%\AiCliFeishu\hooks`; the launcher invokes the relay, which derives the event from `hook_event_name` on stdin, so the bridge project path is no longer stored in Claude settings.
 
 Installed events include `SessionStart`, `SessionEnd`, `PermissionRequest`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, and `Stop`. `AskUserQuestion` is converted to a Feishu follow-up card, and `Stop` reads the final assistant message from the JSONL transcript referenced by `transcript_path`.
 
-The installer removes only obsolete entries from earlier versions of this bridge and is idempotent. Run `claude doctor` in any safe directory; a healthy configuration should include `No installation issues found.`. Reconnect and open a new Claude Code window after configuration or `dist/hooks` changes.
+The installer replaces only hooks owned by this bridge and is idempotent. On upgrades or directory moves it atomically updates the stable launcher, relay, and `active-install.json`, which contains only the active bridge root, loopback HTTP URL, and schema version, never Feishu credentials or the control token. Run `claude doctor` in any safe directory; a healthy configuration should include `No installation issues found.`. Reconnect and open a new Claude Code window after relay updates.
 
 ## Data and security
 

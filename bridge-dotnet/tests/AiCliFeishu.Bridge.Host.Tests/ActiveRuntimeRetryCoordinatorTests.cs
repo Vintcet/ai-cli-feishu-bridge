@@ -91,6 +91,59 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
     }
 
     [TestMethod]
+    public async Task InputNotificationAndTerminalSynchronizationRunAfterStatePersistence()
+    {
+        var actions = new ConcurrentQueue<string>();
+        var notifier = new RecordingInputNotifier(actions);
+        await using var fixture = await RetryFixture.CreateAsync(
+            actions: actions,
+            inputNotifications: notifier);
+
+        await fixture.Coordinator.HandleAsync(Event(
+            "input-requested",
+            RuntimeEventTypes.InputRequested,
+            "turn-input",
+            new
+            {
+                requestId = "input-1",
+                questions = new[]
+                {
+                    new
+                    {
+                        id = "q1",
+                        prompt = "请选择环境",
+                        multiple = false,
+                        allowsCustom = false,
+                        options = new[] { "测试" },
+                    },
+                },
+                expiresAt = DateTimeOffset.UtcNow.AddMinutes(20).ToString("O"),
+            }));
+        await fixture.Coordinator.HandleAsync(Event(
+            "input-resolved",
+            RuntimeEventTypes.InputResolvedExternally,
+            "turn-input",
+            new { requestId = "input-1" }));
+        await fixture.Coordinator.HandleAsync(Event(
+            "session-ended-input",
+            RuntimeEventTypes.SessionEnded,
+            "turn-input",
+            new { }));
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "state:input.requested",
+                $"input:input-1:{SessionId}",
+                "state:input.resolved_externally",
+                $"input-sync:input-1:{SessionId}",
+                "state:session.ended",
+                $"input-session-sync:{SessionId}",
+            },
+            actions.ToArray());
+    }
+
+    [TestMethod]
     public async Task SessionStartSchedulesGroupOnlyAfterStatePersistence()
     {
         var actions = new ConcurrentQueue<string>();
@@ -128,6 +181,101 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         CollectionAssert.AreEqual(
             new[] { SessionId },
             sessionGroups.NotificationRequests.ToArray());
+    }
+
+    [TestMethod]
+    public async Task UserPromptNotificationHonorsTheStoredSetting()
+    {
+        var disabledStore = StoreSnapshot(
+            ["chat-owner"],
+            autoRetry: false,
+            sessionExtensions: new Dictionary<string, JsonElement>
+            {
+                ["managedByAssistant"] = JsonSerializer.SerializeToElement(true),
+            });
+        disabledStore.Settings.NotifyUserPrompts = false;
+        await using (var disabled = await RetryFixture.CreateAsync(
+            store: new RecordingStoreOwner(disabledStore),
+            sessionGroups: new RecordingSessionGroupCoordinator(
+                chats: ["chat-session-group"])))
+        {
+            await disabled.Coordinator.HandleAsync(Event(
+                "prompt-disabled",
+                RuntimeEventTypes.TurnStarted,
+                "turn-prompt-disabled",
+                new { prompt = "本地输入但不通知" }));
+            Assert.AreEqual(0, disabled.Gateway.Sends.Count);
+        }
+
+        var enabledStore = StoreSnapshot(
+            ["chat-owner"],
+            autoRetry: false,
+            sessionExtensions: new Dictionary<string, JsonElement>
+            {
+                ["managedByAssistant"] = JsonSerializer.SerializeToElement(true),
+            });
+        enabledStore.Settings.NotifyUserPrompts = true;
+        var sessionGroups = new RecordingSessionGroupCoordinator(
+            chats: ["chat-session-group"]);
+        await using var enabled = await RetryFixture.CreateAsync(
+            store: new RecordingStoreOwner(enabledStore),
+            sessionGroups: sessionGroups);
+
+        await enabled.Coordinator.HandleAsync(Event(
+            "prompt-enabled",
+            RuntimeEventTypes.TurnStarted,
+            "turn-prompt-enabled",
+            new { prompt = "本地输入并通知" }));
+
+        Assert.AreEqual("chat-session-group", enabled.Gateway.Sends.Single().ChatId);
+        StringAssert.Contains(
+            CardJson(enabled.Gateway.Sends.Single().Card),
+            "本地输入并通知");
+        CollectionAssert.AreEqual(
+            new[] { SessionId },
+            sessionGroups.NotificationRequests.ToArray());
+    }
+
+    [TestMethod]
+    public async Task FeishuPromptIsConsumedOnceWithoutMirroringBack()
+    {
+        const string prompt = "从飞书继续处理";
+        var store = StoreSnapshot(
+            ["chat-owner"],
+            autoRetry: false,
+            sessionExtensions: new Dictionary<string, JsonElement>
+            {
+                ["managedByAssistant"] = JsonSerializer.SerializeToElement(true),
+            });
+        store.Settings.NotifyUserPrompts = true;
+        var remotePrompts = new BridgeRemotePromptLedger();
+        remotePrompts.Remember(
+            SessionId,
+            prompt,
+            BridgeRemotePromptKind.Manual);
+        var sessionGroups = new RecordingSessionGroupCoordinator(
+            chats: ["chat-session-group"]);
+        await using var fixture = await RetryFixture.CreateAsync(
+            store: new RecordingStoreOwner(store),
+            sessionGroups: sessionGroups,
+            remotePrompts: remotePrompts);
+
+        await fixture.Coordinator.HandleAsync(Event(
+            "remote-prompt",
+            RuntimeEventTypes.TurnStarted,
+            "turn-remote-prompt",
+            new { prompt }));
+
+        Assert.AreEqual(0, fixture.Gateway.Sends.Count);
+        Assert.AreEqual(0, sessionGroups.NotificationRequests.Count);
+
+        await fixture.Coordinator.HandleAsync(Event(
+            "local-same-prompt",
+            RuntimeEventTypes.TurnStarted,
+            "turn-local-same-prompt",
+            new { prompt }));
+
+        Assert.AreEqual(1, fixture.Gateway.Sends.Count);
     }
 
     [TestMethod]
@@ -169,6 +317,248 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             "turn-1",
             new { }));
         Assert.IsFalse(fixture.Coordinator.HasActiveRetry(SessionId));
+    }
+
+    [TestMethod]
+    public async Task AutomaticRetryPromptDoesNotResetAttemptLimit()
+    {
+        var snapshot = StoreSnapshot(["chat-1"], autoRetry: true);
+        snapshot.Settings.RetryMaxAttempts = 2;
+        var remotePrompts = new BridgeRemotePromptLedger();
+        await using var fixture = await RetryFixture.CreateAsync(
+            store: new RecordingStoreOwner(snapshot),
+            retryDelay: TimeSpan.FromMilliseconds(5),
+            remotePrompts: remotePrompts);
+
+        await fixture.Coordinator.HandleAsync(Failure("turn-retry-1", "HTTP 429"));
+        await WaitUntilAsync(
+            () => fixture.RuntimeCommands.Commands.Count == 1,
+            TimeSpan.FromSeconds(2));
+        var retryPrompt = fixture.RuntimeCommands.Commands[0]
+            .Payload.GetProperty("prompt").GetString()!;
+        await fixture.Coordinator.HandleAsync(Event(
+            "retry-prompt-1",
+            RuntimeEventTypes.TurnStarted,
+            "turn-retry-prompt-1",
+            new { prompt = retryPrompt }));
+
+        await fixture.Coordinator.HandleAsync(Failure("turn-retry-2", "HTTP 429"));
+        await WaitUntilAsync(
+            () => fixture.RuntimeCommands.Commands.Count == 2,
+            TimeSpan.FromSeconds(2));
+        StringAssert.EndsWith(
+            fixture.RuntimeCommands.Commands[1].CommandId,
+            "-2");
+        await fixture.Coordinator.HandleAsync(Event(
+            "retry-prompt-2",
+            RuntimeEventTypes.TurnStarted,
+            "turn-retry-prompt-2",
+            new { prompt = retryPrompt }));
+
+        await fixture.Coordinator.HandleAsync(Failure("turn-retry-3", "HTTP 429"));
+        await Task.Delay(80);
+
+        Assert.AreEqual(2, fixture.RuntimeCommands.Commands.Count);
+    }
+
+    [TestMethod]
+    public async Task ManualPromptMatchingRetryTextStillCancelsRunningRetry()
+    {
+        var remotePrompts = new BridgeRemotePromptLedger();
+        await using var fixture = await RetryFixture.CreateAsync(
+            retryDelay: TimeSpan.FromMilliseconds(5),
+            remotePrompts: remotePrompts);
+        await fixture.Coordinator.HandleAsync(Failure("turn-before-manual", "HTTP 503"));
+        await WaitUntilAsync(
+            () => fixture.RuntimeCommands.Commands.Count == 1,
+            TimeSpan.FromSeconds(2));
+        Assert.IsTrue(fixture.Coordinator.HasActiveRetry(SessionId));
+
+        var retryPrompt = fixture.RuntimeCommands.Commands.Single()
+            .Payload.GetProperty("prompt").GetString()!;
+        Assert.AreEqual(
+            BridgeRemotePromptKind.AutomaticRetry,
+            remotePrompts.TryConsume(SessionId, retryPrompt));
+        remotePrompts.Remember(
+            SessionId,
+            retryPrompt,
+            BridgeRemotePromptKind.Manual);
+        await fixture.Coordinator.HandleAsync(Event(
+            "remote-manual-prompt",
+            RuntimeEventTypes.TurnStarted,
+            "turn-remote-manual",
+            new { prompt = retryPrompt }));
+
+        Assert.IsFalse(fixture.Coordinator.HasActiveRetry(SessionId));
+        Assert.AreEqual(1, fixture.RuntimeCommands.Commands.Count);
+    }
+
+    [TestMethod]
+    public async Task StartupRestoresDispatchedAutomaticPromptWithoutResettingAttempts()
+    {
+        var snapshot = StoreSnapshot(["chat-1"], autoRetry: true);
+        snapshot.Settings.RetryMaxAttempts = 2;
+        var store = new RecordingStoreOwner(snapshot);
+        string retryPrompt;
+        await using (var first = await RetryFixture.CreateAsync(
+                         store: store,
+                         retryDelay: TimeSpan.FromMilliseconds(5),
+                         remotePrompts: new BridgeRemotePromptLedger()))
+        {
+            await first.Coordinator.HandleAsync(Failure("turn-before-restart", "HTTP 503"));
+            await WaitUntilAsync(
+                () =>
+                {
+                    var session = store.Current.Sessions.Sessions[SessionId];
+                    return first.RuntimeCommands.Commands.Count == 1 &&
+                        session.ExtensionData?.TryGetValue(
+                            "runtimeRetryState",
+                            out var retryState) == true &&
+                        retryState.TryGetProperty("Phase", out var phase) &&
+                        phase.GetString() == "dispatched";
+                },
+                TimeSpan.FromSeconds(2));
+            retryPrompt = first.RuntimeCommands.Commands.Single()
+                .Payload.GetProperty("prompt").GetString()!;
+        }
+
+        await using var recovered = await RetryFixture.CreateAsync(
+            store: store,
+            retryDelay: TimeSpan.FromMilliseconds(5),
+            remotePrompts: new BridgeRemotePromptLedger());
+        await recovered.Coordinator.HandleAsync(Event(
+            "restored-retry-prompt",
+            RuntimeEventTypes.TurnStarted,
+            "turn-restored-retry-prompt",
+            new { prompt = retryPrompt }));
+        await recovered.Coordinator.HandleAsync(Failure("turn-after-restart", "HTTP 503"));
+        await WaitUntilAsync(
+            () => recovered.RuntimeCommands.Commands.Count == 1,
+            TimeSpan.FromSeconds(2));
+
+        StringAssert.EndsWith(
+            recovered.RuntimeCommands.Commands.Single().CommandId,
+            "-2");
+    }
+
+    [TestMethod]
+    public async Task StartupRestoresSentNotificationScheduledRetryAndDueTime()
+    {
+        var store = new RecordingStoreOwner(StoreSnapshot(["chat-1"], autoRetry: true));
+        DateTimeOffset dueAt;
+        await using (var first = await RetryFixture.CreateAsync(
+                         store: store,
+                         retryDelay: TimeSpan.FromMilliseconds(750)))
+        {
+            await first.Coordinator.HandleAsync(Failure("turn-persisted", "HTTP 503"));
+            Assert.AreEqual("sent", ExtensionString(
+                store.Current.Sessions.Sessions[SessionId],
+                "lastNotificationStatus"));
+            var retryState = store.Current.Sessions.Sessions[SessionId]
+                .ExtensionData!["runtimeRetryState"];
+            dueAt = retryState.GetProperty("DueAt").GetDateTimeOffset();
+        }
+
+        await using var recovered = await RetryFixture.CreateAsync(
+            store: store,
+            retryDelay: TimeSpan.FromMilliseconds(1));
+        await WaitUntilAsync(
+            () => recovered.RuntimeCommands.Commands.Count == 1,
+            TimeSpan.FromSeconds(3));
+
+        Assert.IsTrue(DateTimeOffset.UtcNow >= dueAt);
+        StringAssert.EndsWith(
+            recovered.RuntimeCommands.Commands.Single().CommandId,
+            "-1");
+        Assert.AreEqual("sent", ExtensionString(
+            store.Current.Sessions.Sessions[SessionId],
+            "lastNotificationStatus"));
+    }
+
+    [TestMethod]
+    public async Task StartupRestoresTranscriptWatchForExistingCodexSession()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            $"retry-transcript-recovery-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var transcriptPath = Path.Combine(directory, "rollout.jsonl");
+        await File.WriteAllTextAsync(
+            transcriptPath,
+            "{\"type\":\"task_complete\",\"turn_id\":\"old\",\"error\":\"old error\"}\n");
+        var store = new RecordingStoreOwner(StoreSnapshot(
+            ["chat-1"],
+            autoRetry: true,
+            sessionExtensions: new Dictionary<string, JsonElement>
+            {
+                ["transcriptPath"] = JsonSerializer.SerializeToElement(transcriptPath),
+            }));
+
+        try
+        {
+            await using var fixture = await RetryFixture.CreateAsync(
+                store: store,
+                retryDelay: TimeSpan.FromMilliseconds(100),
+                enableTranscriptMonitor: true);
+
+            Assert.AreEqual(
+                "watches=1",
+                fixture.TranscriptMonitor!.ComponentHealth.Detail);
+            await File.AppendAllTextAsync(
+                transcriptPath,
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-after-restart\",\"error\":{\"message\":\"HTTP 503\",\"codex_error_info\":\"internal_server_error\"}}}\n");
+
+            await fixture.TranscriptMonitor.CheckNowAsync();
+
+            Assert.IsTrue(fixture.Coordinator.HasActiveRetry(SessionId));
+            Assert.AreEqual("turn-after-restart", ExtensionString(
+                fixture.Store.Current.Sessions.Sessions[SessionId],
+                "lastNotificationTurnId"));
+            var command = await fixture.RuntimeCommands.Dispatched.Task.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            Assert.AreEqual(RuntimeCommandTypes.PromptSend, command.CommandType);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public async Task TranscriptErrorCodeIsForwardedToRetryClassifier()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            $"retry-transcript-code-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var transcriptPath = Path.Combine(directory, "rollout.jsonl");
+        await File.WriteAllTextAsync(transcriptPath, "");
+
+        try
+        {
+            await using var fixture = await RetryFixture.CreateAsync(
+                retryDelay: TimeSpan.FromMilliseconds(100),
+                enableTranscriptMonitor: true);
+            await fixture.Coordinator.HandleAsync(Event(
+                "session-started-for-transcript",
+                RuntimeEventTypes.SessionStarted,
+                "turn-session-started",
+                new { transcriptPath }));
+            await File.AppendAllTextAsync(
+                transcriptPath,
+                "{\"type\":\"task_complete\",\"turn_id\":\"turn-code-only\",\"error\":{\"message\":\"opaque failure\",\"codex_error_info\":\"internal_server_error\"}}\n");
+
+            await fixture.TranscriptMonitor!.CheckNowAsync();
+
+            Assert.IsTrue(fixture.Coordinator.HasActiveRetry(SessionId));
+            var command = await fixture.RuntimeCommands.Dispatched.Task.WaitAsync(
+                TimeSpan.FromSeconds(2));
+            Assert.AreEqual(RuntimeCommandTypes.PromptSend, command.CommandType);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     [TestMethod]
@@ -766,7 +1156,7 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             Payload = JsonSerializer.SerializeToElement(payload),
         };
 
-    private static NodeStoreSnapshot StoreSnapshot(
+    private static BridgeStoreSnapshot StoreSnapshot(
         IReadOnlyList<string> chats,
         bool autoRetry,
         string runtime = RuntimeNames.Codex,
@@ -829,11 +1219,11 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             new ControlTokenStoreDocument());
     }
 
-    private static NodeStoreSnapshot WithPendingNotification(
-        NodeStoreSnapshot store,
+    private static BridgeStoreSnapshot WithPendingNotification(
+        BridgeStoreSnapshot store,
         string turnId,
         string kind,
-        string message) => NodeStoreBusinessStateMerger.PatchSessionExtensions(
+        string message) => BridgeStoreBusinessStateMerger.PatchSessionExtensions(
         store,
         SessionId,
         new Dictionary<string, JsonElement?>
@@ -916,7 +1306,9 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             RecordingFeishuGateway gateway,
             ConcurrentQueue<string> actions,
             RecordingStateSink state,
-            RecordingFileTransferCoordinator fileTransfers)
+            RecordingFileTransferCoordinator fileTransfers,
+            CodexTranscriptMonitor? transcriptMonitor,
+            string? transcriptDataDirectory)
         {
             Coordinator = coordinator;
             Store = store;
@@ -925,6 +1317,8 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             Actions = actions;
             State = state;
             FileTransfers = fileTransfers;
+            TranscriptMonitor = transcriptMonitor;
+            TranscriptDataDirectory = transcriptDataDirectory;
         }
 
         public ActiveRuntimeRetryCoordinator Coordinator { get; }
@@ -934,6 +1328,8 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         public ConcurrentQueue<string> Actions { get; }
         public RecordingStateSink State { get; }
         public RecordingFileTransferCoordinator FileTransfers { get; }
+        public CodexTranscriptMonitor? TranscriptMonitor { get; }
+        private string? TranscriptDataDirectory { get; }
 
         public static async Task<RetryFixture> CreateAsync(
             RecordingStoreOwner? store = null,
@@ -946,7 +1342,10 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             Exception? stateError = null,
             IBridgeActiveSessionGroupCoordinator? sessionGroups = null,
             ConcurrentQueue<string>? actions = null,
-            IBridgeActiveApprovalNotifier? approvalNotifications = null)
+            IBridgeActiveApprovalNotifier? approvalNotifications = null,
+            IBridgeActiveInputNotifier? inputNotifications = null,
+            BridgeRemotePromptLedger? remotePrompts = null,
+            bool enableTranscriptMonitor = false)
         {
             actions ??= new ConcurrentQueue<string>();
             store ??= new RecordingStoreOwner(StoreSnapshot(
@@ -961,12 +1360,24 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
                 Ready = ready,
             };
             var fileTransfers = new RecordingFileTransferCoordinator();
+            var transcriptDataDirectory = enableTranscriptMonitor
+                ? Path.Combine(
+                    Path.GetTempPath(),
+                    $"retry-fixture-{Guid.NewGuid():N}")
+                : null;
+            if (transcriptDataDirectory is not null)
+            {
+                Directory.CreateDirectory(transcriptDataDirectory);
+            }
             var options = new BridgeHostOptions(
-                Path.GetTempPath(),
+                transcriptDataDirectory ?? Path.GetTempPath(),
                 IPAddress.Loopback,
                 0,
                 BridgeOwnershipMode.Active,
                 "active-runtime-retry-test");
+            var transcriptMonitor = enableTranscriptMonitor
+                ? new CodexTranscriptMonitor(options)
+                : null;
             var coordinator = new ActiveRuntimeRetryCoordinator(
                 options,
                 state,
@@ -978,7 +1389,14 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
                 jitterSelector: _ => 0,
                 fileTransfers: fileTransfers,
                 sessionGroups: sessionGroups,
-                approvalNotifications: approvalNotifications);
+                approvalNotifications: approvalNotifications,
+                inputNotifications: inputNotifications,
+                remotePrompts: remotePrompts,
+                transcriptMonitor: transcriptMonitor);
+            if (transcriptMonitor is not null)
+            {
+                await transcriptMonitor.StartAsync(CancellationToken.None);
+            }
             await coordinator.StartAsync(CancellationToken.None);
             return new(
                 coordinator,
@@ -987,13 +1405,24 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
                 gateway,
                 actions,
                 state,
-                fileTransfers);
+                fileTransfers,
+                transcriptMonitor,
+                transcriptDataDirectory);
         }
 
         public async ValueTask DisposeAsync()
         {
             await Coordinator.StopAsync(CancellationToken.None);
+            if (TranscriptMonitor is not null)
+            {
+                await TranscriptMonitor.StopAsync(CancellationToken.None);
+            }
             Coordinator.Dispose();
+            if (TranscriptDataDirectory is not null &&
+                Directory.Exists(TranscriptDataDirectory))
+            {
+                Directory.Delete(TranscriptDataDirectory, recursive: true);
+            }
         }
     }
 
@@ -1069,6 +1498,39 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         }
     }
 
+    private sealed class RecordingInputNotifier(ConcurrentQueue<string> actions) :
+        IBridgeActiveInputNotifier
+    {
+        public Task NotifyPendingInputAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            actions.Enqueue($"input:{requestId}:{sessionId}");
+            return Task.CompletedTask;
+        }
+
+        public Task SynchronizeInputAsync(
+            string requestId,
+            string sessionId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            actions.Enqueue($"input-sync:{requestId}:{sessionId}");
+            return Task.CompletedTask;
+        }
+
+        public Task SynchronizeInputSessionAsync(
+            string sessionId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            actions.Enqueue($"input-session-sync:{sessionId}");
+            return Task.CompletedTask;
+        }
+    }
+
     private sealed class RecordingSessionGroupCoordinator :
         IBridgeActiveSessionGroupCoordinator
     {
@@ -1112,15 +1574,15 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             actions?.Enqueue($"group:{sessionId}");
     }
 
-    private sealed class RecordingStoreOwner(NodeStoreSnapshot current) :
+    private sealed class RecordingStoreOwner(BridgeStoreSnapshot current) :
         IBridgeProductionStoreOwner
     {
         private readonly object sync = new();
-        private NodeStoreSnapshot current = current;
+        private BridgeStoreSnapshot current = current;
 
         public int Updates { get; private set; }
 
-        public NodeStoreSnapshot Current
+        public BridgeStoreSnapshot Current
         {
             get
             {
@@ -1139,7 +1601,7 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         public ValueTask OpenAsync(CancellationToken cancellationToken = default) =>
             ValueTask.CompletedTask;
 
-        public ValueTask<NodeStoreSnapshot> ReadAsync(
+        public ValueTask<BridgeStoreSnapshot> ReadAsync(
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -1150,7 +1612,7 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             ValueTask.CompletedTask;
 
         public ValueTask UpdateAsync(
-            Func<NodeStoreSnapshot, NodeStoreSnapshot> update,
+            Func<BridgeStoreSnapshot, BridgeStoreSnapshot> update,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();

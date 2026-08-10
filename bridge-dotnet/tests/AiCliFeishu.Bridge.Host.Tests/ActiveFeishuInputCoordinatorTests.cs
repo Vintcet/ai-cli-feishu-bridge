@@ -21,6 +21,16 @@ public sealed class ActiveFeishuInputCoordinatorTests
         var first = await fixture.Coordinator.HandleAsync(
             Intent(FeishuIntentTypes.InputAnswer, "q1", "safe", "card-q1"),
             fixture.Store);
+
+        Assert.AreEqual("success", first.ToastType);
+        Assert.IsNull(first.Card);
+        Assert.IsNotNull(first.AfterAcknowledged);
+        Assert.AreEqual(0, fixture.Gateway.Patches.Count);
+        await first.AfterAcknowledged(CancellationToken.None);
+        Assert.IsTrue(fixture.Gateway.Patches.Any(item =>
+            item.MessageId == "card-q1" &&
+            CardText(item.Card).Contains("已记录回答", StringComparison.Ordinal)));
+
         var toggled = await fixture.Coordinator.HandleAsync(
             Intent(
                 FeishuIntentTypes.InputToggle,
@@ -29,6 +39,15 @@ public sealed class ActiveFeishuInputCoordinatorTests
                 "card-q2",
                 selectionKey: "chat-1"),
             fixture.Store);
+
+        Assert.AreEqual("success", toggled.ToastType);
+        Assert.IsNull(toggled.Card);
+        Assert.IsNotNull(toggled.AfterAcknowledged);
+        await toggled.AfterAcknowledged(CancellationToken.None);
+        Assert.IsTrue(fixture.Gateway.Patches.Any(item =>
+            item.MessageId == "card-q2" &&
+            CardText(item.Card).Contains("✓ code", StringComparison.Ordinal)));
+
         var submitted = await fixture.Coordinator.HandleAsync(
             Intent(
                 FeishuIntentTypes.InputSubmit,
@@ -37,10 +56,15 @@ public sealed class ActiveFeishuInputCoordinatorTests
                 selectionKey: "chat-1"),
             fixture.Store);
 
-        Assert.AreEqual("success", first.ToastType);
-        Assert.AreEqual("success", toggled.ToastType);
-        StringAssert.Contains(CardText(toggled.Card!), "✓ code");
         Assert.AreEqual("success", submitted.ToastType);
+        Assert.IsNull(submitted.Card);
+        Assert.IsNotNull(submitted.AfterAcknowledged);
+        await submitted.AfterAcknowledged(CancellationToken.None);
+        Assert.IsTrue(fixture.Gateway.Patches.Any(item =>
+            CardText(item.Card).Contains("补充信息已提交", StringComparison.Ordinal) &&
+            !item.Card.Content.ToJsonString().Contains(
+                FeishuCardActions.InputAnswer,
+                StringComparison.Ordinal)));
         Assert.AreEqual(1, fixture.Runtime.Commands.Count);
         var command = fixture.Runtime.Commands.Single();
         Assert.AreEqual("feishu-input-input-1", command.CommandId);
@@ -68,10 +92,12 @@ public sealed class ActiveFeishuInputCoordinatorTests
     public async Task DispatchFailureResetsAnswersAndKeepsMultiSelectionForRetry()
     {
         var fixture = Fixture.Create(RuntimeNames.ClaudeCode);
-        await fixture.Coordinator.HandleAsync(
+        var first = await fixture.Coordinator.HandleAsync(
             Intent(FeishuIntentTypes.InputAnswer, "q1", "safe", "card-q1"),
             fixture.Store);
-        await fixture.Coordinator.HandleAsync(
+        Assert.IsNotNull(first.AfterAcknowledged);
+        await first.AfterAcknowledged(CancellationToken.None);
+        var toggled = await fixture.Coordinator.HandleAsync(
             Intent(
                 FeishuIntentTypes.InputToggle,
                 "q2",
@@ -79,6 +105,8 @@ public sealed class ActiveFeishuInputCoordinatorTests
                 "card-q2",
                 selectionKey: "chat-1"),
             fixture.Store);
+        Assert.IsNotNull(toggled.AfterAcknowledged);
+        await toggled.AfterAcknowledged(CancellationToken.None);
         fixture.Runtime.Error = new InvalidOperationException("synthetic failure");
 
         var failed = await fixture.Coordinator.HandleAsync(
@@ -90,6 +118,9 @@ public sealed class ActiveFeishuInputCoordinatorTests
             fixture.Store);
 
         Assert.AreEqual("warning", failed.ToastType);
+        Assert.IsNull(failed.Card);
+        Assert.IsNotNull(failed.AfterAcknowledged);
+        await failed.AfterAcknowledged(CancellationToken.None);
         Assert.AreEqual(0, fixture.State.Snapshot.Inputs.Requests["input-1"].Answers.Count);
         Assert.AreEqual(
             InputRequestStatuses.Pending,
@@ -99,7 +130,7 @@ public sealed class ActiveFeishuInputCoordinatorTests
             CardText(item.Card).Contains("✓ docs", StringComparison.Ordinal)));
 
         fixture.Runtime.Error = null;
-        await fixture.Coordinator.HandleAsync(
+        var retriedFirst = await fixture.Coordinator.HandleAsync(
             Intent(
                 FeishuIntentTypes.InputAnswer,
                 "q1",
@@ -107,6 +138,8 @@ public sealed class ActiveFeishuInputCoordinatorTests
                 "card-q1",
                 eventId: "event-retry-q1"),
             fixture.Store);
+        Assert.IsNotNull(retriedFirst.AfterAcknowledged);
+        await retriedFirst.AfterAcknowledged(CancellationToken.None);
         var retried = await fixture.Coordinator.HandleAsync(
             Intent(
                 FeishuIntentTypes.InputSubmit,
@@ -117,6 +150,9 @@ public sealed class ActiveFeishuInputCoordinatorTests
             fixture.Store);
 
         Assert.AreEqual("success", retried.ToastType);
+        Assert.IsNull(retried.Card);
+        Assert.IsNotNull(retried.AfterAcknowledged);
+        await retried.AfterAcknowledged(CancellationToken.None);
         Assert.AreEqual(2, fixture.Runtime.Commands.Count);
         Assert.IsTrue(fixture.Runtime.Commands.All(command =>
             command.CommandId == "feishu-input-input-1"));
@@ -135,6 +171,12 @@ public sealed class ActiveFeishuInputCoordinatorTests
             fixture.Store);
 
         Assert.AreEqual("success", result.ToastType);
+        Assert.IsNull(result.Card);
+        Assert.IsNotNull(result.AfterAcknowledged);
+        Assert.AreEqual(0, fixture.Gateway.Patches.Count);
+        await result.AfterAcknowledged(CancellationToken.None);
+        Assert.IsTrue(fixture.Gateway.Patches.Any(item =>
+            CardText(item.Card).Contains("补充信息已处理", StringComparison.Ordinal)));
         Assert.AreEqual(0, fixture.Runtime.Commands.Count);
         Assert.AreEqual(
             InputRequestStatuses.Local,
@@ -159,6 +201,12 @@ public sealed class ActiveFeishuInputCoordinatorTests
             fixture.Store);
 
         Assert.AreEqual("success", result.ToastType);
+        Assert.IsNull(result.Card);
+        Assert.IsNotNull(result.AfterAcknowledged);
+        Assert.AreEqual(0, fixture.Gateway.Patches.Count);
+        await result.AfterAcknowledged(CancellationToken.None);
+        Assert.IsTrue(fixture.Gateway.Patches.Any(item =>
+            CardText(item.Card).Contains("补充信息已处理", StringComparison.Ordinal)));
         Assert.AreEqual(0, fixture.Runtime.Commands.Count);
         Assert.AreEqual(1, fixture.ManagedHooks.Deferred.Count);
         Assert.AreEqual(
@@ -183,15 +231,18 @@ public sealed class ActiveFeishuInputCoordinatorTests
             return Task.CompletedTask;
         };
 
-        await Assert.ThrowsExceptionAsync<OperationCanceledException>(() =>
-            fixture.Coordinator.HandleAsync(
-                Intent(
-                    FeishuIntentTypes.InputDeferToLocal,
-                    "q1",
-                    messageId: "card-q1"),
-                fixture.Store,
-                cancellation.Token));
+        var result = await fixture.Coordinator.HandleAsync(
+            Intent(
+                FeishuIntentTypes.InputDeferToLocal,
+                "q1",
+                messageId: "card-q1"),
+            fixture.Store,
+            cancellation.Token);
 
+        Assert.AreEqual("success", result.ToastType);
+        Assert.IsNull(result.Card);
+        Assert.IsNotNull(result.AfterAcknowledged);
+        await result.AfterAcknowledged(CancellationToken.None);
         Assert.AreEqual(1, fixture.ManagedHooks.Deferred.Count);
         Assert.AreEqual(0, fixture.Runtime.Commands.Count);
         Assert.AreEqual(
@@ -235,7 +286,7 @@ public sealed class ActiveFeishuInputCoordinatorTests
     }
 
     [TestMethod]
-    public async Task QuotedSingleQuestionReplyUsesNodeCompatibleInputRoute()
+    public async Task QuotedSingleQuestionReplyUsesCompatibleInputRoute()
     {
         var fixture = Fixture.Create(
             RuntimeNames.Codex,
@@ -461,7 +512,7 @@ public sealed class ActiveFeishuInputCoordinatorTests
         RecordingRuntimeCommandGateway Runtime,
         RecordingFeishuGateway Gateway,
         RecordingManagedHookResponseSink ManagedHooks,
-        NodeStoreSnapshot Store)
+        BridgeStoreSnapshot Store)
     {
         public static Fixture Create(
             string runtime,
@@ -496,7 +547,7 @@ public sealed class ActiveFeishuInputCoordinatorTests
         }
     }
 
-    private static NodeStoreSnapshot StoreSnapshot(string runtime)
+    private static BridgeStoreSnapshot StoreSnapshot(string runtime)
     {
         var session = new SessionStoreRecord
         {
@@ -531,7 +582,7 @@ public sealed class ActiveFeishuInputCoordinatorTests
         private BridgeBusinessStateSnapshot snapshot;
 
         public RecordingInputStateOwner(
-            NodeStoreSnapshot store,
+            BridgeStoreSnapshot store,
             IReadOnlyList<InputQuestionState> questions)
         {
             var session = store.Sessions.Sessions["session-1"];

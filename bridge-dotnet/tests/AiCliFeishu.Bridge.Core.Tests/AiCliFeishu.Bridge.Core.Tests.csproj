@@ -21,8 +21,5 @@
     <None Include="..\..\..\protocol\v1\examples\*.json"
           Link="ProtocolExamples\%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\..\..\protocol\migration\v1\state-transitions.jsonl"
-          Link="MigrationExamples\state-transitions.jsonl"
-          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

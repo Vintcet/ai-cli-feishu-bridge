@@ -13,12 +13,12 @@ namespace AiCliFeishu.Bridge.Host;
 /// standard activity events; this coordinator is the one place that decides
 /// when a progress card is created, patched, completed, or retried.
 ///
-/// The event list intentionally stays in memory (as in the Node owner), while
+/// The event list intentionally stays in memory, while
 /// the activity key and delivered message routes are written to the compatible
 /// Store.  That gives a restart a safe way to patch an already-created card
 /// without persisting tool output or other potentially sensitive detail.
 /// </summary>
-internal sealed class ActiveRuntimeActivityCoordinator :
+internal sealed partial class ActiveRuntimeActivityCoordinator :
     IBridgeHostSubsystem,
     IBridgeHostSubsystemHealth,
     IDisposable
@@ -131,449 +131,6 @@ internal sealed class ActiveRuntimeActivityCoordinator :
         }
     }
 
-    public async Task RecordAsync(
-        RuntimeEventEnvelope runtimeEvent,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(runtimeEvent);
-        EnsureStarted();
-        if (!IsActivityEvent(runtimeEvent))
-        {
-            return;
-        }
-
-        NodeStoreSnapshot store;
-        try
-        {
-            store = await storeOwner.ReadAsync(cancellationToken);
-        }
-        catch
-        {
-            // A progress card must never turn a successful Hook/SSE delivery
-            // into a runtime failure when the Store is temporarily unavailable.
-            return;
-        }
-        if (store.Settings.NotifyActivity != true ||
-            !store.Sessions.Sessions.TryGetValue(
-                runtimeEvent.Session!.ExternalId,
-                out var session) ||
-            session.Status == SessionStatuses.Ended)
-        {
-            return;
-        }
-
-        var activity = ToActivityEvent(runtimeEvent);
-        var turnId = OptionalString(runtimeEvent.Payload, "turnId") ??
-            runtimeEvent.CorrelationId;
-        ActivityState? previous = null;
-        ActivityState state;
-        var created = false;
-        lock (sync)
-        {
-            if (states.TryGetValue(session.SessionId, out state!))
-            {
-                if (state.Completed ||
-                    state.TurnId is not null && turnId is not null &&
-                    !string.Equals(state.TurnId, turnId, StringComparison.Ordinal))
-                {
-                    previous = state;
-                    states.Remove(session.SessionId);
-                    state = null!;
-                }
-            }
-            if (state is null)
-            {
-                var marker = ReadActivityMarker(session);
-                var markerMatches = marker is not null &&
-                    (turnId is null || marker.TurnId is null ||
-                     string.Equals(marker.TurnId, turnId, StringComparison.Ordinal));
-                var activityKey = markerMatches
-                    ? marker!.Key
-                    : ActivityKey(session.SessionId, turnId, runtimeEvent.EventId);
-                state = new(
-                    session.SessionId,
-                    activityKey,
-                    turnId,
-                    markerMatches ? marker!.StartedAt : runtimeEvent.OccurredAt,
-                    markerMatches ? marker!.Status == "completed" : false);
-                if (markerMatches)
-                {
-                    RestoreRoutes(state, store, session.SessionId);
-                }
-                states.Add(session.SessionId, state);
-                created = true;
-            }
-            state.TurnId ??= turnId;
-            state.Events.Add(activity);
-            if (state.Events.Count > MaximumEvents)
-            {
-                state.Events.RemoveRange(0, state.Events.Count - MaximumEvents);
-            }
-            state.Revision++;
-            state.Completed = false;
-        }
-
-        if (previous is not null)
-        {
-            await CompleteDetachedAsync(
-                previous,
-                "上一轮已结束",
-                cancellationToken);
-        }
-        if (created)
-        {
-            await PersistMarkerAsync(state, cancellationToken);
-        }
-        ScheduleFlush(state);
-    }
-
-    public async Task FinishAsync(
-        string sessionId,
-        string label,
-        string? turnId = null,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(label);
-        EnsureStarted();
-
-        NodeStoreSnapshot store;
-        try
-        {
-            store = await storeOwner.ReadAsync(cancellationToken);
-        }
-        catch
-        {
-            return;
-        }
-
-        ActivityState? state;
-        lock (sync)
-        {
-            states.TryGetValue(sessionId, out state);
-        }
-        if (state is null &&
-            store.Sessions.Sessions.TryGetValue(sessionId, out var storedSession))
-        {
-            state = Rehydrate(storedSession, store);
-            if (state is not null)
-            {
-                lock (sync)
-                {
-                    if (!states.ContainsKey(sessionId))
-                    {
-                        states[sessionId] = state;
-                    }
-                    else
-                    {
-                        state = states[sessionId];
-                    }
-                }
-            }
-        }
-        if (state is null)
-        {
-            return;
-        }
-
-        lock (sync)
-        {
-            if (state.TurnId is not null && turnId is not null &&
-                !string.Equals(state.TurnId, turnId, StringComparison.Ordinal))
-            {
-                return;
-            }
-            if (!state.Completed)
-            {
-                state.Completed = true;
-                state.Events.Add(new(
-                    clock.GetUtcNow().ToString("O"),
-                    label));
-                if (state.Events.Count > MaximumEvents)
-                {
-                    state.Events.RemoveRange(0, state.Events.Count - MaximumEvents);
-                }
-                state.Revision++;
-            }
-        }
-        await FlushStateAsync(state, force: true, cancellationToken);
-    }
-
-    private async Task CompleteDetachedAsync(
-        ActivityState state,
-        string label,
-        CancellationToken cancellationToken)
-    {
-        lock (sync)
-        {
-            if (!state.Completed)
-            {
-                state.Completed = true;
-                state.Events.Add(new(clock.GetUtcNow().ToString("O"), label));
-                if (state.Events.Count > MaximumEvents)
-                {
-                    state.Events.RemoveRange(0, state.Events.Count - MaximumEvents);
-                }
-                state.Revision++;
-            }
-        }
-        await FlushStateAsync(state, force: true, cancellationToken);
-    }
-
-    private void ScheduleFlush(ActivityState state)
-    {
-        TimeSpan delay;
-        lock (sync)
-        {
-            if (!started || state.Completed && state.SentRevision >= state.Revision ||
-                state.FlushTask is not null)
-            {
-                return;
-            }
-            delay = state.DeliveryFailed
-                ? retryInterval
-                : state.LastSentAt == DateTimeOffset.MinValue
-                    ? TimeSpan.Zero
-                    : Max(TimeSpan.Zero, flushInterval -
-                        (clock.GetUtcNow() - state.LastSentAt));
-            var worker = Task.Run(
-                () => ScheduledFlushAsync(state, delay),
-                CancellationToken.None);
-            state.FlushTask = worker;
-            workers.Add(worker);
-        }
-    }
-
-    private async Task ScheduledFlushAsync(ActivityState state, TimeSpan delay)
-    {
-        try
-        {
-            // Ensure ScheduleFlush has published FlushTask before a zero-delay
-            // first flush can reach the finally block.
-            await Task.Yield();
-            await Task.Delay(delay, clock, lifetime.Token);
-            await FlushStateAsync(state, force: false, lifetime.Token);
-        }
-        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
-        {
-        }
-        catch
-        {
-            lock (sync)
-            {
-                state.DeliveryFailed = true;
-            }
-        }
-        finally
-        {
-            lock (sync)
-            {
-                if (state.FlushTask is { } scheduled)
-                {
-                    workers.Remove(scheduled);
-                    state.FlushTask = null;
-                }
-                if (started &&
-                    states.GetValueOrDefault(state.SessionId) == state &&
-                    (state.DeliveryFailed || state.SentRevision < state.Revision) &&
-                    !(state.Completed && state.SentRevision >= state.Revision))
-                {
-                    ScheduleFlush(state);
-                }
-            }
-        }
-    }
-
-    private async Task<bool> FlushStateAsync(
-        ActivityState state,
-        bool force,
-        CancellationToken cancellationToken)
-    {
-        await state.FlushGate.WaitAsync(cancellationToken);
-        try
-        {
-            long revision;
-            IReadOnlyList<FeishuActivityEventView> events;
-            string startedAt;
-            bool completed;
-            lock (sync)
-            {
-                if (!force &&
-                    !state.DeliveryFailed &&
-                    state.SentRevision >= state.Revision)
-                {
-                    return true;
-                }
-                revision = state.Revision;
-                events = state.Events.ToArray();
-                startedAt = state.StartedAt;
-                completed = state.Completed;
-                state.DeliveryFailed = false;
-            }
-
-            var store = await TryReadStoreAsync(cancellationToken);
-            if (store is null)
-            {
-                MarkDeliveryFailed(state);
-                return false;
-            }
-            if (!store.Sessions.Sessions.TryGetValue(
-                    state.SessionId,
-                    out var session))
-            {
-                lock (sync)
-                {
-                    state.SentRevision = Math.Max(state.SentRevision, revision);
-                    state.DeliveryFailed = false;
-                }
-                RemoveIfCompleted(state);
-                return true;
-            }
-
-            var chats = await NotificationChatsAsync(
-                store,
-                session,
-                cancellationToken);
-            if (chats.Count == 0)
-            {
-                lock (sync)
-                {
-                    state.SentRevision = revision;
-                    state.LastSentAt = clock.GetUtcNow();
-                }
-                await ClearMarkerIfCurrentAsync(state, cancellationToken);
-                RemoveIfCompleted(state);
-                return true;
-            }
-
-            FeishuCardView card;
-            try
-            {
-                card = renderer.RuntimeActivity(
-                    SessionView(session),
-                    events,
-                    startedAt,
-                    completed);
-            }
-            catch
-            {
-                MarkDeliveryFailed(state);
-                return false;
-            }
-
-            var allSucceeded = true;
-            foreach (var chatId in chats)
-            {
-                ActivityDelivery? delivery;
-                lock (sync)
-                {
-                    delivery = state.Deliveries.GetValueOrDefault(chatId);
-                    if (delivery is not null &&
-                        delivery.SentRevision >= revision &&
-                        delivery.RoutePersisted)
-                    {
-                        continue;
-                    }
-                }
-
-                try
-                {
-                    string messageId;
-                    var sentRevision = delivery?.SentRevision ?? -1;
-                    var routePersisted = delivery?.RoutePersisted ?? false;
-                    if (delivery?.MessageId is { Length: > 0 } existing)
-                    {
-                        if (sentRevision < revision)
-                        {
-                            await gateway.PatchCardAsync(existing, card, cancellationToken);
-                            sentRevision = revision;
-                        }
-                        messageId = existing;
-                    }
-                    else
-                    {
-                        messageId = await gateway.SendCardAsync(
-                            chatId,
-                            card,
-                            NotificationKey(state, chatId),
-                            cancellationToken);
-                        sentRevision = revision;
-                    }
-                    if (string.IsNullOrWhiteSpace(messageId))
-                    {
-                        throw new InvalidOperationException("飞书活动卡片未返回消息 ID。");
-                    }
-                    lock (sync)
-                    {
-                        state.Deliveries[chatId] = new(
-                            messageId,
-                            sentRevision,
-                            routePersisted);
-                    }
-                    if (!routePersisted)
-                    {
-                        await PersistRouteAsync(
-                            state,
-                            messageId,
-                            chatId,
-                            cancellationToken);
-                        lock (sync)
-                        {
-                            if (state.Deliveries.TryGetValue(chatId, out var current) &&
-                                string.Equals(
-                                    current.MessageId,
-                                    messageId,
-                                    StringComparison.Ordinal))
-                            {
-                                state.Deliveries[chatId] = current with
-                                {
-                                    RoutePersisted = true,
-                                };
-                            }
-                        }
-                    }
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch
-                {
-                    allSucceeded = false;
-                }
-            }
-
-            lock (sync)
-            {
-                state.LastSentAt = clock.GetUtcNow();
-                state.DeliveryFailed = !allSucceeded;
-                if (allSucceeded)
-                {
-                    state.SentRevision = Math.Max(state.SentRevision, revision);
-                }
-            }
-            if (allSucceeded && completed)
-            {
-                await ClearMarkerIfCurrentAsync(state, cancellationToken);
-                RemoveIfCompleted(state);
-            }
-            return allSucceeded;
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch
-        {
-            MarkDeliveryFailed(state);
-            return false;
-        }
-        finally
-        {
-            state.FlushGate.Release();
-        }
-    }
-
     private async Task PersistRouteAsync(
         ActivityState state,
         string messageId,
@@ -629,7 +186,7 @@ internal sealed class ActiveRuntimeActivityCoordinator :
                     {
                         return store;
                     }
-                    return NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                    return BridgeStoreBusinessStateMerger.PatchSessionExtensions(
                         store,
                         state.SessionId,
                         new Dictionary<string, JsonElement?>
@@ -673,7 +230,7 @@ internal sealed class ActiveRuntimeActivityCoordinator :
                     {
                         return store;
                     }
-                    return NodeStoreBusinessStateMerger.PatchSessionExtensions(
+                    return BridgeStoreBusinessStateMerger.PatchSessionExtensions(
                         store,
                         state.SessionId,
                         new Dictionary<string, JsonElement?>
@@ -694,7 +251,7 @@ internal sealed class ActiveRuntimeActivityCoordinator :
 
     private ActivityState? Rehydrate(
         SessionStoreRecord session,
-        NodeStoreSnapshot store)
+        BridgeStoreSnapshot store)
     {
         var key = ExtensionString(session, "activeActivityKey");
         var startedAt = ExtensionString(session, "activeActivityStartedAt");
@@ -717,7 +274,7 @@ internal sealed class ActiveRuntimeActivityCoordinator :
 
     private static void RestoreRoutes(
         ActivityState state,
-        NodeStoreSnapshot store,
+        BridgeStoreSnapshot store,
         string sessionId)
     {
         foreach (var route in store.Routes.Messages.Values.Where(route =>
@@ -752,7 +309,7 @@ internal sealed class ActiveRuntimeActivityCoordinator :
         }
     }
 
-    private async Task<NodeStoreSnapshot?> TryReadStoreAsync(
+    private async Task<BridgeStoreSnapshot?> TryReadStoreAsync(
         CancellationToken cancellationToken)
     {
         try
@@ -824,7 +381,7 @@ internal sealed class ActiveRuntimeActivityCoordinator :
     }
 
     private async ValueTask<IReadOnlyList<string>> NotificationChatsAsync(
-        NodeStoreSnapshot store,
+        BridgeStoreSnapshot store,
         SessionStoreRecord session,
         CancellationToken cancellationToken)
     {

@@ -93,7 +93,7 @@ public sealed class ActiveManagedTerminalTransportTests
     }
 
     [TestMethod]
-    public async Task RetriesOnlyUnavailableFailuresWithNodeBackoff()
+    public async Task RetriesOnlyUnavailableFailuresWithConfiguredBackoff()
     {
         var directory = new RecordingDirectory();
         var attempts = 0;
@@ -410,7 +410,8 @@ public sealed class ActiveManagedTerminalTransportTests
             terminalId,
             sessionId,
             Ready: true,
-            generation);
+            generation,
+            TerminalSecret: new string('a', 64));
 
     private static Task NoDelay(TimeSpan _, CancellationToken cancellationToken)
     {
@@ -491,7 +492,9 @@ public sealed class ActiveManagedTerminalTransportTests
             string sessionExternalId) => null;
         public BridgeManagedTerminalIdentity? FindClaimByTerminal(
             string terminalId) => null;
+        public BridgeManagedTerminalRegistrationStatus? GetStatus(string terminalId) => null;
         public void Release(string sessionExternalId) { }
+        public bool IsAuthenticated(string terminalId, string terminalSecret) => true;
 
         public bool IsCurrent(ManagedTerminalTarget target)
         {

@@ -14,7 +14,8 @@ internal sealed class ActiveFeishuPromptCoordinator(
     IBridgeRuntimeCommandGateway runtimeCommands,
     IBridgeActiveRuntimeRetryCoordinator runtimeRetries,
     IFeishuGateway gateway,
-    IBridgeActiveFileTransferCoordinator fileTransfers)
+    IBridgeActiveFileTransferCoordinator fileTransfers,
+    BridgeRemotePromptLedger? remotePrompts = null)
 {
     private const int MaximumDirectiveDepth = 3;
     private static readonly Regex QueueDirective = new(
@@ -32,7 +33,7 @@ internal sealed class ActiveFeishuPromptCoordinator(
 
     public async Task<FeishuCallbackResult?> HandleAsync(
         FeishuIntent intent,
-        NodeStoreSnapshot store,
+        BridgeStoreSnapshot store,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(intent);
@@ -237,6 +238,10 @@ internal sealed class ActiveFeishuPromptCoordinator(
             !HasClientProcess(target);
         if (!ready && canResume)
         {
+            remotePrompts?.Remember(
+                target.SessionId,
+                prompt,
+                BridgeRemotePromptKind.Manual);
             var resumed = await TryDispatchAsync(
                 intent,
                 target,
@@ -245,6 +250,10 @@ internal sealed class ActiveFeishuPromptCoordinator(
                 cancellationToken);
             if (!resumed)
             {
+                remotePrompts?.Forget(
+                    target.SessionId,
+                    prompt,
+                    BridgeRemotePromptKind.Manual);
                 return null;
             }
             fileTransfers.ObservePromptDispatch(
@@ -295,6 +304,10 @@ internal sealed class ActiveFeishuPromptCoordinator(
             runtime is not RuntimeNames.OpenCode
                 ? "queue"
                 : "steer";
+        remotePrompts?.Remember(
+            target.SessionId,
+            prompt,
+            BridgeRemotePromptKind.Manual);
         var dispatched = await TryDispatchAsync(
             intent,
             target,
@@ -303,6 +316,10 @@ internal sealed class ActiveFeishuPromptCoordinator(
             cancellationToken);
         if (!dispatched)
         {
+            remotePrompts?.Forget(
+                target.SessionId,
+                prompt,
+                BridgeRemotePromptKind.Manual);
             return null;
         }
 
@@ -445,7 +462,7 @@ internal sealed class ActiveFeishuPromptCoordinator(
 
     private static string? PendingReason(
         SessionStoreRecord target,
-        NodeStoreSnapshot store,
+        BridgeStoreSnapshot store,
         BridgeBusinessStateSnapshot business)
     {
         var status = EffectiveStatus(target, business);
@@ -528,7 +545,7 @@ internal sealed class ActiveFeishuPromptCoordinator(
         string.Equals(route.Kind, "approval", StringComparison.Ordinal) ||
         string.Equals(route.Kind, "input", StringComparison.Ordinal);
 
-    private static SessionStoreRecord? Session(NodeStoreSnapshot store, string sessionId) =>
+    private static SessionStoreRecord? Session(BridgeStoreSnapshot store, string sessionId) =>
         store.Sessions.Sessions.GetValueOrDefault(sessionId);
 
     private static bool IsActive(SessionStoreRecord session) =>

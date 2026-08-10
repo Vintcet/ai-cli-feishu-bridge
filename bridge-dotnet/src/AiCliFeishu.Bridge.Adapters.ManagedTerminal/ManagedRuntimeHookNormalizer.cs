@@ -17,10 +17,10 @@ public sealed class ManagedRuntimeHookNormalizer(
     private readonly object fingerprintLock = new();
     private readonly int capacity = Math.Max(1, deduplicationCapacity);
     private readonly TimeSpan approvalWindow = PositiveLifetime(
-        approvalLifetime,
+        approvalLifetime ?? ConfiguredLifetime("CODEX_APPROVAL_TIMEOUT_MS"),
         nameof(approvalLifetime));
     private readonly TimeSpan inputWindow = PositiveLifetime(
-        inputLifetime,
+        inputLifetime ?? ConfiguredLifetime("CODEX_INPUT_TIMEOUT_MS"),
         nameof(inputLifetime));
 
     public RuntimeEventEnvelope? Normalize(
@@ -122,6 +122,7 @@ public sealed class ManagedRuntimeHookNormalizer(
                 OptionalObject(
                     ("model", OptionalString(hook, "model")),
                     ("source", OptionalString(hook, "source")),
+                    ("transcriptPath", OptionalString(hook, "transcript_path")),
                     ("managedTerminalId", OptionalString(hook, "managed_terminal_id")),
                     ("managedTerminalElevated", OptionalBooleanValue(
                         hook,
@@ -140,6 +141,7 @@ public sealed class ManagedRuntimeHookNormalizer(
                 RuntimeEventTypes.TurnStarted,
                 OptionalObject(
                     ("turnId", turnId),
+                    ("prompt", OptionalString(hook, "prompt")),
                     ("summary", "已提交新任务"),
                     ("activityKind", RuntimeActivityKinds.PromptSubmitted))),
             "PreToolUse" or "PostToolUse" or "PreCompact" or "PostCompact" => Event(
@@ -352,6 +354,11 @@ public sealed class ManagedRuntimeHookNormalizer(
             ? actual
             : throw new ArgumentOutOfRangeException(parameterName);
     }
+
+    private static TimeSpan ConfiguredLifetime(string name) =>
+        long.TryParse(Environment.GetEnvironmentVariable(name), out var milliseconds) && milliseconds > 0
+            ? TimeSpan.FromMilliseconds(milliseconds)
+            : TimeSpan.FromMinutes(20);
 
     private bool TryRemember(string fingerprint)
     {

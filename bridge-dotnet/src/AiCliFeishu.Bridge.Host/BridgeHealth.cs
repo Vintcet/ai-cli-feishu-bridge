@@ -36,6 +36,8 @@ public sealed class BridgeHealthRegistry(
     private readonly object sync = new();
     private readonly Dictionary<string, BridgeComponentHealth> components =
         new(StringComparer.Ordinal);
+    private readonly Dictionary<string, IBridgeHostSubsystemHealth> liveComponents =
+        new(StringComparer.Ordinal);
     private BridgeHostLifecycleState lifecycle = BridgeHostLifecycleState.Starting;
 
     public DateTimeOffset StartedAt { get; } =
@@ -59,27 +61,72 @@ public sealed class BridgeHealthRegistry(
         }
     }
 
-    public BridgeHealthSnapshot Snapshot()
+    public void Track(IBridgeHostSubsystemHealth provider)
     {
+        ArgumentNullException.ThrowIfNull(provider);
+        var component = provider.ComponentHealth;
+        ArgumentException.ThrowIfNullOrWhiteSpace(component.Name);
+        ArgumentException.ThrowIfNullOrWhiteSpace(component.Status);
         lock (sync)
         {
-            var ok = lifecycle is BridgeHostLifecycleState.Ready &&
-                components.Values.All(component =>
-                    component.Status is "ready" or "healthy" or "passive");
-            var version = Assembly.GetEntryAssembly()?.GetName().Version?.ToString() ?? "0.0.0.0";
-            return new(
-                ok,
-                BridgeHostManagementContract.HostKind,
-                BridgeHostManagementContract.ApiVersion,
-                options.InstanceName,
-                lifecycle.ToString().ToLowerInvariant(),
-                version,
-                Environment.ProcessId,
-                StartedAt,
-                options.OwnershipMode.ToString().ToLowerInvariant(),
-                options.OwnershipMode is BridgeOwnershipMode.Active,
-                components.Values.OrderBy(component => component.Name, StringComparer.Ordinal).ToArray());
+            components[component.Name] = component;
+            liveComponents[component.Name] = provider;
         }
+    }
+
+    public BridgeHealthSnapshot Snapshot()
+    {
+        BridgeHostLifecycleState currentLifecycle;
+        Dictionary<string, BridgeComponentHealth> currentComponents;
+        KeyValuePair<string, IBridgeHostSubsystemHealth>[] currentProviders;
+        lock (sync)
+        {
+            currentLifecycle = lifecycle;
+            currentComponents = new Dictionary<string, BridgeComponentHealth>(
+                components,
+                StringComparer.Ordinal);
+            currentProviders = liveComponents.ToArray();
+        }
+
+        foreach (var (name, provider) in currentProviders)
+        {
+            try
+            {
+                var component = provider.ComponentHealth;
+                currentComponents[name] = string.Equals(
+                    component.Name,
+                    name,
+                    StringComparison.Ordinal)
+                    ? component
+                    : component with { Name = name };
+            }
+            catch (Exception error)
+            {
+                currentComponents[name] = new(
+                    name,
+                    "failed",
+                    $"health-read-{error.GetType().Name}");
+            }
+        }
+
+        var ok = currentLifecycle is BridgeHostLifecycleState.Ready &&
+            currentComponents.Values.All(component =>
+                component.Status is "ready" or "healthy" or "passive");
+        var version = Assembly.GetEntryAssembly()?.GetName().Version?.ToString() ?? "0.0.0.0";
+        return new(
+            ok,
+            BridgeHostManagementContract.HostKind,
+            BridgeHostManagementContract.ApiVersion,
+            options.InstanceName,
+            currentLifecycle.ToString().ToLowerInvariant(),
+            version,
+            Environment.ProcessId,
+            StartedAt,
+            options.OwnershipMode.ToString().ToLowerInvariant(),
+            options.OwnershipMode is BridgeOwnershipMode.Active,
+            currentComponents.Values
+                .OrderBy(component => component.Name, StringComparer.Ordinal)
+                .ToArray());
     }
 }
 
@@ -103,7 +150,7 @@ public interface IBridgeBackgroundSubsystem
 }
 
 public sealed class BridgeRuntimeWorker(
-    IEnumerable<IBridgeHostSubsystem> subsystems,
+    Func<IReadOnlyList<IBridgeHostSubsystem>> resolveSubsystems,
     BridgeHealthRegistry health,
     IHostApplicationLifetime applicationLifetime,
     ILogger<BridgeRuntimeWorker> logger) : BackgroundService
@@ -115,14 +162,25 @@ public sealed class BridgeRuntimeWorker(
         var faulted = false;
         try
         {
-            foreach (var subsystem in subsystems)
+            // BackgroundService.StartAsync waits for ExecuteAsync to reach its
+            // first await. Yield before resolving the complete production graph
+            // so Kestrel and the preceding lease services can finish starting.
+            await Task.Yield();
+            // Hosted services are resolved before any of them starts. Resolve the
+            // production graph here so the instance and Active Owner leases have
+            // already been acquired by the preceding hosted services.
+            foreach (var subsystem in resolveSubsystems())
             {
                 await subsystem.StartAsync(stoppingToken);
                 started.Add(subsystem);
-                var component = subsystem is IBridgeHostSubsystemHealth provider
-                    ? provider.ComponentHealth
-                    : new BridgeComponentHealth(subsystem.Name, "ready");
-                health.Report(component.Name, component.Status, component.Detail);
+                if (subsystem is IBridgeHostSubsystemHealth provider)
+                {
+                    health.Track(provider);
+                }
+                else
+                {
+                    health.Report(subsystem.Name, "ready");
+                }
             }
             health.SetLifecycle(BridgeHostLifecycleState.Ready);
             await AwaitShutdownOrBackgroundFailureAsync(stoppingToken);

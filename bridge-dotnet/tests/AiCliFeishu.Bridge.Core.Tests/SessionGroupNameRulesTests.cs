@@ -11,7 +11,7 @@ public sealed class SessionGroupNameRulesTests
     [DataRow(RuntimeNames.Codex, "Codex｜项目")]
     [DataRow(RuntimeNames.ClaudeCode, "Claude｜项目")]
     [DataRow(RuntimeNames.OpenCode, "OpenCode｜项目")]
-    public void UsesTheNodeRuntimePrefixes(string runtime, string expected)
+    public void UsesTheRuntimePrefixes(string runtime, string expected)
     {
         Assert.AreEqual(
             expected,

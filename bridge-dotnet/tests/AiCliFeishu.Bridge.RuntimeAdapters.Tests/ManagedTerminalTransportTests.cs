@@ -9,6 +9,7 @@ namespace AiCliFeishu.Bridge.RuntimeAdapters.Tests;
 [TestClass]
 public sealed class ManagedTerminalTransportTests
 {
+    private static readonly string TerminalSecret = new('a', 64);
     private static readonly RuntimeCommandContext Context =
         new("command-pipe", "trace-pipe", "correlation-pipe");
 
@@ -17,18 +18,24 @@ public sealed class ManagedTerminalTransportTests
     {
         var pipeName = $"AiCliFeishu.test_{Guid.NewGuid():N}";
         await using var server = Server(pipeName);
-        var exchange = ExchangeAsync(server, "{\"ok\":true,\"error\":null}");
+        var exchange = ExchangeAsync(
+            server,
+            "{\"commandId\":\"command-pipe\",\"ok\":true,\"error\":null}");
         var terminalId = pipeName["AiCliFeishu.".Length..];
 
         await new NamedPipeManagedTerminalTransport(TimeSpan.FromSeconds(2)).SendAsync(
             Context,
-            new(terminalId, "session-1", Ready: true),
+            new(terminalId, "session-1", Ready: true, TerminalSecret: TerminalSecret),
             "  第一行\r\n第二行  ",
             ManagedTerminalSubmitMode.Queue);
         var requestLine = await exchange;
 
         using var request = JsonDocument.Parse(requestLine!);
         Assert.AreEqual("prompt", request.RootElement.GetProperty("type").GetString());
+        Assert.AreEqual("command-pipe", request.RootElement.GetProperty("commandId").GetString());
+        Assert.AreEqual(
+            TerminalSecret,
+            request.RootElement.GetProperty("terminalSecret").GetString());
         Assert.AreEqual("第一行 第二行", request.RootElement.GetProperty("prompt").GetString());
         Assert.AreEqual("queue", request.RootElement.GetProperty("submitMode").GetString());
     }
@@ -36,7 +43,8 @@ public sealed class ManagedTerminalTransportTests
     [TestMethod]
     public async Task TerminalErrorAndMalformedResponseAreNotReportedAsSuccess()
     {
-        var error = await SendWithResponseAsync("{\"ok\":false,\"error\":\"终端忙碌\"}");
+        var error = await SendWithResponseAsync(
+            "{\"commandId\":\"command-pipe\",\"ok\":false,\"error\":\"终端忙碌\"}");
         Assert.IsInstanceOfType<ManagedTerminalRejectedException>(error);
         StringAssert.Contains(error.Message, "终端忙碌");
 
@@ -56,7 +64,7 @@ public sealed class ManagedTerminalTransportTests
         await Assert.ThrowsExceptionAsync<OperationCanceledException>(() =>
             new NamedPipeManagedTerminalTransport(TimeSpan.FromSeconds(5)).SendAsync(
                 Context,
-                new(terminalId, "session-1", Ready: true),
+                new(terminalId, "session-1", Ready: true, TerminalSecret: TerminalSecret),
                 "继续",
                 ManagedTerminalSubmitMode.Steer,
                 cancellation.Token));
@@ -74,7 +82,7 @@ public sealed class ManagedTerminalTransportTests
         var error = await Assert.ThrowsExceptionAsync<ManagedTerminalUnavailableException>(() =>
             new NamedPipeManagedTerminalTransport(TimeSpan.FromMilliseconds(50)).SendAsync(
                 Context,
-                new(terminalId, "session-1", Ready: true),
+                new(terminalId, "session-1", Ready: true, TerminalSecret: TerminalSecret),
                 "继续",
                 ManagedTerminalSubmitMode.Steer));
 
@@ -94,7 +102,12 @@ public sealed class ManagedTerminalTransportTests
             _ => Interlocked.Increment(ref checks) == 1);
         var send = transport.SendAsync(
             Context,
-            new(terminalId, "session-1", Ready: true, Generation: 1),
+            new(
+                terminalId,
+                "session-1",
+                Ready: true,
+                Generation: 1,
+                TerminalSecret: TerminalSecret),
             "不能串线",
             ManagedTerminalSubmitMode.Steer);
 
@@ -116,7 +129,11 @@ public sealed class ManagedTerminalTransportTests
         await Assert.ThrowsExceptionAsync<ArgumentOutOfRangeException>(() =>
             new NamedPipeManagedTerminalTransport(TimeSpan.FromSeconds(2)).SendAsync(
                 Context,
-                new("terminal_12345678", "session-1", Ready: true),
+                new(
+                    "terminal_12345678",
+                    "session-1",
+                    Ready: true,
+                    TerminalSecret: TerminalSecret),
                 "继续",
                 (ManagedTerminalSubmitMode)42));
     }
@@ -127,8 +144,37 @@ public sealed class ManagedTerminalTransportTests
         await Assert.ThrowsExceptionAsync<ArgumentNullException>(() =>
             new NamedPipeManagedTerminalTransport(TimeSpan.FromSeconds(2)).SendAsync(
                 Context,
-                new("terminal_12345678", "session-1", Ready: true),
+                new(
+                    "terminal_12345678",
+                    "session-1",
+                    Ready: true,
+                    TerminalSecret: TerminalSecret),
                 null!,
+                ManagedTerminalSubmitMode.Steer));
+    }
+
+    [TestMethod]
+    public async Task MismatchedAcknowledgementCommandIdIsRejected()
+    {
+        var error = await SendWithResponseAsync(
+            "{\"commandId\":\"different-command\",\"ok\":true,\"error\":null}");
+
+        Assert.IsInstanceOfType<ManagedTerminalRejectedException>(error);
+        StringAssert.Contains(error.Message, "不匹配");
+    }
+
+    [TestMethod]
+    public async Task InvalidTerminalSecretIsRejectedBeforeConnecting()
+    {
+        await Assert.ThrowsExceptionAsync<ArgumentException>(() =>
+            new NamedPipeManagedTerminalTransport(TimeSpan.FromSeconds(2)).SendAsync(
+                Context,
+                new(
+                    "terminal_12345678",
+                    "session-1",
+                    Ready: true,
+                    TerminalSecret: "bad"),
+                "继续",
                 ManagedTerminalSubmitMode.Steer));
     }
 
@@ -143,7 +189,7 @@ public sealed class ManagedTerminalTransportTests
         {
             await new NamedPipeManagedTerminalTransport(TimeSpan.FromSeconds(2)).SendAsync(
                 Context,
-                new(terminalId, "session-1", Ready: true),
+                new(terminalId, "session-1", Ready: true, TerminalSecret: TerminalSecret),
                 "继续",
                 ManagedTerminalSubmitMode.Steer);
             throw new AssertFailedException("预期托管终端响应会导致异常。");
