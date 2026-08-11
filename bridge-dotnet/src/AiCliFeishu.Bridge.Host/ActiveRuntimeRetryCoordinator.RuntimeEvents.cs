@@ -56,6 +56,12 @@ internal sealed partial class ActiveRuntimeRetryCoordinator
                     cancellationToken);
                 break;
             case RuntimeEventTypes.TurnCompleted:
+                if (await ShouldDeferCompletionAsync(
+                        runtimeEvent,
+                        cancellationToken))
+                {
+                    break;
+                }
                 await FinishActivityAsync(
                     runtimeEvent,
                     "本轮处理完成",

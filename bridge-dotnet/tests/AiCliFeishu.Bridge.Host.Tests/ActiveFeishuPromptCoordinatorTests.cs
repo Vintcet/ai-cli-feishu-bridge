@@ -81,6 +81,29 @@ public sealed class ActiveFeishuPromptCoordinatorTests
     }
 
     [TestMethod]
+    public async Task StaleClientProcessIdInManagedGroupTriggersRecovery()
+    {
+        var group = Session(
+            "codex-session-stale123",
+            RuntimeNames.Codex,
+            SessionStatuses.Waiting,
+            feishuChatId: "group-chat",
+            managedByAssistant: true,
+            clientProcessId: int.MaxValue,
+            clientProcessStartedAt: "2026-08-11T00:00:00.000Z");
+        var fixture = Fixture.Create([group]);
+
+        await fixture.Coordinator.HandleAsync(
+            Intent("继续处理", chatId: "group-chat", chatType: "group"),
+            fixture.Store.Current);
+
+        var command = fixture.RuntimeCommands.Commands.Single();
+        Assert.AreEqual(RuntimeCommandTypes.SessionResume, command.CommandType);
+        Assert.AreEqual(group.SessionId, command.Session!.ExternalId);
+        StringAssert.Contains(fixture.Gateway.Replies.Single().Text, "自动恢复");
+    }
+
+    [TestMethod]
     public async Task OpenCodeQueueRequestUsesSteerAndQuotedRouteSelectsSession()
     {
         var codex = Session(
@@ -364,7 +387,8 @@ public sealed class ActiveFeishuPromptCoordinatorTests
         string? feishuChatId = null,
         string? managedTerminalId = null,
         bool managedByAssistant = true,
-        int? clientProcessId = null)
+        int? clientProcessId = null,
+        string? clientProcessStartedAt = null)
     {
         var extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
         {
@@ -379,6 +403,7 @@ public sealed class ActiveFeishuPromptCoordinatorTests
             extensions["clientProcessId"] = JsonSerializer.SerializeToElement(
                 clientProcessId.Value);
         }
+        AddExtension(extensions, "clientProcessStartedAt", clientProcessStartedAt);
         return new()
         {
             SessionId = sessionId,

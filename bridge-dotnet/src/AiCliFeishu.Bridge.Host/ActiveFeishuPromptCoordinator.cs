@@ -575,10 +575,21 @@ internal sealed class ActiveFeishuPromptCoordinator(
         string.Equals(text, "/sendfile", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(text, "sendfile", StringComparison.OrdinalIgnoreCase);
 
-    private static bool HasClientProcess(SessionStoreRecord session) =>
-        session.ExtensionData is not null &&
-        session.ExtensionData.TryGetValue("clientProcessId", out var value) &&
-        value.ValueKind is JsonValueKind.Number;
+    private static bool HasClientProcess(SessionStoreRecord session)
+    {
+        if (session.ExtensionData is null ||
+            !session.ExtensionData.TryGetValue("clientProcessId", out var value) ||
+            value.ValueKind is not JsonValueKind.Number ||
+            !value.TryGetInt32(out var processId) ||
+            processId <= 0)
+        {
+            return false;
+        }
+
+        return BridgeAssistantProcessProbe.IsOnline(
+            processId,
+            ExtensionString(session, "clientProcessStartedAt"));
+    }
 
     private static bool ExtensionBoolean(ExtensibleStoreObject value, string name) =>
         value.ExtensionData is not null &&

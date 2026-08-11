@@ -362,6 +362,104 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
     }
 
     [TestMethod]
+    public async Task CodexStopDoesNotClearRetryWhenTranscriptReportsFailure()
+    {
+        var snapshot = StoreSnapshot(["chat-1"], autoRetry: true);
+        snapshot.Settings.RetryMaxAttempts = 20;
+        await using var fixture = await RetryFixture.CreateAsync(
+            store: new RecordingStoreOwner(snapshot),
+            retryDelay: TimeSpan.FromMilliseconds(5),
+            remotePrompts: new BridgeRemotePromptLedger(),
+            enableTranscriptMonitor: true);
+        var transcriptPath = Path.Combine(
+            fixture.TranscriptDataDirectory!,
+            "codex-session.jsonl");
+        File.WriteAllText(transcriptPath, string.Empty);
+        await fixture.Coordinator.HandleAsync(Event(
+            "session-started-transcript",
+            RuntimeEventTypes.SessionStarted,
+            "session-started-transcript",
+            new { transcriptPath }));
+
+        await fixture.Coordinator.HandleAsync(Failure("turn-before-stop", "HTTP 503"));
+        await WaitUntilAsync(
+            () => fixture.RuntimeCommands.Commands.Count == 1,
+            TimeSpan.FromSeconds(2));
+
+        var retryPrompt = fixture.RuntimeCommands.Commands[0]
+            .Payload.GetProperty("prompt").GetString()!;
+        await fixture.Coordinator.HandleAsync(Event(
+            "retry-started-transcript",
+            RuntimeEventTypes.TurnStarted,
+            "turn-retry-transcript",
+            new { prompt = retryPrompt }));
+        await fixture.Coordinator.HandleAsync(Event(
+            "stop-after-transcript-error",
+            RuntimeEventTypes.TurnCompleted,
+            "turn-retry-transcript",
+            new { turnId = "turn-retry-transcript" }));
+
+        Assert.AreEqual(1, fixture.RuntimeCommands.Commands.Count);
+        Assert.IsTrue(fixture.Coordinator.HasActiveRetry(SessionId));
+        Assert.IsFalse(fixture.Store.Current.Routes.Messages.Values.Any(route =>
+            route.Kind == BridgeRuntimeNotificationKinds.Stop));
+
+        File.AppendAllText(
+            transcriptPath,
+            "{\"type\":\"task_complete\",\"turn_id\":\"turn-retry-transcript\",\"error\":\"HTTP 503\"}\n");
+        await fixture.TranscriptMonitor!.CheckNowAsync();
+        await WaitUntilAsync(
+            () => fixture.RuntimeCommands.Commands.Count == 2,
+            TimeSpan.FromSeconds(2));
+
+        StringAssert.EndsWith(
+            fixture.RuntimeCommands.Commands[1].CommandId,
+            "-2");
+        StringAssert.Contains(
+            CardJson(fixture.Gateway.Sends.Last().Card),
+            "第 2/20 次");
+        Assert.IsTrue(fixture.Coordinator.HasActiveRetry(SessionId));
+        Assert.IsFalse(fixture.Store.Current.Routes.Messages.Values.Any(route =>
+            route.Kind == BridgeRuntimeNotificationKinds.Stop));
+    }
+
+    [TestMethod]
+    public async Task CodexStopWithAssistantMessageCompletesActiveRetry()
+    {
+        await using var fixture = await RetryFixture.CreateAsync(
+            retryDelay: TimeSpan.FromMilliseconds(5),
+            remotePrompts: new BridgeRemotePromptLedger(),
+            enableTranscriptMonitor: true);
+        var transcriptPath = Path.Combine(
+            fixture.TranscriptDataDirectory!,
+            "codex-success-session.jsonl");
+        File.WriteAllText(transcriptPath, string.Empty);
+        await fixture.Coordinator.HandleAsync(Event(
+            "session-started-success-transcript",
+            RuntimeEventTypes.SessionStarted,
+            "session-started-success-transcript",
+            new { transcriptPath }));
+        await fixture.Coordinator.HandleAsync(Failure("turn-before-success", "HTTP 503"));
+        await WaitUntilAsync(
+            () => fixture.RuntimeCommands.Commands.Count == 1,
+            TimeSpan.FromSeconds(2));
+
+        await fixture.Coordinator.HandleAsync(Event(
+            "stop-after-successful-retry",
+            RuntimeEventTypes.TurnCompleted,
+            "turn-successful-retry",
+            new
+            {
+                turnId = "turn-successful-retry",
+                message = "已完成。",
+            }));
+
+        Assert.IsFalse(fixture.Coordinator.HasActiveRetry(SessionId));
+        Assert.IsTrue(fixture.Store.Current.Routes.Messages.Values.Any(route =>
+            route.Kind == BridgeRuntimeNotificationKinds.Stop));
+    }
+
+    [TestMethod]
     public async Task ManualPromptMatchingRetryTextStillCancelsRunningRetry()
     {
         var remotePrompts = new BridgeRemotePromptLedger();
@@ -1329,7 +1427,7 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         public RecordingStateSink State { get; }
         public RecordingFileTransferCoordinator FileTransfers { get; }
         public CodexTranscriptMonitor? TranscriptMonitor { get; }
-        private string? TranscriptDataDirectory { get; }
+        public string? TranscriptDataDirectory { get; }
 
         public static async Task<RetryFixture> CreateAsync(
             RecordingStoreOwner? store = null,
