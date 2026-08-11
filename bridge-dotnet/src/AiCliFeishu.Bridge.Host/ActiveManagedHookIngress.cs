@@ -75,6 +75,14 @@ internal sealed class ActiveManagedHookIngress(
         try
         {
             terminals.Register(registration);
+            if (registration.Ready &&
+                terminals.FindClaimByTerminal(registration.TerminalId) is
+                { SessionExternalId: var sessionExternalId })
+            {
+                await runtimeLaunches.DrainAsync(
+                    sessionExternalId,
+                    cancellationToken);
+            }
             return OkResponse.Clone();
         }
         finally

@@ -42,6 +42,29 @@ public sealed class ActiveManagedHookIngressTests
     }
 
     [TestMethod]
+    public async Task ReadyHeartbeatRetriesDrainForClaimedSession()
+    {
+        var fixture = await Fixture.CreateAsync();
+        await fixture.RegisterAsync("terminal-late-ready", elevated: false, ready: false);
+
+        await fixture.Ingress.HandleAsync(
+            BridgeManagedIngressKind.SessionStart,
+            SessionStart("session-late-ready", "terminal-late-ready", elevated: false),
+            "trace-late-ready-start");
+
+        await fixture.RegisterAsync("terminal-late-ready", elevated: false, ready: true);
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "publish:session.started",
+                "drain:session-late-ready",
+                "drain:session-late-ready",
+            },
+            fixture.Operations.ToArray());
+    }
+
+    [TestMethod]
     public async Task ManagedHooksRejectMissingOrCrossWiredIdentity()
     {
         var fixture = await Fixture.CreateAsync();
@@ -369,7 +392,10 @@ public sealed class ActiveManagedHookIngressTests
             return new(ingress, directory, sink, operations);
         }
 
-        public async Task RegisterAsync(string terminalId, bool elevated) =>
+        public async Task RegisterAsync(
+            string terminalId,
+            bool elevated,
+            bool ready = true) =>
             _ = await Ingress.HandleAsync(
                 BridgeManagedIngressKind.TerminalRegister,
                 JsonSerializer.SerializeToElement(new
@@ -379,7 +405,7 @@ public sealed class ActiveManagedHookIngressTests
                     cwd = Cwd,
                     runtime = RuntimeNames.Codex,
                     elevated,
-                    ready = true,
+                    ready,
                 }),
                 $"trace-register-{terminalId}");
     }
