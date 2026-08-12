@@ -357,7 +357,8 @@ internal sealed partial class MainForm
                 request.Cwd,
                 request.Elevated,
                 isNewLaunch ? null : runtime.BuildResumeArguments(request.SessionId),
-                lifetime.Token);
+                lifetime.Token,
+                request.SessionId);
             await bridgeClient.CompleteRuntimeLaunchAsync(
                 request.RequestId,
                 success: true,

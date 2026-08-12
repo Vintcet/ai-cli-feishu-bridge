@@ -382,7 +382,10 @@ public sealed class BridgeOpenCodeEventSubsystem :
         }
         if (TracksSession(rawEvent.Type))
         {
-            directory.RememberSession(identity.Port, identity.Generation, sessionId!);
+            directory.RememberObservedSession(
+                identity.Port,
+                identity.Generation,
+                sessionId!);
         }
     }
 

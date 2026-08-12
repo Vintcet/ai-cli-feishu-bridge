@@ -7,6 +7,40 @@ namespace AiCliFeishuControl;
 [TestClass]
 public sealed class RuntimeAndTerminalTests
 {
+    [TestMethod]
+    public async Task HookInstallationRunsEvenWhenBridgeStartupCanReturnOnline()
+    {
+        var installed = new List<string>();
+
+        await BridgeHookInstallCoordinator.EnsureAllAsync((script, _) =>
+        {
+            installed.Add(script);
+            return Task.CompletedTask;
+        });
+
+        CollectionAssert.AreEqual(
+            new[] { "install-hooks.ps1", "install-claude-code-hooks.ps1" },
+            installed);
+    }
+
+    [TestMethod]
+    public async Task ClaudeLaunchEnsuresOnlyClaudeHooks()
+    {
+        var installed = new List<string>();
+
+        await BridgeHookInstallCoordinator.EnsureRuntimeAsync(
+            RuntimeCatalog.ClaudeCode,
+            (script, _) =>
+            {
+                installed.Add(script);
+                return Task.CompletedTask;
+            });
+
+        CollectionAssert.AreEqual(
+            new[] { "install-claude-code-hooks.ps1" },
+            installed);
+    }
+
     private static readonly string TerminalSecret = new('a', 64);
 
     [TestMethod]
@@ -336,6 +370,107 @@ public sealed class RuntimeAndTerminalTests
 
         Assert.AreEqual(2, attempts);
         Assert.AreEqual("session-ready", status.SessionExternalId);
+    }
+
+    [TestMethod]
+    public async Task ManagedTerminalLocalLaunchReturnsAtTerminalReady()
+    {
+        var status = await ManagedTerminalLaunchWaiter.WaitAsync(
+            "terminal-local",
+            _ => Task.FromResult<ManagedTerminalLaunchStatus?>(new()
+            {
+                Ok = true,
+                TerminalId = "terminal-local",
+                Registered = true,
+                Online = true,
+                Ready = true,
+            }),
+            () => null,
+            confirmation: ManagedTerminalLaunchConfirmation.TerminalReady,
+            maximumAttempts: 1,
+            pollInterval: TimeSpan.Zero);
+
+        Assert.IsNull(status.SessionExternalId);
+    }
+
+    [TestMethod]
+    public async Task ManagedTerminalResumeRequiresExactTargetSession()
+    {
+        var attempts = 0;
+        var status = await ManagedTerminalLaunchWaiter.WaitAsync(
+            "terminal-resume",
+            _ => Task.FromResult<ManagedTerminalLaunchStatus?>(new()
+            {
+                Ok = true,
+                TerminalId = "terminal-resume",
+                Registered = true,
+                Online = true,
+                Ready = true,
+                SessionExternalId = ++attempts == 1 ? "session-other" : "session-target",
+            }),
+            () => null,
+            expectedSessionExternalId: "session-target",
+            maximumAttempts: 2,
+            pollInterval: TimeSpan.Zero,
+            delay: static (_, _) => Task.CompletedTask);
+
+        Assert.AreEqual(2, attempts);
+        Assert.AreEqual("session-target", status.SessionExternalId);
+    }
+
+    [TestMethod]
+    public async Task OpenCodeLaunchWaiterRequiresRegisteredReadyEndpoint()
+    {
+        var attempts = 0;
+        var status = await OpenCodeLaunchWaiter.WaitAsync(
+            5_321,
+            7,
+            _ => Task.FromResult<OpenCodeLaunchStatus?>(new()
+            {
+                Ok = true,
+                Port = 5_321,
+                Registered = true,
+                Ready = ++attempts > 1,
+                Generation = 7,
+            }),
+            () => null,
+            maximumAttempts: 2,
+            pollInterval: TimeSpan.Zero,
+            delay: static (_, _) => Task.CompletedTask);
+
+        Assert.AreEqual(2, attempts);
+        Assert.IsTrue(status.Ready);
+    }
+
+    [TestMethod]
+    public async Task ManagedTerminalLaunchWaiterAllowsObservedSlowSessionStart()
+    {
+        // Local Codex startup history contains a 135-second delay between process
+        // creation and the first SessionStart event (540 polls at 250 ms).
+        const int observedSlowStartupAttempts = 540;
+        var attempts = 0;
+
+        var status = await ManagedTerminalLaunchWaiter.WaitAsync(
+            "terminal-slow-session-start",
+            _ => Task.FromResult<ManagedTerminalLaunchStatus?>(new()
+            {
+                Ok = true,
+                TerminalId = "terminal-slow-session-start",
+                Registered = true,
+                Online = true,
+                Ready = true,
+                SessionExternalId = ++attempts > observedSlowStartupAttempts
+                    ? "session-slow-session-start"
+                    : null,
+            }),
+            () => null,
+            pollInterval: TimeSpan.Zero,
+            delay: static (_, _) => Task.CompletedTask);
+
+        Assert.AreEqual(observedSlowStartupAttempts + 1, attempts);
+        Assert.AreEqual("session-slow-session-start", status.SessionExternalId);
+        Assert.IsTrue(
+            ManagedTerminalLaunchWaiter.DefaultMaximumAttempts > observedSlowStartupAttempts);
     }
 
     [TestMethod]

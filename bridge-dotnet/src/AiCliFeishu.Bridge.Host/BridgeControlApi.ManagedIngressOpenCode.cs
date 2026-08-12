@@ -108,8 +108,68 @@ public static partial class BridgeControlApi
         app.MapPost(
             "/opencode/launch",
             (Func<HttpContext, Task<IResult>>)HandleOpenCodeLaunchAsync);
+        app.MapGet(
+            "/opencode/endpoints/{port:int}/status",
+            (Func<HttpContext, Task<IResult>>)HandleOpenCodeEndpointStatusAsync);
         MapOpenCodeEndpointIngress(app, "/opencode/register", register: true);
         MapOpenCodeEndpointIngress(app, "/opencode/unregister", register: false);
+    }
+
+    private static async Task<IResult> HandleOpenCodeEndpointStatusAsync(
+        HttpContext context)
+    {
+        var request = context.Request;
+        var cancellationToken = context.RequestAborted;
+        if (IsCrossSite(request))
+        {
+            return Results.Json(
+                new ControlError(false, "拒绝跨站请求。"),
+                statusCode: StatusCodes.Status403Forbidden);
+        }
+        var tokenProvider = context.RequestServices
+            .GetRequiredService<IBridgeControlTokenProvider>();
+        if (!await IsAuthenticatedAsync(request, tokenProvider, cancellationToken))
+        {
+            return Results.Json(
+                new ControlError(false, "本机控制令牌无效。"),
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+        var options = context.RequestServices.GetRequiredService<BridgeHostOptions>();
+        if (options.OwnershipMode is not BridgeOwnershipMode.Active)
+        {
+            return Results.Json(
+                new ControlError(false, "Passive Host 不维护 OpenCode 端点。"),
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+        if (!int.TryParse(
+                context.Request.RouteValues["port"]?.ToString(),
+                out var port) || port is <= 0 or > 65_535)
+        {
+            return Results.Json(
+                new ControlError(false, "端口参数不正确。"),
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+        var directory = context.RequestServices
+            .GetRequiredService<IBridgeOpenCodeEndpointRegistrationDirectory>();
+        try
+        {
+            var identity = directory.FindRegistrationByPort(port);
+            return Results.Ok(new
+            {
+                ok = true,
+                port,
+                registered = identity is not null,
+                ready = identity?.Ready ?? false,
+                generation = identity?.Generation ?? 0,
+                cwd = identity?.Cwd,
+            });
+        }
+        catch (InvalidOperationException)
+        {
+            return Results.Json(
+                new ControlError(false, "OpenCode 端点目录当前不可处理。"),
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
     }
 
     private static async Task<IResult> HandleOpenCodeLaunchAsync(
@@ -192,6 +252,7 @@ public static partial class BridgeControlApi
                 ok = true,
                 port = identity.Port,
                 cwd = identity.Cwd,
+                generation = identity.Generation,
             });
         }
         catch (ArgumentException)

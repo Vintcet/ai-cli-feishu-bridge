@@ -246,6 +246,31 @@ internal sealed partial class BridgeClient
             throwOnFailure: true);
     }
 
+    private async Task EnsureHooksInstalledAsync(
+        RuntimeProfile? runtime = null,
+        CancellationToken cancellationToken = default)
+    {
+        await hookInstallationGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (runtime is null)
+            {
+                await BridgeHookInstallCoordinator.EnsureAllAsync(
+                    RunPowerShellScriptAsync);
+            }
+            else
+            {
+                await BridgeHookInstallCoordinator.EnsureRuntimeAsync(
+                    runtime,
+                    RunPowerShellScriptAsync);
+            }
+        }
+        finally
+        {
+            hookInstallationGate.Release();
+        }
+    }
+
     private static async Task<ProcessResult> RunProcessAsync(
         string fileName,
         IReadOnlyList<string> arguments,

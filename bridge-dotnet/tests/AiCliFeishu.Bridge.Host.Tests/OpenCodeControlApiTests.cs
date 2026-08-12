@@ -150,10 +150,35 @@ public sealed class OpenCodeControlApiTests
         Assert.IsTrue(launchBody.RootElement.GetProperty("ok").GetBoolean());
         Assert.AreEqual(5_203, launchBody.RootElement.GetProperty("port").GetInt32());
         Assert.AreEqual(Cwd, launchBody.RootElement.GetProperty("cwd").GetString());
+        Assert.IsTrue(launchBody.RootElement.GetProperty("generation").GetInt64() > 0);
         Assert.AreEqual((Cwd, "session-resume"), lifecycle.Reservations.Single());
         Assert.AreEqual(
             5_203,
             directory.FindRegistrationBySession("session-resume")?.Port);
+
+        using var unreadyStatus = new HttpRequestMessage(
+            HttpMethod.Get,
+            "/opencode/endpoints/5203/status");
+        unreadyStatus.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var unreadyStatusResponse = await client.SendAsync(unreadyStatus);
+        using var unreadyStatusBody = JsonDocument.Parse(
+            await unreadyStatusResponse.Content.ReadAsStringAsync());
+        Assert.AreEqual(HttpStatusCode.OK, unreadyStatusResponse.StatusCode);
+        Assert.IsTrue(unreadyStatusBody.RootElement
+            .GetProperty("registered").GetBoolean());
+        Assert.IsFalse(unreadyStatusBody.RootElement.GetProperty("ready").GetBoolean());
+        Assert.IsTrue(unreadyStatusBody.RootElement.GetProperty("generation").GetInt64() > 0);
+
+        var reserved = directory.FindRegistrationByPort(5_203)!;
+        Assert.IsTrue(directory.SetReady(5_203, reserved.Generation, ready: true));
+        using var readyStatus = new HttpRequestMessage(
+            HttpMethod.Get,
+            "/opencode/endpoints/5203/status");
+        readyStatus.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var readyStatusResponse = await client.SendAsync(readyStatus);
+        using var readyStatusBody = JsonDocument.Parse(
+            await readyStatusResponse.Content.ReadAsStringAsync());
+        Assert.IsTrue(readyStatusBody.RootElement.GetProperty("ready").GetBoolean());
 
         using var releaseLaunch = Request(
             "/opencode/unregister",

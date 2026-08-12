@@ -148,6 +148,32 @@ public sealed class ActiveOpenCodeRuntimeLifecycleTests
     }
 
     [TestMethod]
+    public async Task ReadyWaitSurvivesLaunchCorrelationHandoffToRealSession()
+    {
+        var directory = await DirectoryAsync();
+        using var lifecycle = Lifecycle(
+            directory,
+            new RecordingDesktopLifecycle(),
+            new QueuePortAllocator(5_110));
+        var reserved = await lifecycle.ReserveAsync(Cwd, "launch-correlation");
+        Assert.IsTrue(directory.SetReady(
+            reserved.Port,
+            reserved.Generation,
+            ready: true));
+        Assert.IsTrue(directory.RememberObservedSession(
+            reserved.Port,
+            reserved.Generation,
+            "ses_real"));
+        Assert.IsNull(directory.FindRegistrationBySession("launch-correlation"));
+
+        await lifecycle.WaitUntilReadyAsync(Context, "launch-correlation");
+
+        Assert.AreEqual(
+            reserved.Generation,
+            directory.FindRegistrationBySession("ses_real")?.Generation);
+    }
+
+    [TestMethod]
     public async Task ReadyWaitDistinguishesTimeoutCallerCancellationAndDisposal()
     {
         var directory = await DirectoryAsync();

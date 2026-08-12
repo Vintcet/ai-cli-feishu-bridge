@@ -148,7 +148,8 @@ internal sealed class ActiveOpenCodeRuntimeLifecycle :
                 ThrowIfDisposed();
                 if (directory.FindRegistrationBySession(sessionExternalId) is
                         { Ready: true } target &&
-                    directory.IsCurrent(target, sessionExternalId))
+                    directory.IsCurrent(target, sessionExternalId) ||
+                    FindReadyReservation(sessionExternalId) is not null)
                 {
                     return;
                 }
@@ -316,6 +317,30 @@ internal sealed class ActiveOpenCodeRuntimeLifecycle :
         }
         directory.Unregister(identity.Port, identity.Generation);
         return true;
+    }
+
+    private BridgeOpenCodeEndpointIdentity? FindReadyReservation(
+        string sessionExternalId)
+    {
+        KeyValuePair<int, Reservation>? owned;
+        lock (sync)
+        {
+            ThrowIfDisposedLocked();
+            owned = reservations.FirstOrDefault(item =>
+                string.Equals(
+                    item.Value.SessionExternalId,
+                    sessionExternalId,
+                    StringComparison.Ordinal));
+        }
+        if (owned is not { } reservation || reservation.Value is null)
+        {
+            return null;
+        }
+        var target = directory.FindRegistrationByPort(reservation.Key);
+        return target is { Ready: true } &&
+            target.Generation == reservation.Value.Generation
+                ? target
+                : null;
     }
 
     private void Prepare(

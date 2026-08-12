@@ -16,6 +16,7 @@ internal sealed partial class BridgeClient : IDisposable
     private readonly HttpClient httpClient;
     private readonly BridgeHostTarget target;
     private readonly ProductionBridgeStatusProjector productionStatusProjector;
+    private readonly SemaphoreSlim hookInstallationGate = new(1, 1);
 
     public BridgeClient()
     {
@@ -100,6 +101,7 @@ internal sealed partial class BridgeClient : IDisposable
         {
             if (running.Ok)
             {
+                await EnsureHooksInstalledAsync(cancellationToken: cancellationToken);
                 AppLog.Info($"桥接已经在线（pid={running.ProcessId}，version={running.Version}）。");
                 return;
             }
@@ -116,8 +118,7 @@ internal sealed partial class BridgeClient : IDisposable
                 $"端口 {target.Port} 上已有桥接进程，但本机控制令牌不匹配；为避免启动重复进程，已拒绝继续。");
         }
 
-        await RunPowerShellScriptAsync("install-hooks.ps1", TimeSpan.FromSeconds(10));
-        await RunPowerShellScriptAsync("install-claude-code-hooks.ps1", TimeSpan.FromSeconds(10));
+        await EnsureHooksInstalledAsync(cancellationToken: cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         StartBridgeProcess(target);
         AppLog.Info($"{target.HostKind} 桥接进程已直接启动。");
@@ -306,7 +307,11 @@ internal sealed partial class BridgeClient : IDisposable
     private static string ReadControlToken(string bridgeRoot)
         => BridgeControlTokenReader.Read(bridgeRoot);
 
-    public void Dispose() => httpClient.Dispose();
+    public void Dispose()
+    {
+        httpClient.Dispose();
+        hookInstallationGate.Dispose();
+    }
 
     private sealed record ProcessResult(int ExitCode, string Output, string Error);
 

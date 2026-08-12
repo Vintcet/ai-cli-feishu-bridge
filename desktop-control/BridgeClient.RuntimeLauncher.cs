@@ -14,7 +14,8 @@ internal sealed partial class BridgeClient
         string cwd,
         bool elevated,
         string? rawArguments = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? launchCorrelationId = null)
     {
         var fullPath = Path.GetFullPath(cwd);
         if (!Directory.Exists(fullPath))
@@ -37,13 +38,35 @@ internal sealed partial class BridgeClient
                 $"找不到 {runtime.DisplayName} CLI。请先安装 {runtime.CommandName}，并确保其在 PATH 或常见用户安装目录中。");
         }
 
+        await EnsureHooksInstalledAsync(runtime, cancellationToken);
+
         if (runtime.UsesManagedTerminal)
         {
+            var managedArguments = RuntimeArgumentParser.Parse(runtime, rawArguments);
+            var managedResumeSessionId = RuntimeArgumentParser.ExtractResumeSessionId(
+                runtime,
+                managedArguments);
+            if (!string.IsNullOrWhiteSpace(managedResumeSessionId))
+            {
+                var currentStatus = await GetStatusAsync(
+                    cancellationToken,
+                    forceRefresh: true);
+                var existingSession = currentStatus?.Sessions.FirstOrDefault(session =>
+                    string.Equals(session.SessionId, managedResumeSessionId, StringComparison.Ordinal) &&
+                    session.ManagedTerminalOnline);
+                if (existingSession is not null)
+                {
+                    throw new InvalidOperationException(
+                        $"会话 #{existingSession.ShortId} 已在托管窗口运行，请直接切换到现有 Codex 窗口。");
+                }
+            }
             var launch = StartManagedTerminalCore(
                 fullPath,
                 elevated,
                 runtime,
-                rawArguments,
+                managedArguments.Count == 0
+                    ? null
+                    : rawArguments,
                 toolCommand);
             using (launch.Launcher)
             {
@@ -54,10 +77,17 @@ internal sealed partial class BridgeClient
                         launch.Launcher,
                         launch.AllowsCleanEarlyExit,
                         runtime),
+                    confirmation: launchCorrelationId is not null
+                            ? ManagedTerminalLaunchConfirmation.SessionBound
+                            : ManagedTerminalLaunchConfirmation.TerminalReady,
+                    expectedSessionExternalId: launchCorrelationId is not null
+                        ? managedResumeSessionId
+                        : null,
                     cancellationToken: cancellationToken);
                 AppLog.Info(
                     $"Bridge 已确认 {runtime.DisplayName} 托管终端 ready：" +
-                    $"terminal={launch.TerminalId} session={status.SessionExternalId}。");
+                    $"terminal={launch.TerminalId} " +
+                    $"session={status.SessionExternalId ?? "pending"}。");
             }
             return;
         }
@@ -66,10 +96,11 @@ internal sealed partial class BridgeClient
         var resumeSessionId = RuntimeArgumentParser.ExtractResumeSessionId(
             runtime,
             parsedArguments);
-        var port = await ReserveOpenCodePortAsync(
+        var reservation = await ReserveOpenCodePortAsync(
             fullPath,
-            resumeSessionId,
+            resumeSessionId ?? launchCorrelationId,
             cancellationToken);
+        var port = reservation.Port;
         var controlExecutable = Application.ExecutablePath;
         if (!File.Exists(controlExecutable))
         {
@@ -103,8 +134,18 @@ internal sealed partial class BridgeClient
                 windowsTerminal is not null,
                 runtime,
                 cancellationToken);
+            var status = await OpenCodeLaunchWaiter.WaitAsync(
+                port,
+                reservation.Generation,
+                token => ProbeOpenCodeStatusAsync(port, token),
+                () => LauncherFailure(
+                    launcher,
+                    windowsTerminal is not null,
+                    runtime),
+                cancellationToken: cancellationToken);
             AppLog.Info(
-                $"已通过终端宿主启动 {runtime.DisplayName}（cwd={fullPath}，port={port}）。");
+                $"Bridge 已确认 {runtime.DisplayName} 端点 ready" +
+                $"（cwd={fullPath}，port={port}，generation={status.Generation}）。");
         }
         catch (Win32Exception error) when (error.NativeErrorCode == 1223)
         {
@@ -247,6 +288,48 @@ internal sealed partial class BridgeClient
         }
     }
 
+    private async Task<OpenCodeLaunchStatus?> ProbeOpenCodeStatusAsync(
+        int port,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get,
+                $"opencode/endpoints/{port}/status");
+            request.Headers.Add(ControlTokenHeader, ReadControlToken(BridgeRoot));
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            if (response.StatusCode is System.Net.HttpStatusCode.Unauthorized or
+                System.Net.HttpStatusCode.ServiceUnavailable)
+            {
+                AppLog.WarnThrottled(
+                    $"等待 OpenCode 端点 ready 时 Bridge 返回 HTTP {(int)response.StatusCode}，将重试。",
+                    TimeSpan.FromSeconds(2));
+                return null;
+            }
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException(
+                    $"读取 OpenCode 端点状态失败：HTTP {(int)response.StatusCode}。");
+            }
+            await using var stream = await response.Content
+                .ReadAsStreamAsync(cancellationToken);
+            return await JsonSerializer.DeserializeAsync<OpenCodeLaunchStatus>(
+                stream,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
+                cancellationToken);
+        }
+        catch (Exception error) when (
+            !cancellationToken.IsCancellationRequested &&
+            error is HttpRequestException or TaskCanceledException or JsonException or IOException)
+        {
+            AppLog.WarnThrottled(
+                $"等待 OpenCode 端点 ready 的状态请求失败：{error.Message}",
+                TimeSpan.FromSeconds(2));
+            return null;
+        }
+    }
+
     private static Exception? LauncherFailure(
         Process launcher,
         bool allowsCleanEarlyExit,
@@ -270,7 +353,7 @@ internal sealed partial class BridgeClient
         }
     }
 
-    private async Task<int> ReserveOpenCodePortAsync(
+    private async Task<OpenCodeLaunchResult> ReserveOpenCodePortAsync(
         string cwd,
         string? sessionId,
         CancellationToken cancellationToken)
@@ -305,7 +388,11 @@ internal sealed partial class BridgeClient
             throw new InvalidOperationException(
                 string.IsNullOrWhiteSpace(result?.Error) ? "申请 opencode 端口失败。" : result.Error);
         }
-        return result.Port;
+        if (result.Generation <= 0)
+        {
+            throw new InvalidOperationException("Bridge 返回了无效的 opencode 端点代际。");
+        }
+        return result;
     }
 
     private async Task ReleaseOpenCodePortAsync(

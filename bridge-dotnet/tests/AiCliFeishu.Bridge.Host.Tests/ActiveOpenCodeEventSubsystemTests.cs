@@ -53,6 +53,37 @@ public sealed class ActiveOpenCodeEventSubsystemTests
     }
 
     [TestMethod]
+    public async Task FirstRealSessionAtomicallyReplacesLaunchCorrelation()
+    {
+        var fixture = await Fixture.CreateAsync();
+        fixture.Source.HealthResults.Enqueue(true);
+        var identity = fixture.Directory.Register(5_104, Cwd);
+        Assert.IsTrue(fixture.Directory.RememberSession(
+            identity.Port,
+            identity.Generation,
+            "launch-correlation"));
+
+        await fixture.Subsystem.StartAsync(CancellationToken.None);
+        var stream = await fixture.Source.NextSubscriptionAsync();
+        await WaitUntilAsync(() => fixture.Directory.ListReady().Count == 1);
+
+        await stream.Events.Writer.WriteAsync(new(
+            "session.created",
+            JsonSerializer.SerializeToElement(new
+            {
+                info = new { id = "ses_real", directory = Cwd },
+            })));
+        await fixture.Sink.WaitForCountAsync(1);
+
+        Assert.IsNull(fixture.Directory.FindBySession("launch-correlation"));
+        Assert.AreEqual(
+            identity.Generation,
+            fixture.Directory.FindRegistrationBySession("ses_real")?.Generation);
+
+        await fixture.Subsystem.StopAsync(CancellationToken.None);
+    }
+
+    [TestMethod]
     public async Task ReplacementCancelsOldGenerationBeforeStartingNewSubscription()
     {
         var fixture = await Fixture.CreateAsync();

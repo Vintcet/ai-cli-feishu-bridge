@@ -37,10 +37,19 @@ internal interface IBridgeOpenCodeEndpointRegistrationDirectory
 
     bool RememberSession(int port, long generation, string sessionExternalId);
 
+    bool RememberObservedSession(
+        int port,
+        long generation,
+        string sessionExternalId) =>
+        RememberSession(port, generation, sessionExternalId);
+
     bool ForgetSession(int port, long generation, string sessionExternalId);
 
     BridgeOpenCodeEndpointIdentity? FindRegistrationBySession(
         string sessionExternalId);
+
+    BridgeOpenCodeEndpointIdentity? FindRegistrationByPort(int port) =>
+        ListRegistrations().FirstOrDefault(identity => identity.Port == port);
 
     bool IsCurrent(
         BridgeOpenCodeEndpointIdentity identity,
@@ -171,6 +180,21 @@ internal sealed class ActiveOpenCodeEndpointDirectory :
                 return null;
             }
             return Identity(registration);
+        }
+    }
+
+    public BridgeOpenCodeEndpointIdentity? FindRegistrationByPort(int port)
+    {
+        if (port is <= 0 or > 65_535)
+        {
+            return null;
+        }
+        lock (sync)
+        {
+            EnsureInitializedLocked();
+            return registrations.TryGetValue(port, out var registration)
+                ? Identity(registration)
+                : null;
         }
     }
 
@@ -334,6 +358,41 @@ internal sealed class ActiveOpenCodeEndpointDirectory :
                 registration.Generation != generation)
             {
                 return false;
+            }
+            sessions[sessionExternalId] = new(
+                port,
+                generation,
+                checked(++nextSessionSequence));
+            PruneSessionsLocked();
+            return true;
+        }
+    }
+
+    public bool RememberObservedSession(
+        int port,
+        long generation,
+        string sessionExternalId)
+    {
+        EnsureActive();
+        port = RequirePort(port);
+        sessionExternalId = RequireSessionId(sessionExternalId);
+        lock (sync)
+        {
+            EnsureInitializedLocked();
+            if (!registrations.TryGetValue(port, out var registration) ||
+                registration.Generation != generation)
+            {
+                return false;
+            }
+            foreach (var launchId in sessions
+                         .Where(item =>
+                             item.Value.Port == port &&
+                             item.Value.Generation == generation &&
+                             item.Key.StartsWith("launch-", StringComparison.Ordinal))
+                         .Select(item => item.Key)
+                         .ToArray())
+            {
+                sessions.Remove(launchId);
             }
             sessions[sessionExternalId] = new(
                 port,

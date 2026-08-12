@@ -345,6 +345,9 @@ internal sealed class OpenCodeLaunchResult
     [JsonPropertyName("cwd")]
     public string Cwd { get; set; } = "";
 
+    [JsonPropertyName("generation")]
+    public long Generation { get; set; }
+
     [JsonPropertyName("error")]
     public string Error { get; set; } = "";
 }
