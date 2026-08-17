@@ -677,21 +677,31 @@ public sealed class ActiveFeishuIntentHandlerTests
     public async Task RetryStopValidatesCycleAndReturnsCoordinatorResult()
     {
         var fixture = Fixture.Create(bound: true);
+        var replacement = new FeishuCardRenderer().RuntimeLaunchCancelled(
+            RuntimeNames.Codex);
+        var synchronized = false;
         fixture.RuntimeRetries.StopResult = new(
             BridgeRetryStopKinds.Stopped,
             false,
-            new FeishuCardRenderer().RuntimeLaunchCancelled(RuntimeNames.Codex));
+            replacement,
+            _ =>
+            {
+                synchronized = true;
+                return Task.CompletedTask;
+            });
 
         var stopped = await fixture.Handler.HandleAsync(RetryIntent());
+        var stoppedResult = stopped ?? throw new InvalidOperationException(
+            "重试停止处理必须返回响应。");
         fixture.RuntimeRetries.StopResult = new(
             BridgeRetryStopKinds.Stopped,
             true,
-            stopped!.Card);
+            replacement);
         var running = await fixture.Handler.HandleAsync(RetryIntent());
         fixture.RuntimeRetries.StopResult = new(
             BridgeRetryStopKinds.AlreadyStopped,
             false,
-            stopped.Card);
+            replacement);
         var repeated = await fixture.Handler.HandleAsync(RetryIntent());
         fixture.RuntimeRetries.StopResult = new(BridgeRetryStopKinds.Stale, false);
         var stale = await fixture.Handler.HandleAsync(RetryIntent());
@@ -704,9 +714,14 @@ public sealed class ActiveFeishuIntentHandlerTests
             "card",
             "trace-1"));
 
-        Assert.AreEqual("success", stopped.ToastType);
-        Assert.AreEqual("已停止自动重试。", stopped.ToastContent);
-        Assert.IsNotNull(stopped.Card);
+        Assert.AreEqual("success", stoppedResult.ToastType);
+        Assert.AreEqual("已停止自动重试。", stoppedResult.ToastContent);
+        Assert.IsNull(stoppedResult.Card);
+        Assert.IsNotNull(stoppedResult.AfterAcknowledged);
+        Assert.IsFalse(synchronized);
+        await stoppedResult.AfterAcknowledged!(CancellationToken.None);
+        Assert.IsTrue(synchronized);
+        Assert.AreSame(replacement, running!.Card);
         StringAssert.Contains(running!.ToastContent, "已经发送");
         Assert.AreEqual("info", repeated!.ToastType);
         Assert.AreEqual("自动重试已经停止。", repeated.ToastContent);

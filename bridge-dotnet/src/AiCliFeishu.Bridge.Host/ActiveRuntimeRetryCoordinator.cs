@@ -24,7 +24,8 @@ internal static class BridgeRuntimeNotificationKinds
 internal sealed record BridgeRetryStopResult(
     string Kind,
     bool RetryAlreadyStarted,
-    FeishuCardView? Card = null);
+    FeishuCardView? Card = null,
+    Func<CancellationToken, Task>? AfterAcknowledged = null);
 
 internal interface IBridgeActiveRuntimeRetryCoordinator
 {

@@ -270,28 +270,4 @@ internal sealed partial class ActiveRuntimeRetryCoordinator
         }
     }
 
-    private async Task<FeishuCardView?> ReplacementCardAsync(
-        RetryCycle cycle,
-        string messageId,
-        CancellationToken cancellationToken)
-    {
-        var store = await storeOwner.ReadAsync(cancellationToken);
-        if (!store.Sessions.Sessions.TryGetValue(cycle.SessionId, out var session))
-        {
-            return null;
-        }
-        var cards = renderer.RuntimeError(
-            SessionView(session),
-            cycle.Error,
-            View(cycle, "stopped"));
-        int cardIndex;
-        lock (sync)
-        {
-            cardIndex = cycle.Targets.FirstOrDefault(target => string.Equals(
-                target.MessageId,
-                messageId,
-                StringComparison.Ordinal))?.CardIndex ?? cards.Count - 1;
-        }
-        return cards[Math.Clamp(cardIndex, 0, cards.Count - 1)];
-    }
 }

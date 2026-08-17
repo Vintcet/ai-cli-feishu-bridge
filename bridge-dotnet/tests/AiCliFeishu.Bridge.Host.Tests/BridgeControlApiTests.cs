@@ -512,6 +512,44 @@ public sealed class BridgeControlApiTests
     }
 
     [TestMethod]
+    public async Task SettingsEndpointAuthenticatesAndFailsClosedInPassiveHost()
+    {
+        var httpClient = client ?? throw new InvalidOperationException(
+            "测试客户端尚未初始化。");
+        using var missingToken = await httpClient.PostAsJsonAsync(
+            "/settings",
+            new { retryMaxAttempts = 7 });
+        Assert.AreEqual(HttpStatusCode.Unauthorized, missingToken.StatusCode);
+
+        using var crossSite = new HttpRequestMessage(HttpMethod.Post, "/settings")
+        {
+            Content = JsonContent.Create(new { retryMaxAttempts = 7 }),
+        };
+        crossSite.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        crossSite.Headers.Add("Sec-Fetch-Site", "cross-site");
+        using var crossSiteResponse = await httpClient.SendAsync(crossSite);
+        Assert.AreEqual(HttpStatusCode.Forbidden, crossSiteResponse.StatusCode);
+
+        using var wrongMediaType = new HttpRequestMessage(HttpMethod.Post, "/settings")
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "text/plain"),
+        };
+        wrongMediaType.Headers.Add(
+            BridgeControlApi.ControlTokenHeader,
+            "secret-token");
+        using var mediaResponse = await httpClient.SendAsync(wrongMediaType);
+        Assert.AreEqual(HttpStatusCode.UnsupportedMediaType, mediaResponse.StatusCode);
+
+        using var valid = new HttpRequestMessage(HttpMethod.Post, "/settings")
+        {
+            Content = JsonContent.Create(new { retryMaxAttempts = 7 }),
+        };
+        valid.Headers.Add(BridgeControlApi.ControlTokenHeader, "secret-token");
+        using var validResponse = await httpClient.SendAsync(valid);
+        Assert.AreEqual(HttpStatusCode.ServiceUnavailable, validResponse.StatusCode);
+    }
+
+    [TestMethod]
     public async Task LocalApprovalEndpointAuthenticatesValidatesAndFailsClosedInPassiveHost()
     {
         using var missingToken = await client!.PostAsJsonAsync(

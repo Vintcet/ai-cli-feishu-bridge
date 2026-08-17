@@ -692,11 +692,18 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         await fixture.Coordinator.HandleAsync(Failure("turn-stop", "HTTP 502"));
         var sent = fixture.Gateway.Sends.Single();
         var cycleId = RequiredJsonString(sent.Card, "retryCycleId");
+        var patchesBeforeStop = fixture.Gateway.Patches.Count;
 
         var stopped = await fixture.Coordinator.StopAsync(
             SessionId,
             cycleId,
             sent.MessageId);
+        Assert.AreEqual(
+            patchesBeforeStop,
+            fixture.Gateway.Patches.Count,
+            "飞书卡片必须在按钮回调确认后再同步。");
+        Assert.IsNotNull(stopped.AfterAcknowledged);
+        await stopped.AfterAcknowledged(CancellationToken.None);
         var repeated = await fixture.Coordinator.StopAsync(
             SessionId,
             cycleId,
@@ -708,8 +715,9 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
 
         Assert.AreEqual(BridgeRetryStopKinds.Stopped, stopped.Kind);
         Assert.IsFalse(stopped.RetryAlreadyStarted);
-        Assert.IsNotNull(stopped.Card);
-        Assert.IsFalse(CardJson(stopped.Card).Contains(
+        Assert.IsNull(stopped.Card);
+        Assert.IsTrue(fixture.Gateway.Patches.Count > patchesBeforeStop);
+        Assert.IsFalse(CardJson(fixture.Gateway.Patches.Last().Card).Contains(
             FeishuCardActions.RetryStop,
             StringComparison.Ordinal));
         Assert.AreEqual(BridgeRetryStopKinds.AlreadyStopped, repeated.Kind);

@@ -60,14 +60,16 @@ internal sealed partial class ActiveRuntimeRetryCoordinator
             PersistedRetryPhases.Stopped,
             cancellationToken);
 
-        await PatchCycleCardsAsync(cycle, "stopped", cancellationToken);
-        var replacement = await ReplacementCardAsync(cycle, messageId, cancellationToken);
         return new(
             alreadyStopped
                 ? BridgeRetryStopKinds.AlreadyStopped
                 : BridgeRetryStopKinds.Stopped,
             retryAlreadyStarted,
-            replacement);
+            AfterAcknowledged: acknowledgedCancellationToken =>
+                PatchCycleCardsAsync(
+                    cycle,
+                    "stopped",
+                    acknowledgedCancellationToken));
     }
 
     private Task ProcessFailureAsync(

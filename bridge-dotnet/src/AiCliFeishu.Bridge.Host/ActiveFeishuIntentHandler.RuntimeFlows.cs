@@ -38,7 +38,8 @@ internal sealed partial class ActiveFeishuIntentHandler
                 : result.Kind == BridgeRetryStopKinds.AlreadyStopped
                     ? "自动重试已经停止。"
                     : "已停止自动重试。",
-            result.Card);
+            result.AfterAcknowledged is null ? result.Card : null,
+            result.AfterAcknowledged);
     }
 
     private FeishuCallbackResult HandleRuntimeNewSelect(

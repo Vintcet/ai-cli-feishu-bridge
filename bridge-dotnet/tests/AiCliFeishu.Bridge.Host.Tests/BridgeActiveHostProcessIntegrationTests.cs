@@ -29,6 +29,8 @@ public sealed class BridgeActiveHostProcessIntegrationTests
             $"bridge-active-host-process-{Guid.NewGuid():N}");
         var dataDirectory = Path.Combine(root, "data");
         Directory.CreateDirectory(dataDirectory);
+        var workspaceRoot = Path.Combine(root, "workspace");
+        Directory.CreateDirectory(workspaceRoot);
         var controlToken = Convert.ToHexString(Guid.NewGuid().ToByteArray()) +
             Convert.ToHexString(Guid.NewGuid().ToByteArray());
         await File.WriteAllTextAsync(
@@ -55,6 +57,13 @@ public sealed class BridgeActiveHostProcessIntegrationTests
                         transcriptPath,
                     },
                 },
+            }));
+        await File.WriteAllTextAsync(
+            Path.Combine(dataDirectory, "settings.json"),
+            JsonSerializer.Serialize(new
+            {
+                workspaceRoot,
+                futureSetting = true,
             }));
 
         using var proxyCancellation = new CancellationTokenSource();
@@ -183,6 +192,52 @@ public sealed class BridgeActiveHostProcessIntegrationTests
             Assert.IsTrue(
                 status.RootElement.GetProperty("boundaries")
                     .GetProperty("runtimeCommandsEnabled").GetBoolean());
+
+            using var settingsRequest = new HttpRequestMessage(
+                HttpMethod.Post,
+                "settings")
+            {
+                Content = JsonContent.Create(new
+                {
+                    workspaceRoot,
+                    notifyActivity = true,
+                    notifyUserPrompts = false,
+                    autoRetryErrors = true,
+                    retryMaxAttempts = 7,
+                    retryIntervalSeconds = 11,
+                    retryJitterSeconds = 2,
+                    autoApprove = false,
+                    notifyAutoApprovals = false,
+                }),
+            };
+            settingsRequest.Headers.Add(
+                BridgeControlApi.ControlTokenHeader,
+                controlToken);
+            using var settingsResponse = await client.SendAsync(settingsRequest);
+            Assert.AreEqual(HttpStatusCode.OK, settingsResponse.StatusCode);
+            using (var settingsBody = JsonDocument.Parse(
+                       await settingsResponse.Content.ReadAsStringAsync()))
+            {
+                var settings = settingsBody.RootElement.GetProperty("settings");
+                Assert.AreEqual(7, settings.GetProperty("retryMaxAttempts").GetInt32());
+                Assert.AreEqual(
+                    11,
+                    settings.GetProperty("retryIntervalSeconds").GetInt32());
+                Assert.AreEqual(2, settings.GetProperty("retryJitterSeconds").GetInt32());
+            }
+            using (var persistedSettings = JsonDocument.Parse(
+                       await File.ReadAllTextAsync(
+                           Path.Combine(dataDirectory, "settings.json"))))
+            {
+                Assert.AreEqual(
+                    7,
+                    persistedSettings.RootElement
+                        .GetProperty("retryMaxAttempts")
+                        .GetInt32());
+                Assert.IsTrue(persistedSettings.RootElement
+                    .GetProperty("futureSetting")
+                    .GetBoolean());
+            }
 
             var leasePath = Path.Combine(dataDirectory, "bridge-active-owner.lock");
             var ownerPath = Path.Combine(leasePath, "owner.json");

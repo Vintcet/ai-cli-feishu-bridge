@@ -47,6 +47,7 @@ public static partial class BridgeControlApi
     public static void MapBridgeControlApi(this WebApplication app)
     {
         MapHealthAndControlApi(app);
+        MapSettingsControlApi(app);
         MapApprovalControlApi(app);
         MapSessionGroupControlApi(app);
         MapRuntimeControlApi(app);
