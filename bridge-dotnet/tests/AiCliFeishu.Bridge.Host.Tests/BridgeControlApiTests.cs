@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -61,6 +62,55 @@ public sealed class BridgeControlApiTests
         Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
         Assert.IsTrue(body.RootElement.GetProperty("ok").GetBoolean());
         Assert.AreEqual(1, body.RootElement.EnumerateObject().Count());
+    }
+
+    [TestMethod]
+    public void DesktopManagementRoutesRemainMapped()
+    {
+        var routes = app!.Services.GetServices<EndpointDataSource>()
+            .SelectMany(source => source.Endpoints)
+            .OfType<RouteEndpoint>()
+            .SelectMany(endpoint =>
+            {
+                var pattern = "/" +
+                    (endpoint.RoutePattern.RawText ?? string.Empty).TrimStart('/');
+                return endpoint.Metadata.GetMetadata<HttpMethodMetadata>()?
+                    .HttpMethods.Select(method => $"{method} {pattern}") ?? [];
+            })
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var required = new[]
+        {
+            "GET /health",
+            "GET /control/status",
+            "GET /control/desktop-presence",
+            "POST /control/shutdown",
+            "POST /settings",
+            "POST /approvals/resolve",
+            "POST /sessions/alias",
+            "POST /sessions/feishu-group/retry",
+            "POST /sessions/history/hide",
+            "POST /runtime-launches/claim",
+            "POST /runtime-launches/complete",
+            "POST /managed-terminals/register",
+            "POST /managed-terminals/unregister",
+            "GET /managed-terminals/{terminalId}/status",
+            "POST /opencode/launch",
+            "POST /opencode/register",
+            "POST /opencode/unregister",
+            "GET /opencode/endpoints/{port:int}/status",
+            "POST /hooks/local-presence",
+            "POST /hooks/session-start",
+            "POST /hooks/session-end",
+            "POST /hooks/permission",
+            "POST /hooks/request-user-input",
+            "POST /hooks/activity",
+            "POST /hooks/stop",
+        };
+
+        foreach (var route in required)
+        {
+            Assert.IsTrue(routes.Contains(route), $"桌面客户端依赖的路由缺失：{route}");
+        }
     }
 
     [TestMethod]

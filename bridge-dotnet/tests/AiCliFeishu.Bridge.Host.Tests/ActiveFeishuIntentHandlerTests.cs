@@ -100,6 +100,90 @@ public sealed class ActiveFeishuIntentHandlerTests
     }
 
     [TestMethod]
+    [DataRow("新建 codex 主项目", RuntimeNames.Codex, "主项目")]
+    [DataRow("新建 Claude Code 内容工具", RuntimeNames.ClaudeCode, "内容工具")]
+    [DataRow("新建 opencode 演示项目", RuntimeNames.OpenCode, "演示项目")]
+    public async Task PrivateTextCommandCreatesProjectAndDispatchesRuntimeLaunch(
+        string text,
+        string expectedRuntime,
+        string projectName)
+    {
+        using var directory = new TemporaryDirectory();
+        var fixture = Fixture.Create(bound: true, workspaceRoot: directory.Path);
+
+        await fixture.Handler.HandleAsync(NewCommandIntent(text));
+
+        var command = fixture.RuntimeCommands.Commands.Single();
+        Assert.AreEqual(expectedRuntime, command.Runtime);
+        Assert.AreEqual(RuntimeCommandTypes.SessionLaunch, command.CommandType);
+        Assert.AreEqual(
+            Path.Combine(directory.Path, projectName),
+            command.Session!.Cwd);
+        Assert.IsTrue(Directory.Exists(command.Session.Cwd));
+        StringAssert.Contains(fixture.Gateway.Replies.Single().Text, "已创建项目");
+    }
+
+    [TestMethod]
+    public async Task PrivateTextCommandReportsExistingProjectAndLaunchFailure()
+    {
+        using var directory = new TemporaryDirectory();
+        var projectPath = Path.Combine(directory.Path, "主项目");
+        Directory.CreateDirectory(projectPath);
+        var fixture = Fixture.Create(bound: true, workspaceRoot: directory.Path);
+
+        await fixture.Handler.HandleAsync(NewCommandIntent("新建 codex 主项目"));
+        var command = fixture.RuntimeCommands.Commands.Single();
+        await fixture.LaunchNotifications.CompleteAsync(
+            command.Session!.ExternalId,
+            success: false,
+            "本机找不到 Codex CLI",
+            CancellationToken.None);
+
+        Assert.AreEqual(2, fixture.Gateway.Replies.Count);
+        StringAssert.Contains(fixture.Gateway.Replies[0].Text, "已找到项目");
+        StringAssert.Contains(
+            fixture.Gateway.Replies[1].Text,
+            "Codex 未启动：本机找不到 Codex CLI");
+    }
+
+    [TestMethod]
+    public async Task PrivateTextCommandTracksFailureBeforeDispatchCompletes()
+    {
+        using var directory = new TemporaryDirectory();
+        var fixture = Fixture.Create(bound: true, workspaceRoot: directory.Path);
+        fixture.RuntimeCommands.Handler = async (command, cancellationToken) =>
+            await fixture.LaunchNotifications.CompleteAsync(
+                command.Session!.ExternalId,
+                success: false,
+                "桌面端立即拒绝",
+                cancellationToken);
+
+        await fixture.Handler.HandleAsync(NewCommandIntent("新建 codex 主项目"));
+
+        Assert.AreEqual(2, fixture.Gateway.Replies.Count);
+        Assert.IsTrue(fixture.Gateway.Replies.Any(reply =>
+            reply.Text.Contains(
+                "Codex 未启动：桌面端立即拒绝",
+                StringComparison.Ordinal)));
+    }
+
+    [TestMethod]
+    public async Task CommandCardTextResponseRunsOnlyAfterAcknowledgement()
+    {
+        var fixture = Fixture.Create(bound: true);
+
+        var result = await fixture.Handler.HandleAsync(
+            Intent(FeishuIntentTypes.CommandStatus, chatType: "card"));
+
+        Assert.IsNotNull(result?.AfterAcknowledged);
+        Assert.AreEqual(0, fixture.Gateway.Replies.Count);
+        Assert.AreEqual(0, fixture.Gateway.SentTexts.Count);
+        await result.AfterAcknowledged(CancellationToken.None);
+        Assert.AreEqual(1, fixture.Gateway.Replies.Count);
+        StringAssert.Contains(fixture.Gateway.Replies[0].Text, "飞书桥接在线");
+    }
+
+    [TestMethod]
     public async Task ConcurrentRuntimeSubmitIsDispatchedOnlyOnce()
     {
         using var directory = new TemporaryDirectory();
@@ -795,6 +879,16 @@ public sealed class ActiveFeishuIntentHandlerTests
         $"trace-{eventId}",
         Text: text);
 
+    private static FeishuIntent NewCommandIntent(string text) => new(
+        "event-new-command",
+        FeishuIntentTypes.CommandNew,
+        "owner-1",
+        "chat-1",
+        "message-new-command",
+        "p2p",
+        "trace-new-command",
+        Text: text);
+
     private static FeishuIntent RetryIntent() => new(
         "event-retry",
         FeishuIntentTypes.RetryStop,
@@ -892,6 +986,7 @@ public sealed class ActiveFeishuIntentHandlerTests
         RecordingFeishuGateway Gateway,
         RecordingRuntimeCommandGateway RuntimeCommands,
         RecordingRuntimeRetryCoordinator RuntimeRetries,
+        ActiveRuntimeLaunchNotificationCoordinator LaunchNotifications,
         RecordingSessionAliasStateOwner SessionAliases,
         RecordingSessionGroupStateOwner SessionGroups)
     {
@@ -920,6 +1015,10 @@ public sealed class ActiveFeishuIntentHandlerTests
             var sessionAliases = new RecordingSessionAliasStateOwner(store);
             var sessionGroups = new RecordingSessionGroupStateOwner(store);
             var launches = new RecordingLaunchCoordinator();
+            var launchNotifications = new ActiveRuntimeLaunchNotificationCoordinator(
+                gateway,
+                TimeProvider.System,
+                TimeSpan.FromDays(1));
             var fileTransfers = new RecordingFileTransferCoordinator();
             var prompts = new ActiveFeishuPromptCoordinator(
                 store,
@@ -953,6 +1052,7 @@ public sealed class ActiveFeishuIntentHandlerTests
                     sessionAliases,
                     sessionGroups,
                     launches,
+                    launchNotifications,
                     runtimeCommands,
                     runtimeRetries,
                     gateway,
@@ -964,6 +1064,7 @@ public sealed class ActiveFeishuIntentHandlerTests
                 gateway,
                 runtimeCommands,
                 runtimeRetries,
+                launchNotifications,
                 sessionAliases,
                 sessionGroups);
         }

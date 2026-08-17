@@ -49,6 +49,7 @@ public static partial class BridgeControlApi
         MapHealthAndControlApi(app);
         MapSettingsControlApi(app);
         MapApprovalControlApi(app);
+        MapSessionManagementControlApi(app);
         MapSessionGroupControlApi(app);
         MapRuntimeControlApi(app);
         MapManagedIngressApi(app);

@@ -43,6 +43,20 @@ internal interface IBridgeActiveSessionAliasStateOwner
         CancellationToken cancellationToken = default);
 }
 
+internal sealed record BridgeSessionHistoryHideResult(
+    SessionStoreRecord? Session,
+    string? Error)
+{
+    public bool Succeeded => Session is not null && Error is null;
+}
+
+internal interface IBridgeActiveSessionHistoryStateOwner
+{
+    ValueTask<BridgeSessionHistoryHideResult> HideSessionFromHistoryAsync(
+        string sessionId,
+        CancellationToken cancellationToken = default);
+}
+
 internal sealed record BridgeSessionGroupNameUpdateResult(
     SessionStoreRecord? Session,
     string? Error)
@@ -328,6 +342,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IBridgeActiveApprovalStateOwner),
         typeof(IBridgeActiveInputStateOwner),
         typeof(IBridgeActiveSessionAliasStateOwner),
+        typeof(IBridgeActiveSessionHistoryStateOwner),
         typeof(IBridgeActiveSessionGroupStateOwner),
         typeof(IBridgeActiveSessionGroupCoordinator),
         typeof(IBridgeActiveFileTransferCoordinator),
@@ -355,6 +370,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveFeishuFileTransferCoordinator),
         typeof(ActiveFeishuApprovalCoordinator),
         typeof(ActiveFeishuInputCoordinator),
+        typeof(ActiveRuntimeLaunchNotificationCoordinator),
         typeof(ActiveFeishuIntentHandler),
         typeof(ActiveManagedTerminalDirectory),
         typeof(ActiveManagedTerminalTransport),
@@ -437,6 +453,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(ActiveSessionGroupCoordinator),
         typeof(ActiveFeishuApprovalCoordinator),
         typeof(ActiveFeishuInputCoordinator),
+        typeof(ActiveRuntimeLaunchNotificationCoordinator),
         typeof(ActiveFeishuIntentHandler),
         typeof(BridgeFeishuIntentIngress),
         typeof(FeishuEventNormalizer),
@@ -451,6 +468,7 @@ internal static class BridgeProductionAssemblyPreflight
         typeof(IBridgeActiveApprovalStateOwner),
         typeof(IBridgeActiveInputStateOwner),
         typeof(IBridgeActiveSessionAliasStateOwner),
+        typeof(IBridgeActiveSessionHistoryStateOwner),
         typeof(IBridgeActiveSessionGroupStateOwner),
         typeof(IBridgeActiveSessionGroupCoordinator),
         typeof(IBridgeFeishuIntentHandler),

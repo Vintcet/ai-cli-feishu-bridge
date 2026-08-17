@@ -79,6 +79,61 @@ internal sealed partial class ActivePersistentBusinessStateOwner
         }
     }
 
+    public async ValueTask<BridgeSessionHistoryHideResult>
+        HideSessionFromHistoryAsync(
+            string sessionId,
+            CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        await writeGate.WaitAsync(cancellationToken);
+        try
+        {
+            _ = RequireInitialized();
+            var observed = await storeOwner.ReadAsync(cancellationToken);
+            var rejection = HistoryHideRejection(observed, sessionId);
+            if (rejection is not null)
+            {
+                return rejection;
+            }
+
+            BridgeSessionHistoryHideResult? result = null;
+            await storeOwner.UpdateAsync(
+                store =>
+                {
+                    var currentRejection = HistoryHideRejection(store, sessionId);
+                    if (currentRejection is not null)
+                    {
+                        result = currentRejection;
+                        return store;
+                    }
+
+                    var session = store.Sessions.Sessions[sessionId];
+                    if (HasNonEmptyExtension(session, "historyHiddenAt"))
+                    {
+                        result = new(session, null);
+                        return store;
+                    }
+                    var updated = BridgeStoreBusinessStateMerger.PatchSessionExtensions(
+                        store,
+                        sessionId,
+                        new Dictionary<string, JsonElement?>(StringComparer.Ordinal)
+                        {
+                            ["historyHiddenAt"] = JsonSerializer.SerializeToElement(
+                                clock.GetUtcNow().ToUniversalTime().ToString("O")),
+                        });
+                    result = new(updated.Sessions.Sessions[sessionId], null);
+                    return updated;
+                },
+                cancellationToken);
+            return result ?? throw new InvalidOperationException(
+                "历史会话隐藏没有产生结果。 ");
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
     public async ValueTask<BridgeSessionGroupNameUpdateResult>
         EnsureSessionGroupOrdinalAsync(
             string sessionId,
@@ -558,6 +613,23 @@ internal sealed partial class ActivePersistentBusinessStateOwner
                 ExtensionString(candidate, "alias") is { } currentAlias &&
                 SessionAliasRules.Key(currentAlias) == aliasKey);
         return conflict is null ? null : new(null, conflict, null);
+    }
+
+    private static BridgeSessionHistoryHideResult? HistoryHideRejection(
+        BridgeStoreSnapshot store,
+        string sessionId)
+    {
+        if (!store.Sessions.Sessions.TryGetValue(sessionId, out var session) ||
+            !ExtensionBoolean(session, "historyEligible") ||
+            session.SessionId.StartsWith(
+                "managed-terminal-",
+                StringComparison.Ordinal))
+        {
+            return new(
+                null,
+                "历史记录不存在，或不是由助手创建的会话。");
+        }
+        return null;
     }
 
     private static BridgeSessionGroupNameUpdateResult?

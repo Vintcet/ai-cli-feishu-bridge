@@ -15,6 +15,7 @@ internal sealed partial class ActivePersistentBusinessStateOwner(
       IBridgeControlBusinessStateSource,
       IBridgeActiveRuntimeStateSink,
       IBridgeActiveSessionAliasStateOwner,
+      IBridgeActiveSessionHistoryStateOwner,
       IBridgeActiveSessionGroupStateOwner,
       IBridgeActiveApprovalStateOwner,
       IBridgeActiveInputStateOwner,

@@ -26,7 +26,8 @@ internal sealed record BridgeManagedRuntimeLaunchCompletionResult(
     string? Kind = null,
     string? SessionId = null,
     bool AlreadyResolved = false,
-    string? Error = null);
+    string? Error = null,
+    string? FailureDetail = null);
 
 internal sealed record BridgeManagedRuntimeLifecycleSnapshot(
     int Pending,
@@ -299,17 +300,20 @@ internal sealed class ActiveManagedRuntimeLifecycle :
             }
             if (completion.Success is false)
             {
-                _ = completion.Error?.Trim() is { Length: > 0 } detail
-                    ? detail[..Math.Min(detail.Length, 500)]
+                var detail = completion.Error?.Trim() is { Length: > 0 } supplied
+                    ? supplied[..Math.Min(supplied.Length, 500)]
                     : "桌面助手未能启动对应窗口。";
                 ClearRequestLocked(request, clearPrompts: true);
-                return new(true, SessionId: request.SessionId);
+                return new(
+                    true,
+                    SessionId: request.SessionId,
+                    FailureDetail: detail);
             }
             if (request.Kind is NewKind)
             {
                 ClearRequestLocked(request, clearPrompts: false);
                 launchedBySession[request.SessionId] = request;
-                return new(true, Kind: NewKind);
+                return new(true, Kind: NewKind, SessionId: request.SessionId);
             }
             request.Status = LaunchStatus.Launched;
             return new(true, SessionId: request.SessionId);

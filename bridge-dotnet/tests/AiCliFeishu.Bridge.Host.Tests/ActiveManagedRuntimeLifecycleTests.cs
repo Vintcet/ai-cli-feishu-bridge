@@ -203,6 +203,8 @@ public sealed class ActiveManagedRuntimeLifecycleTests
         Assert.IsNotNull(request);
         var failed = lifecycle.Complete(new(request.RequestId, false, "启动失败"));
         Assert.IsTrue(failed.Ok);
+        Assert.AreEqual("session-complete", failed.SessionId);
+        Assert.AreEqual("启动失败", failed.FailureDetail);
         Assert.AreEqual(
             new BridgeManagedRuntimeLifecycleSnapshot(0, 0, 0, 0),
             lifecycle.Snapshot);

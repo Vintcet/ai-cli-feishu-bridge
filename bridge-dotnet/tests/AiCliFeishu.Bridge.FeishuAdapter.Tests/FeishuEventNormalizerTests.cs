@@ -70,6 +70,53 @@ public sealed class FeishuEventNormalizerTests
     }
 
     [TestMethod]
+    [DataRow("p2p", "新建 codex 主项目", FeishuIntentTypes.CommandNew)]
+    [DataRow("p2p", "新建\tcodex 主项目", FeishuIntentTypes.CommandNew)]
+    [DataRow("p2p", "工作区", FeishuIntentTypes.CommandWorkspace)]
+    [DataRow("p2p", "workspace", FeishuIntentTypes.CommandWorkspace)]
+    [DataRow("p2p", "状态", FeishuIntentTypes.CommandStatus)]
+    [DataRow("p2p", "会话", FeishuIntentTypes.CommandSessions)]
+    [DataRow("p2p", "sessions", FeishuIntentTypes.CommandSessions)]
+    [DataRow("p2p", "帮助", FeishuIntentTypes.CommandHelp)]
+    [DataRow("group", "新建", FeishuIntentTypes.MessagePrompt)]
+    [DataRow("group", "新建 codex 主项目", FeishuIntentTypes.MessagePrompt)]
+    [DataRow("group", "状态", FeishuIntentTypes.MessagePrompt)]
+    [DataRow("group", "帮助", FeishuIntentTypes.MessagePrompt)]
+    [DataRow("group", "别名", FeishuIntentTypes.MessagePrompt)]
+    [DataRow("group", "/新建", FeishuIntentTypes.CommandNew)]
+    [DataRow("group", "/NEW", FeishuIntentTypes.CommandNew)]
+    [DataRow("group", "/状态", FeishuIntentTypes.CommandStatus)]
+    [DataRow("group", "/帮助", FeishuIntentTypes.CommandHelp)]
+    [DataRow("p2p", "/状态 额外内容", FeishuIntentTypes.MessagePrompt)]
+    [DataRow("group", "/状态 额外内容", FeishuIntentTypes.MessagePrompt)]
+    public void CommandScopeHonorsChatTypeAndExactSlashCommands(
+        string chatType,
+        string command,
+        string expectedIntent)
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            sender = new { sender_id = new { open_id = "owner" } },
+            message = new
+            {
+                message_id = Guid.NewGuid().ToString("N"),
+                chat_id = "chat-1",
+                chat_type = chatType,
+                message_type = "text",
+                content = JsonSerializer.Serialize(new { text = command }),
+            },
+        });
+
+        var result = NewNormalizer().NormalizeMessage(
+            Guid.NewGuid().ToString("N"),
+            "trace-command-scope",
+            Json(payload));
+
+        Assert.AreEqual(expectedIntent, result.Intent!.IntentType);
+        Assert.AreEqual(command, result.Intent.Text);
+    }
+
+    [TestMethod]
     public void MessagePreservesParentAndAttachmentMetadata()
     {
         var result = NewNormalizer().NormalizeMessage(

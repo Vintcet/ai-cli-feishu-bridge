@@ -1168,6 +1168,9 @@ public sealed class BridgeProductionAssemblyTests
         services.AddSingleton<IBridgeActiveSessionAliasStateOwner>(provider =>
             (IBridgeActiveSessionAliasStateOwner)provider
                 .GetRequiredService<IBridgePersistentBusinessStateOwner>());
+        services.AddSingleton<IBridgeActiveSessionHistoryStateOwner>(provider =>
+            (IBridgeActiveSessionHistoryStateOwner)provider
+                .GetRequiredService<IBridgePersistentBusinessStateOwner>());
         services.AddSingleton<IBridgeActiveSessionGroupStateOwner>(provider =>
             (IBridgeActiveSessionGroupStateOwner)provider
                 .GetRequiredService<IBridgePersistentBusinessStateOwner>());
@@ -1182,6 +1185,7 @@ public sealed class BridgeProductionAssemblyTests
         services.AddSingleton<ActiveFeishuPromptCoordinator>();
         services.AddSingleton<ActiveFeishuApprovalCoordinator>();
         services.AddSingleton<ActiveFeishuInputCoordinator>();
+        services.AddSingleton<ActiveRuntimeLaunchNotificationCoordinator>();
         services.AddSingleton<ActiveFeishuIntentHandler>();
         services.AddSingleton<IBridgeFeishuIntentHandler>(provider =>
             provider.GetRequiredService<ActiveFeishuIntentHandler>());
@@ -1301,6 +1305,7 @@ public sealed class BridgeProductionAssemblyTests
           IBridgeActiveApprovalStateOwner,
           IBridgeActiveInputStateOwner,
           IBridgeActiveSessionAliasStateOwner,
+          IBridgeActiveSessionHistoryStateOwner,
           IBridgeActiveSessionGroupStateOwner
     {
         public BridgeBusinessStateSnapshot Snapshot { get; } =
@@ -1322,6 +1327,13 @@ public sealed class BridgeProductionAssemblyTests
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(new BridgeSessionAliasUpdateResult(
                 null,
+                null,
+                "recording owner"));
+
+        public ValueTask<BridgeSessionHistoryHideResult> HideSessionFromHistoryAsync(
+            string sessionId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new BridgeSessionHistoryHideResult(
                 null,
                 "recording owner"));
 

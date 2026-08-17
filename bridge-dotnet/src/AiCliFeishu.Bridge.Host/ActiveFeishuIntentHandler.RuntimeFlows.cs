@@ -9,6 +9,101 @@ namespace AiCliFeishu.Bridge.Host;
 
 internal sealed partial class ActiveFeishuIntentHandler
 {
+    private async Task<FeishuCallbackResult?> HandleCommandNewAsync(
+        FeishuIntent intent,
+        SettingsStoreDocument settings,
+        CancellationToken cancellationToken)
+    {
+        var text = intent.Text?.Trim();
+        if (IsCardAction(intent) ||
+            text is null or "新建" or "/新建" ||
+            string.Equals(text, "/new", StringComparison.OrdinalIgnoreCase))
+        {
+            return await PresentCardAsync(
+                intent,
+                renderer.RuntimeSelection(
+                    settings.WorkspaceRoot,
+                    new(
+                        Guid.NewGuid().ToString("N"),
+                        intent.MessageId,
+                        intent.ChatId)),
+                "请选择运行环境。",
+                cancellationToken);
+        }
+
+        var command = FeishuNewRuntimeCommandParser.Parse(text);
+        if (command is null)
+        {
+            return await RespondTextAsync(
+                intent,
+                FeishuNewRuntimeCommandParser.Usage(),
+                cancellationToken);
+        }
+        var projectName = BridgeWorkspaceProjectDirectory.NormalizeAndValidateName(
+            command.ProjectName,
+            out var validationError);
+        if (projectName is null)
+        {
+            return await RespondTextAsync(
+                intent,
+                $"项目名不正确：{validationError}",
+                cancellationToken);
+        }
+        if (string.IsNullOrWhiteSpace(settings.WorkspaceRoot))
+        {
+            return await RespondTextAsync(
+                intent,
+                "尚未设置默认工作区。请先在电脑端“设置”中选择默认工作区。",
+                cancellationToken);
+        }
+
+        BridgePreparedProjectDirectory prepared;
+        try
+        {
+            prepared = BridgeWorkspaceProjectDirectory.Prepare(
+                settings.WorkspaceRoot,
+                projectName);
+        }
+        catch (BridgeProjectDirectoryException error)
+        {
+            return await RespondTextAsync(
+                intent,
+                $"项目目录准备失败：{error.Message}",
+                cancellationToken);
+        }
+
+        try
+        {
+            await DispatchNewRuntimeAsync(
+                intent,
+                command.Runtime,
+                prepared,
+                intent.EventId,
+                notifyFailure: true,
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            BridgeWorkspaceProjectDirectory.Rollback(prepared);
+            throw;
+        }
+        catch
+        {
+            BridgeWorkspaceProjectDirectory.Rollback(prepared);
+            return await RespondTextAsync(
+                intent,
+                $"{RuntimeDisplayName(command.Runtime)} 未启动：启动请求提交失败，请稍后重试。",
+                cancellationToken);
+        }
+
+        return await RespondTextAsync(
+            intent,
+            $"{(prepared.Created ? "已创建" : "已找到")}项目“{projectName}”：" +
+            $"{prepared.Cwd}\n正在请求电脑端启动 " +
+            $"{RuntimeDisplayName(command.Runtime)}；会话登记后会自动创建对应飞书群。",
+            cancellationToken);
+    }
+
     private async Task<FeishuCallbackResult> StopRetryAsync(
         FeishuIntent intent,
         CancellationToken cancellationToken)
@@ -151,28 +246,12 @@ internal sealed partial class ActiveFeishuIntentHandler
 
         try
         {
-            var commandId = $"feishu-launch-{Guid.NewGuid():N}";
-            await runtimeCommands.DispatchAsync(
-                new()
-                {
-                    ProtocolVersion = BridgeProtocolVersion.Current,
-                    Runtime = runtime,
-                    Session = new RuntimeSessionReference
-                    {
-                        ExternalId = $"launch-{Guid.NewGuid():N}",
-                        Cwd = prepared.Cwd,
-                    },
-                    TraceId = intent.TraceId,
-                    CorrelationId = context.FlowId,
-                    CommandId = commandId,
-                    CommandType = RuntimeCommandTypes.SessionLaunch,
-                    CreatedAt = DateTimeOffset.UtcNow.ToString("O"),
-                    Payload = JsonSerializer.SerializeToElement(new
-                    {
-                        cwd = prepared.Cwd,
-                        elevated = false,
-                    }),
-                },
+            await DispatchNewRuntimeAsync(
+                intent,
+                runtime,
+                prepared,
+                context.FlowId,
+                notifyFailure: false,
                 cancellationToken);
         }
         catch
@@ -190,6 +269,58 @@ internal sealed partial class ActiveFeishuIntentHandler
                 runtime,
                 projectName,
                 prepared.WorkspaceRoot));
+    }
+
+    private async Task DispatchNewRuntimeAsync(
+        FeishuIntent intent,
+        string runtime,
+        BridgePreparedProjectDirectory prepared,
+        string correlationId,
+        bool notifyFailure,
+        CancellationToken cancellationToken)
+    {
+        var sessionExternalId = $"launch-{Guid.NewGuid():N}";
+        if (notifyFailure)
+        {
+            launchNotifications.Track(
+                sessionExternalId,
+                runtime,
+                intent.MessageId,
+                intent.ChatId);
+        }
+        try
+        {
+            await runtimeCommands.DispatchAsync(
+                new()
+                {
+                    ProtocolVersion = BridgeProtocolVersion.Current,
+                    Runtime = runtime,
+                    Session = new RuntimeSessionReference
+                    {
+                        ExternalId = sessionExternalId,
+                        Cwd = prepared.Cwd,
+                    },
+                    TraceId = intent.TraceId,
+                    CorrelationId = correlationId,
+                    CommandId = $"feishu-launch-{Guid.NewGuid():N}",
+                    CommandType = RuntimeCommandTypes.SessionLaunch,
+                    CreatedAt = DateTimeOffset.UtcNow.ToString("O"),
+                    Payload = JsonSerializer.SerializeToElement(new
+                    {
+                        cwd = prepared.Cwd,
+                        elevated = false,
+                    }),
+                },
+                cancellationToken);
+        }
+        catch
+        {
+            if (notifyFailure)
+            {
+                launchNotifications.Cancel(sessionExternalId);
+            }
+            throw;
+        }
     }
 
 }

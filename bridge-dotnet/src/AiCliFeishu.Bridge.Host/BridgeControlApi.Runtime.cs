@@ -304,6 +304,18 @@ public static partial class BridgeControlApi
             var launches = context.RequestServices
                 .GetRequiredService<IBridgeManagedRuntimeLaunchCoordinator>();
             var result = launches.Complete(completion);
+            if (result.Ok &&
+                !result.AlreadyResolved &&
+                result.SessionId is { Length: > 0 } sessionId)
+            {
+                await context.RequestServices
+                    .GetRequiredService<ActiveRuntimeLaunchNotificationCoordinator>()
+                    .CompleteAsync(
+                        sessionId,
+                        completion.Success is true,
+                        result.FailureDetail,
+                        cancellationToken);
+            }
             return result.Ok
                 ? Results.Ok(result)
                 : Results.Json(result, statusCode: StatusCodes.Status400BadRequest);

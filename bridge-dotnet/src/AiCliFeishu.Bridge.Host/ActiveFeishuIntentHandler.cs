@@ -14,6 +14,7 @@ internal sealed partial class ActiveFeishuIntentHandler(
     IBridgeActiveSessionAliasStateOwner sessionAliases,
     IBridgeActiveSessionGroupStateOwner sessionGroups,
     IBridgeManagedRuntimeLaunchCoordinator runtimeLaunches,
+    ActiveRuntimeLaunchNotificationCoordinator launchNotifications,
     IBridgeRuntimeCommandGateway runtimeCommands,
     IBridgeActiveRuntimeRetryCoordinator runtimeRetries,
     IFeishuGateway gateway,
@@ -106,15 +107,9 @@ internal sealed partial class ActiveFeishuIntentHandler(
                 renderer.CommandMenu(),
                 "已打开命令菜单。",
                 cancellationToken),
-            FeishuIntentTypes.CommandNew => await PresentCardAsync(
+            FeishuIntentTypes.CommandNew => await HandleCommandNewAsync(
                 intent,
-                renderer.RuntimeSelection(
-                    store.Settings.WorkspaceRoot,
-                    new(
-                        Guid.NewGuid().ToString("N"),
-                        intent.MessageId,
-                        intent.ChatId)),
-                "请选择运行环境。",
+                store.Settings,
                 cancellationToken),
             FeishuIntentTypes.CommandWorkspace => await RespondTextAsync(
                 intent,
@@ -300,62 +295,31 @@ internal sealed partial class ActiveFeishuIntentHandler(
 
     private async Task<string?> SynchronizeSessionGroupNameAsync(
         SessionStoreRecord session,
-        CancellationToken cancellationToken)
-    {
-        var chatId = ExtensionString(session, "feishuChatId");
-        if (chatId is null)
-        {
-            return null;
-        }
-
-        var name = SessionGroupNameRules.Build(
-            session.Runtime,
-            ExtensionString(session, "alias"),
-            session.ProjectName,
-            SessionShortId(session),
-            ExtensionPositiveInt(session, "feishuChatOrdinal"));
-        if (string.Equals(
-                ExtensionString(session, "feishuChatName"),
-                name,
-                StringComparison.Ordinal))
-        {
-            return null;
-        }
-
-        try
-        {
-            await gateway.UpdateSessionGroupNameAsync(
-                chatId,
-                name,
-                cancellationToken);
-            var update = await sessionGroups.UpdateSessionGroupNameAsync(
-                session.SessionId,
-                chatId,
-                name,
-                cancellationToken);
-            return update.Succeeded
-                ? null
-                : update.Error ?? "状态保存失败，请稍后重试。";
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch
-        {
-            return "请稍后重试。";
-        }
-    }
+        CancellationToken cancellationToken) =>
+        await SessionGroupNameSynchronizer.SynchronizeAsync(
+            session,
+            sessionGroups,
+            gateway,
+            cancellationToken);
 
     private async Task<FeishuCallbackResult?> RespondTextAsync(
         FeishuIntent intent,
         string text,
         CancellationToken cancellationToken)
     {
+        if (IsCardAction(intent))
+        {
+            return new(
+                "success",
+                "结果已发送到当前会话。",
+                AfterAcknowledged: acknowledgedCancellation =>
+                    SendTextWithFallbackAsync(
+                        intent,
+                        text,
+                        acknowledgedCancellation));
+        }
         await SendTextWithFallbackAsync(intent, text, cancellationToken);
-        return IsCardAction(intent)
-            ? new("success", "结果已发送到当前会话。")
-            : null;
+        return null;
     }
 
     private async Task SendTextWithFallbackAsync(
@@ -380,7 +344,8 @@ internal sealed partial class ActiveFeishuIntentHandler(
     private static string WorkspaceText(SettingsStoreDocument settings) =>
         string.IsNullOrWhiteSpace(settings.WorkspaceRoot)
             ? "尚未设置默认工作区。请在电脑端“设置”中选择。"
-            : $"默认工作区：{settings.WorkspaceRoot}\n新建命令：/新建";
+            : $"默认工作区：{settings.WorkspaceRoot}\n" +
+              "新建命令示例：新建 codex 我的项目";
 
     private static string StatusText(
         BridgeBusinessStateSnapshot business,
@@ -464,6 +429,7 @@ internal sealed partial class ActiveFeishuIntentHandler(
         "一级命令：\n/新建 - 新建会话\n/会话 - 会话管理\n/状态 - 查看状态\n" +
         "/工作区 - 查看工作区\n/别名 - 会话别名\n/帮助 - 全部功能\n\n" +
         "发送 /新建 后，从卡片选择 Codex、Claude Code 或 OpenCode。\n" +
+        "也可以发送“新建 codex 项目名”，直接创建或打开项目。\n" +
         "在机器人私聊发送“别名 #短ID 名称”可设置会话别名。";
 
     private static bool IsBoundOwner(BindingStoreDocument bindings, string openId) =>

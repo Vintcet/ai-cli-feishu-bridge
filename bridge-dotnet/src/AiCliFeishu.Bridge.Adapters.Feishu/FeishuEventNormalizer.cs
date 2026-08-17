@@ -46,13 +46,14 @@ public sealed class FeishuEventNormalizer(IFeishuInboundDeduplicator deduplicato
         {
             parameters["rootMessageId"] = rootId;
         }
+        var chatType = Text(message, "chat_type") ?? "unknown";
         return FeishuNormalizationResult.Accepted(new(
             eventId,
-            MessageIntentType(text),
+            MessageIntentType(text, chatType),
             senderId,
             chatId,
             messageId,
-            Text(message, "chat_type") ?? "unknown",
+            chatType,
             traceId,
             text,
             parameters,
@@ -130,23 +131,60 @@ public sealed class FeishuEventNormalizer(IFeishuInboundDeduplicator deduplicato
         return true;
     }
 
-    private static string MessageIntentType(string text)
+    private static string MessageIntentType(string text, string chatType)
     {
         var command = text.Trim();
         if (command == "/") return FeishuIntentTypes.CommandMenu;
-        var first = command.Split([' ', '\t', '\r', '\n'], 2)[0];
-        return first switch
+        var normalized = command.ToLowerInvariant();
+        var slashIntent = normalized switch
         {
-            "/new" or "/新建" or "新建" => FeishuIntentTypes.CommandNew,
+            "/new" or "/新建" => FeishuIntentTypes.CommandNew,
             "/workspace" or "/工作区" => FeishuIntentTypes.CommandWorkspace,
             "/status" or "/状态" => FeishuIntentTypes.CommandStatus,
             "/sessions" or "/会话" or "/会话管理" => FeishuIntentTypes.CommandSessions,
-            "/aliases" or "/别名" or "/会话别名" or "别名" =>
+            "/aliases" or "/别名" or "/会话别名" =>
                 FeishuIntentTypes.CommandAliases,
             "/help" or "/帮助" => FeishuIntentTypes.CommandHelp,
-            _ => FeishuIntentTypes.MessagePrompt,
+            _ => null,
         };
+        if (slashIntent is not null)
+        {
+            return slashIntent;
+        }
+        if (!string.Equals(chatType, "p2p", StringComparison.Ordinal))
+        {
+            return FeishuIntentTypes.MessagePrompt;
+        }
+        if (HasPlainCommandPrefix(command, "新建"))
+        {
+            return FeishuIntentTypes.CommandNew;
+        }
+        if (command == "工作区" || normalized == "workspace")
+        {
+            return FeishuIntentTypes.CommandWorkspace;
+        }
+        if (command == "状态")
+        {
+            return FeishuIntentTypes.CommandStatus;
+        }
+        if (command == "会话" || normalized == "sessions")
+        {
+            return FeishuIntentTypes.CommandSessions;
+        }
+        if (HasPlainCommandPrefix(command, "别名"))
+        {
+            return FeishuIntentTypes.CommandAliases;
+        }
+        return command == "帮助"
+            ? FeishuIntentTypes.CommandHelp
+            : FeishuIntentTypes.MessagePrompt;
     }
+
+    private static bool HasPlainCommandPrefix(string text, string command) =>
+        text.Equals(command, StringComparison.Ordinal) ||
+        text.Length > command.Length &&
+        text.StartsWith(command, StringComparison.Ordinal) &&
+        char.IsWhiteSpace(text[command.Length]);
 
     private static string IntentType(string action) => action switch
     {

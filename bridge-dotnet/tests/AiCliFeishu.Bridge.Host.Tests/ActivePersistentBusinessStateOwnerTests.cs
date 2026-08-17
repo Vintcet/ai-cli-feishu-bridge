@@ -833,6 +833,57 @@ public sealed class ActivePersistentBusinessStateOwnerTests
     }
 
     [TestMethod]
+    public async Task HistoryHideIsIdempotentAndReleasesReservedAlias()
+    {
+        var store = new RecordingStoreOwner(AliasSnapshot(
+            AliasSession("session-target", SessionStatuses.Waiting),
+            AliasSession(
+                "session-history",
+                SessionStatuses.Ended,
+                alias: "保留名",
+                extensions: new()
+                {
+                    ["historyEligible"] = JsonSerializer.SerializeToElement(true),
+                    ["futureSession"] = JsonSerializer.SerializeToElement("keep"),
+                }),
+            AliasSession(
+                "managed-terminal-placeholder",
+                SessionStatuses.Ended,
+                extensions: new()
+                {
+                    ["historyEligible"] = JsonSerializer.SerializeToElement(true),
+                })));
+        var owner = Owner(store, Origin);
+        await owner.StartAsync(CancellationToken.None);
+
+        var conflict = await owner.UpdateSessionAliasAsync(
+            "session-target",
+            "保留名");
+        var hidden = await owner.HideSessionFromHistoryAsync("session-history");
+        var hiddenAgain = await owner.HideSessionFromHistoryAsync("session-history");
+        var placeholder = await owner.HideSessionFromHistoryAsync(
+            "managed-terminal-placeholder");
+        var reused = await owner.UpdateSessionAliasAsync(
+            "session-target",
+            "保留名");
+
+        Assert.IsNotNull(conflict.Conflict);
+        Assert.IsTrue(hidden.Succeeded);
+        Assert.IsTrue(hiddenAgain.Succeeded);
+        Assert.AreEqual(
+            Origin.ToString("O"),
+            hidden.Session!.ExtensionData!["historyHiddenAt"].GetString());
+        Assert.AreEqual(
+            Origin.ToString("O"),
+            hiddenAgain.Session!.ExtensionData!["historyHiddenAt"].GetString());
+        Assert.AreEqual(
+            "keep",
+            hiddenAgain.Session.ExtensionData["futureSession"].GetString());
+        Assert.IsFalse(placeholder.Succeeded);
+        Assert.IsTrue(reused.Succeeded);
+    }
+
+    [TestMethod]
     public async Task SessionGroupNameUpdateIsAtomicAndRetainsUnknownExtensions()
     {
         var store = new RecordingStoreOwner(AliasSnapshot(
