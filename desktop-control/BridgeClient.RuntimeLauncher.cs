@@ -23,19 +23,20 @@ internal sealed partial class BridgeClient
             throw new DirectoryNotFoundException("选择的项目目录不存在。");
         }
 
-        var toolCommand = string.Equals(
-                runtime.Id,
-                RuntimeCatalog.Codex.Id,
-                StringComparison.Ordinal)
-            ? BridgeEnvironmentReader.Read(BridgeRoot, "CODEX_COMMAND") ??
-                runtime.CommandName
-            : runtime.RequiresResolvedCommand
-                ? FindRuntimeCommand(runtime)
-                : null;
+        var overrideVariable = RuntimeCommandResolver.OverrideVariableName(runtime);
+        var toolCommand =
+            BridgeEnvironmentReader.Read(BridgeRoot, overrideVariable) ??
+            (runtime.RequiresResolvedCommand
+                ? RuntimeCommandResolver.Resolve(
+                    runtime,
+                    RuntimeCommandEnvironment.FromProcess(),
+                    File.Exists)
+                : runtime.CommandName);
         if (runtime.RequiresResolvedCommand && toolCommand is null)
         {
             throw new InvalidOperationException(
-                $"找不到 {runtime.DisplayName} CLI。请先安装 {runtime.CommandName}，并确保其在 PATH 或常见用户安装目录中。");
+                $"找不到 {runtime.DisplayName} CLI。请先安装 {runtime.CommandName} 并确保它在 PATH 或常见用户安装目录中，" +
+                $"或在 .env 中设置 {overrideVariable}=<可执行文件完整路径>。");
         }
 
         await EnsureHooksInstalledAsync(runtime, cancellationToken);
@@ -57,7 +58,7 @@ internal sealed partial class BridgeClient
                 if (existingSession is not null)
                 {
                     throw new InvalidOperationException(
-                        $"会话 #{existingSession.ShortId} 已在托管窗口运行，请直接切换到现有 Codex 窗口。");
+                        $"会话 #{existingSession.ShortId} 已在托管窗口运行，请直接切换到现有 {runtime.DisplayName} 窗口。");
                 }
             }
             var launch = StartManagedTerminalCore(
@@ -477,39 +478,6 @@ internal sealed partial class BridgeClient
             startInfo.ArgumentList.Add(argument);
         }
         return startInfo;
-    }
-
-    private static string? FindRuntimeCommand(RuntimeProfile runtime)
-    {
-        var candidates = new List<string>();
-        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
-        foreach (var entry in path.Split(';', StringSplitOptions.RemoveEmptyEntries))
-        {
-            candidates.Add(Path.Combine(entry.Trim('"'), $"{runtime.CommandName}.exe"));
-            candidates.Add(Path.Combine(entry.Trim('"'), $"{runtime.CommandName}.cmd"));
-        }
-        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        candidates.Add(Path.Combine(userProfile, ".local", "bin", $"{runtime.CommandName}.exe"));
-        candidates.Add(Path.Combine(userProfile, ".local", "bin", $"{runtime.CommandName}.cmd"));
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        candidates.Add(Path.Combine(appData, "npm", $"{runtime.CommandName}.cmd"));
-        if (!string.IsNullOrWhiteSpace(runtime.LocalProgramDirectory))
-        {
-            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            candidates.Add(Path.Combine(
-                localAppData,
-                "Programs",
-                runtime.LocalProgramDirectory,
-                $"{runtime.CommandName}.exe"));
-        }
-        foreach (var candidate in candidates)
-        {
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
-        }
-        return null;
     }
 
     private ProcessStartInfo BuildWindowsTerminalStartInfo(
