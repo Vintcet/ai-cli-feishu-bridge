@@ -51,7 +51,7 @@ internal sealed partial class ActiveRuntimeRetryCoordinator :
 {
     private const string RetryPrompt =
         "刚才的请求因临时服务错误失败。请重试上一项任务，并继续从中断处执行。";
-    private const int DefaultMaxAttempts = 3;
+    private const int DefaultMaxAttempts = BridgeSettingsLimits.RetryMaxAttemptsDefault;
     private const int DefaultIntervalSeconds = 5;
     private const int DefaultJitterSeconds = 3;
     private const string RetryStateExtension = "runtimeRetryState";

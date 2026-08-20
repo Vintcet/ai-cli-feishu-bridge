@@ -138,8 +138,8 @@ public static partial class BridgeControlApi
             !TryOptionalInteger(
                 payload,
                 "retryMaxAttempts",
-                1,
-                20,
+                BridgeSettingsLimits.RetryMaxAttemptsMinimum,
+                BridgeSettingsLimits.RetryMaxAttemptsMaximum,
                 ref count,
                 out var retryMaxAttempts,
                 out error) ||

@@ -1,3 +1,5 @@
+using AiCliFeishu.Bridge.Adapters.Storage;
+
 namespace AiCliFeishuControl;
 
 internal sealed class SettingsDialog : Form
@@ -192,8 +194,8 @@ internal sealed class SettingsDialog : Form
             retryMaxAttemptsInput,
             "连续失败上限",
             settings.RetryMaxAttempts,
-            1,
-            20,
+            BridgeSettingsLimits.RetryMaxAttemptsMinimum,
+            BridgeSettingsLimits.RetryMaxAttemptsMaximum,
             24);
         ConfigureNumericInput(
             retryIntervalInput,

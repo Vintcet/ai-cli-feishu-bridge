@@ -365,7 +365,7 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
     public async Task CodexStopDoesNotClearRetryWhenTranscriptReportsFailure()
     {
         var snapshot = StoreSnapshot(["chat-1"], autoRetry: true);
-        snapshot.Settings.RetryMaxAttempts = 20;
+        snapshot.Settings.RetryMaxAttempts = 999;
         await using var fixture = await RetryFixture.CreateAsync(
             store: new RecordingStoreOwner(snapshot),
             retryDelay: TimeSpan.FromMilliseconds(5),
@@ -417,7 +417,7 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             "-2");
         StringAssert.Contains(
             CardJson(fixture.Gateway.Sends.Last().Card),
-            "第 2/20 次");
+            "第 2/999 次");
         Assert.IsTrue(fixture.Coordinator.HasActiveRetry(SessionId));
         Assert.IsFalse(fixture.Store.Current.Routes.Messages.Values.Any(route =>
             route.Kind == BridgeRuntimeNotificationKinds.Stop));

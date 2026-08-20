@@ -97,7 +97,7 @@ public sealed class ProductionBridgeStatusProjectorTests
         {
             WorkspaceRoot = @"K:\work",
             NotifyActivity = true,
-            RetryMaxAttempts = 7,
+            RetryMaxAttempts = 999,
         };
 
         var status = ProductionBridgeStatusProjector.Project(
@@ -130,7 +130,7 @@ public sealed class ProductionBridgeStatusProjectorTests
         Assert.AreEqual(1, status.Approvals.Count);
         Assert.AreEqual("@主窗口 · demo #onactive", status.Approvals[0].SessionLabel);
         Assert.IsTrue(status.Settings.NotifyActivity);
-        Assert.AreEqual(7, status.Settings.RetryMaxAttempts);
+        Assert.AreEqual(999, status.Settings.RetryMaxAttempts);
     }
 
     [TestMethod]

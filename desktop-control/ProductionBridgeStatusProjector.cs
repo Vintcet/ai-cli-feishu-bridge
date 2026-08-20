@@ -393,7 +393,11 @@ internal sealed class ProductionBridgeStatusProjector(
         NotifyActivity = settings.NotifyActivity == true,
         NotifyUserPrompts = settings.NotifyUserPrompts == true,
         AutoRetryErrors = settings.AutoRetryErrors == true,
-        RetryMaxAttempts = IntegerInRange(settings.RetryMaxAttempts, 1, 20, 3),
+        RetryMaxAttempts = IntegerInRange(
+            settings.RetryMaxAttempts,
+            BridgeSettingsLimits.RetryMaxAttemptsMinimum,
+            BridgeSettingsLimits.RetryMaxAttemptsMaximum,
+            BridgeSettingsLimits.RetryMaxAttemptsDefault),
         RetryIntervalSeconds = IntegerInRange(
             settings.RetryIntervalSeconds,
             1,

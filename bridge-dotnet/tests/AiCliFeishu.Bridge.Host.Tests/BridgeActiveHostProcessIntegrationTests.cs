@@ -203,7 +203,7 @@ public sealed class BridgeActiveHostProcessIntegrationTests
                     notifyActivity = true,
                     notifyUserPrompts = false,
                     autoRetryErrors = true,
-                    retryMaxAttempts = 7,
+                    retryMaxAttempts = 999,
                     retryIntervalSeconds = 11,
                     retryJitterSeconds = 2,
                     autoApprove = false,
@@ -219,7 +219,7 @@ public sealed class BridgeActiveHostProcessIntegrationTests
                        await settingsResponse.Content.ReadAsStringAsync()))
             {
                 var settings = settingsBody.RootElement.GetProperty("settings");
-                Assert.AreEqual(7, settings.GetProperty("retryMaxAttempts").GetInt32());
+                Assert.AreEqual(999, settings.GetProperty("retryMaxAttempts").GetInt32());
                 Assert.AreEqual(
                     11,
                     settings.GetProperty("retryIntervalSeconds").GetInt32());
@@ -230,13 +230,38 @@ public sealed class BridgeActiveHostProcessIntegrationTests
                            Path.Combine(dataDirectory, "settings.json"))))
             {
                 Assert.AreEqual(
-                    7,
+                    999,
                     persistedSettings.RootElement
                         .GetProperty("retryMaxAttempts")
                         .GetInt32());
                 Assert.IsTrue(persistedSettings.RootElement
                     .GetProperty("futureSetting")
                     .GetBoolean());
+            }
+
+            using var settingsOverflowRequest = new HttpRequestMessage(
+                HttpMethod.Post,
+                "settings")
+            {
+                Content = JsonContent.Create(new { retryMaxAttempts = 1_000 }),
+            };
+            settingsOverflowRequest.Headers.Add(
+                BridgeControlApi.ControlTokenHeader,
+                controlToken);
+            using var settingsOverflowResponse = await client.SendAsync(
+                settingsOverflowRequest);
+            Assert.AreEqual(
+                HttpStatusCode.BadRequest,
+                settingsOverflowResponse.StatusCode);
+            using (var persistedSettings = JsonDocument.Parse(
+                       await File.ReadAllTextAsync(
+                           Path.Combine(dataDirectory, "settings.json"))))
+            {
+                Assert.AreEqual(
+                    999,
+                    persistedSettings.RootElement
+                        .GetProperty("retryMaxAttempts")
+                        .GetInt32());
             }
 
             var leasePath = Path.Combine(dataDirectory, "bridge-active-owner.lock");

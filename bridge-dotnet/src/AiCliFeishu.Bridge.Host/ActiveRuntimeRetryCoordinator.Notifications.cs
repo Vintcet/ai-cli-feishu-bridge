@@ -237,7 +237,10 @@ internal sealed partial class ActiveRuntimeRetryCoordinator
 
     private static RetrySettings Settings(SettingsStoreDocument settings) => new(
         settings.AutoRetryErrors == true,
-        Math.Clamp(settings.RetryMaxAttempts ?? DefaultMaxAttempts, 1, 20),
+        Math.Clamp(
+            settings.RetryMaxAttempts ?? DefaultMaxAttempts,
+            BridgeSettingsLimits.RetryMaxAttemptsMinimum,
+            BridgeSettingsLimits.RetryMaxAttemptsMaximum),
         Math.Clamp(settings.RetryIntervalSeconds ?? DefaultIntervalSeconds, 1, 600),
         Math.Clamp(settings.RetryJitterSeconds ?? DefaultJitterSeconds, 0, 120));
 
