@@ -369,6 +369,18 @@ public sealed class ActiveManagedRuntimeLifecycleTests
         Assert.AreEqual(0, active.Snapshot.Pending);
     }
 
+    [TestMethod]
+    public void TheRequestLifetimeOutlivesTheDesktopLaunchWait()
+    {
+        // A claimed request holds the queued Feishu prompt, so expiring it before the
+        // desktop panel gives up polling would silently drop that prompt.
+        Assert.IsTrue(
+            ActiveManagedRuntimeLifecycle.DefaultRequestLifetime >
+            ActiveManagedRuntimeLifecycle.DesktopLaunchWait,
+            $"Request lifetime {ActiveManagedRuntimeLifecycle.DefaultRequestLifetime} must " +
+            $"outlive the desktop launch wait {ActiveManagedRuntimeLifecycle.DesktopLaunchWait}.");
+    }
+
     private static ActiveManagedRuntimeLifecycle Lifecycle(
         BridgeStoreSnapshot store,
         RecordingDirectory? directory = null,

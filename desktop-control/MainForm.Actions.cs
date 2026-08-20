@@ -150,7 +150,7 @@ internal sealed partial class MainForm
 
     private async Task NewRuntimeAsync(RuntimeProfile runtime)
     {
-        if (operating) return;
+        if (operating || launching) return;
         try
         {
             var status = await bridgeClient.GetStatusAsync(lifetime.Token);
@@ -183,12 +183,24 @@ internal sealed partial class MainForm
             }
 
             lastProjectDirectory = dialog.SelectedDirectory;
-            await bridgeClient.LaunchRuntimeAsync(
-                runtime,
-                dialog.SelectedDirectory,
-                dialog.RunAsAdministrator,
-                dialog.Arguments,
-                lifetime.Token);
+            SetLaunching(
+                true,
+                dialog.RunAsAdministrator
+                    ? $"正在请求管理员启动 {runtime.DisplayName}…"
+                    : $"正在启动 {runtime.DisplayName} 窗口…");
+            try
+            {
+                await bridgeClient.LaunchRuntimeAsync(
+                    runtime,
+                    dialog.SelectedDirectory,
+                    dialog.RunAsAdministrator,
+                    dialog.Arguments,
+                    lifetime.Token);
+            }
+            finally
+            {
+                SetLaunching(false);
+            }
             operationLabel.Text = dialog.RunAsAdministrator
                 ? $"已请求管理员启动；完成 UAC 确认后，Windows Terminal 窗口会自动登记 {runtime.DisplayName}"
                 : $"Windows Terminal / {runtime.DisplayName} 窗口已启动，正在等待会话登记";
@@ -293,7 +305,7 @@ internal sealed partial class MainForm
                 ApplyStatus(status);
                 if (bridgeClient.IsProductionTarget)
                 {
-                    await ProcessPendingRuntimeLaunchAsync();
+                    BeginPendingRuntimeLaunch();
                 }
             }
             lastRefreshLabel.Text = $"最后刷新：{DateTime.Now:HH:mm:ss}";
@@ -312,9 +324,21 @@ internal sealed partial class MainForm
         }
     }
 
+    // Claiming and launching a runtime can take minutes, so it must not be awaited
+    // inside the refresh cycle: that would keep `refreshing` set and make the 15s
+    // timer skip every tick, freezing sessions and approvals for the whole startup.
+    private void BeginPendingRuntimeLaunch()
+    {
+        if (operating || launching || closing || lifetime.IsCancellationRequested)
+        {
+            return;
+        }
+        _ = ProcessPendingRuntimeLaunchAsync();
+    }
+
     private async Task ProcessPendingRuntimeLaunchAsync()
     {
-        if (operating || closing || lifetime.IsCancellationRequested)
+        if (operating || launching || closing || lifetime.IsCancellationRequested)
         {
             return;
         }
@@ -341,7 +365,7 @@ internal sealed partial class MainForm
         }
 
         var isNewLaunch = request.Kind.Equals("new", StringComparison.OrdinalIgnoreCase);
-        SetOperating(
+        SetLaunching(
             true,
             isNewLaunch
                 ? $"正在从飞书新建项目 {request.ProjectName}…"
@@ -382,7 +406,7 @@ internal sealed partial class MainForm
         }
         finally
         {
-            SetOperating(false);
+            SetLaunching(false);
         }
     }
 

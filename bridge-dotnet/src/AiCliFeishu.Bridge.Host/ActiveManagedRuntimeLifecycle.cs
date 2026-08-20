@@ -56,7 +56,16 @@ internal sealed class ActiveManagedRuntimeLifecycle :
 {
     private const string NewKind = "new";
     private const string ResumeKind = "resume";
-    private static readonly TimeSpan DefaultRequestLifetime = TimeSpan.FromMinutes(2);
+
+    // A claimed request keeps the queued Feishu prompt alive, so this has to outlive
+    // the desktop launch wait (the panel polls a managed terminal for up to 300 s).
+    // Observed Codex startups already reach 135 s, and with a shorter lifetime
+    // PruneExpiredLocked would silently drop the prompt that asked for the launch.
+    internal static readonly TimeSpan DefaultRequestLifetime = TimeSpan.FromMinutes(6);
+
+    // The desktop launch wait this lifetime must cover:
+    // ManagedTerminalLaunchWaiter.DefaultMaximumAttempts (1200) * 250 ms.
+    internal static readonly TimeSpan DesktopLaunchWait = TimeSpan.FromSeconds(300);
 
     private readonly object sync = new();
     private readonly BridgeHostOptions options;

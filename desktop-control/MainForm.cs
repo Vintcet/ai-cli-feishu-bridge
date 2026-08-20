@@ -55,6 +55,11 @@ internal sealed partial class MainForm : Form
 
     private bool refreshing;
     private bool operating;
+
+    // Launching a runtime can take minutes. It blocks the launch entries like an
+    // exclusive operation, but unlike `operating` it must not stop the refresh cycle,
+    // otherwise sessions and approvals freeze for the whole startup.
+    private bool launching;
     private bool closing;
     private bool exitRequested;
     private bool trayHintShown;

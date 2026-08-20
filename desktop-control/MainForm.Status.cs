@@ -46,44 +46,20 @@ internal sealed partial class MainForm
             SetHeaderStatus("飞书未连接", Danger);
         }
 
-        if (status.PendingDesktopApprovals > 0)
+        // A background launch owns the label until it finishes; a refresh landing
+        // mid-launch must not overwrite its progress message.
+        if (!launching)
         {
-            operationLabel.Text =
-                $"有 {status.PendingDesktopApprovals} 个操作已转回本机审批";
-        }
-        else if (status.PendingApprovals > 0)
-        {
-            operationLabel.Text =
-                $"有 {status.PendingApprovals} 个操作正在飞书等待审批";
-        }
-        else if (status.PendingInputs > 0)
-        {
-            operationLabel.Text = $"有 {status.PendingInputs} 组问题等待你在飞书补充";
-        }
-        else if (status.QueuedPrompts > 0)
-        {
-            operationLabel.Text = $"有 {status.QueuedPrompts} 条助手消息正在排队";
-        }
-        else if (status.Bindings == 0 && !string.IsNullOrWhiteSpace(status.BindingCommand))
-        {
-            operationLabel.Text = $"首次绑定：请在飞书私聊机器人发送“{status.BindingCommand}”";
-        }
-        else if (status.Bindings == 0 && status.OwnerConfigured)
-        {
-            operationLabel.Text = "管理员当前已解绑，请由原管理员私聊机器人发送“绑定”恢复";
-        }
-        else
-        {
-            operationLabel.Text = $"桥接版本 {status.Version} · 服务运行正常";
+            operationLabel.Text = StatusMessage(status);
         }
         connectionButton.Text = "断开";
         connectionButton.BackColor = Color.White;
         connectionButton.ForeColor = Danger;
         connectionButton.FlatAppearance.BorderColor = Border;
         connectionButton.Enabled = !operating;
-        newCodexButton.Enabled = !operating && bridgeClient.IsProductionTarget;
-        newClaudeCodeButton.Enabled = !operating && bridgeClient.IsProductionTarget;
-        newOpenCodeButton.Enabled = !operating && bridgeClient.IsProductionTarget;
+        newCodexButton.Enabled = LaunchEntriesEnabled;
+        newClaudeCodeButton.Enabled = LaunchEntriesEnabled;
+        newOpenCodeButton.Enabled = LaunchEntriesEnabled;
         approvalButton.Enabled =
             !operating && bridgeClient.IsProductionTarget && status.PendingDesktopApprovals > 0;
         refreshButton.Enabled = !operating;
@@ -183,9 +159,9 @@ internal sealed partial class MainForm
         connectionButton.ForeColor = Color.White;
         connectionButton.FlatAppearance.BorderColor = Primary;
         connectionButton.Enabled = !operating;
-        newCodexButton.Enabled = !operating && bridgeClient.IsProductionTarget;
-        newClaudeCodeButton.Enabled = !operating && bridgeClient.IsProductionTarget;
-        newOpenCodeButton.Enabled = !operating && bridgeClient.IsProductionTarget;
+        newCodexButton.Enabled = LaunchEntriesEnabled;
+        newClaudeCodeButton.Enabled = LaunchEntriesEnabled;
+        newOpenCodeButton.Enabled = LaunchEntriesEnabled;
         approvalButton.Text = "本机审批";
         approvalButton.Enabled = false;
         refreshButton.Enabled = !operating;
@@ -202,7 +178,7 @@ internal sealed partial class MainForm
             approvalDialog = null;
             dialog.MarkResolved();
         }
-        if (!operating)
+        if (!operating && !launching)
         {
             operationLabel.Text = "点击“连接”启动飞书桥接服务";
         }
@@ -215,13 +191,33 @@ internal sealed partial class MainForm
         headerStatusDot.Invalidate();
     }
 
+    private static string StatusMessage(BridgeStatus status) => status switch
+    {
+        { PendingDesktopApprovals: > 0 } =>
+            $"有 {status.PendingDesktopApprovals} 个操作已转回本机审批",
+        { PendingApprovals: > 0 } =>
+            $"有 {status.PendingApprovals} 个操作正在飞书等待审批",
+        { PendingInputs: > 0 } =>
+            $"有 {status.PendingInputs} 组问题等待你在飞书补充",
+        { QueuedPrompts: > 0 } =>
+            $"有 {status.QueuedPrompts} 条助手消息正在排队",
+        { Bindings: 0 } when !string.IsNullOrWhiteSpace(status.BindingCommand) =>
+            $"首次绑定：请在飞书私聊机器人发送“{status.BindingCommand}”",
+        { Bindings: 0, OwnerConfigured: true } =>
+            "管理员当前已解绑，请由原管理员私聊机器人发送“绑定”恢复",
+        _ => $"桥接版本 {status.Version} · 服务运行正常",
+    };
+
+    private bool LaunchEntriesEnabled =>
+        !operating && !launching && bridgeClient.IsProductionTarget;
+
     private void SetOperating(bool value, string? message = null)
     {
         operating = value;
         connectionButton.Enabled = !value;
-        newCodexButton.Enabled = !value && bridgeClient.IsProductionTarget;
-        newClaudeCodeButton.Enabled = !value && bridgeClient.IsProductionTarget;
-        newOpenCodeButton.Enabled = !value && bridgeClient.IsProductionTarget;
+        newCodexButton.Enabled = LaunchEntriesEnabled;
+        newClaudeCodeButton.Enabled = LaunchEntriesEnabled;
+        newOpenCodeButton.Enabled = LaunchEntriesEnabled;
         approvalButton.Enabled =
             !value && bridgeClient.IsProductionTarget &&
             (lastStatus?.Approvals.Count(
@@ -233,6 +229,21 @@ internal sealed partial class MainForm
         refreshButton.Enabled = !value;
         settingsButton.Enabled = !value && bridgeClient.IsProductionTarget;
         folderButton.Enabled = !value;
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            operationLabel.Text = message;
+        }
+    }
+
+    // Keeps the launch entries disabled for the whole background launch without
+    // suppressing the refresh cycle the way SetOperating does.
+    private void SetLaunching(bool value, string? message = null)
+    {
+        launching = value;
+        newCodexButton.Enabled = LaunchEntriesEnabled;
+        newClaudeCodeButton.Enabled = LaunchEntriesEnabled;
+        newOpenCodeButton.Enabled = LaunchEntriesEnabled;
+        UpdateSessionActionState();
         if (!string.IsNullOrWhiteSpace(message))
         {
             operationLabel.Text = message;
@@ -259,7 +270,7 @@ internal sealed partial class MainForm
             session.ManagedByAssistant &&
             session.FeishuChatStatus != "connected";
         resumeSessionButton.Enabled =
-            !operating && bridgeClient.IsProductionTarget &&
+            !operating && !launching && bridgeClient.IsProductionTarget &&
             historySelected &&
             historyGrid.CurrentRow?.Tag is AssistantSession;
         deleteHistoryButton.Enabled = resumeSessionButton.Enabled;

@@ -102,7 +102,8 @@ internal sealed partial class MainForm
 
     private async void ContinueSelectedHistory()
     {
-        if (operating || historyGrid.CurrentRow?.Tag is not AssistantSession session)
+        if (operating || launching ||
+            historyGrid.CurrentRow?.Tag is not AssistantSession session)
         {
             return;
         }
