@@ -1,5 +1,7 @@
 .env
 data/*.json
+data/.bridge-store/
+data/.bridge-store.commit
 data/*.corrupt-*
 data/*.err
 data/*.out
