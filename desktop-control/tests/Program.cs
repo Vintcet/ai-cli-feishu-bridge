@@ -443,6 +443,119 @@ public sealed class RuntimeAndTerminalTests
     }
 
     [TestMethod]
+    public async Task ManagedTerminalLaunchWaiterFailsFastWhenTheHostDisappears()
+    {
+        // The host unregisters as soon as the runtime exits, so a launch that dies
+        // inside the window must be reported at once instead of polling for 5 minutes.
+        var attempts = 0;
+
+        var error = await Assert.ThrowsExceptionAsync<InvalidOperationException>(() =>
+            ManagedTerminalLaunchWaiter.WaitAsync(
+                "terminal-gone",
+                _ => Task.FromResult<ManagedTerminalLaunchStatus?>(new()
+                {
+                    Ok = true,
+                    TerminalId = "terminal-gone",
+                    Registered = ++attempts <= 2,
+                    Online = attempts <= 2,
+                    Ready = false,
+                }),
+                () => null,
+                pollInterval: TimeSpan.Zero,
+                delay: static (_, _) => Task.CompletedTask));
+
+        StringAssert.Contains(error.Message, "启动完成前退出");
+        Assert.AreEqual(4, attempts);
+        Assert.IsTrue(attempts < ManagedTerminalLaunchWaiter.DefaultMaximumAttempts);
+    }
+
+    [TestMethod]
+    public async Task ManagedTerminalLaunchWaiterToleratesASingleMissedRegistration()
+    {
+        // A lone offline answer can race a registration refresh and must not abort.
+        var attempts = 0;
+
+        var status = await ManagedTerminalLaunchWaiter.WaitAsync(
+            "terminal-flaky",
+            _ => Task.FromResult<ManagedTerminalLaunchStatus?>(new()
+            {
+                Ok = true,
+                TerminalId = "terminal-flaky",
+                Registered = ++attempts != 2,
+                Online = attempts != 2,
+                Ready = attempts > 2,
+                SessionExternalId = attempts > 2 ? "session-flaky" : null,
+            }),
+            () => null,
+            pollInterval: TimeSpan.Zero,
+            delay: static (_, _) => Task.CompletedTask);
+
+        Assert.AreEqual("session-flaky", status.SessionExternalId);
+        Assert.AreEqual(3, attempts);
+    }
+
+    [TestMethod]
+    public async Task ManagedTerminalLaunchWaiterIgnoresUnansweredProbes()
+    {
+        // A null status means the bridge could not answer and says nothing about
+        // whether the host is still alive.
+        var attempts = 0;
+
+        var status = await ManagedTerminalLaunchWaiter.WaitAsync(
+            "terminal-quiet",
+            _ => Task.FromResult<ManagedTerminalLaunchStatus?>(++attempts is 2 or 3
+                ? null
+                : new()
+                {
+                    Ok = true,
+                    TerminalId = "terminal-quiet",
+                    Registered = true,
+                    Online = true,
+                    Ready = attempts > 3,
+                    SessionExternalId = attempts > 3 ? "session-quiet" : null,
+                }),
+            () => null,
+            pollInterval: TimeSpan.Zero,
+            delay: static (_, _) => Task.CompletedTask);
+
+        Assert.AreEqual("session-quiet", status.SessionExternalId);
+        Assert.AreEqual(4, attempts);
+    }
+
+    [TestMethod]
+    public async Task ManagedTerminalLaunchWaiterStopsWaitingWhenNoHostEverRegisters()
+    {
+        var attempts = 0;
+
+        var error = await Assert.ThrowsExceptionAsync<TimeoutException>(() =>
+            ManagedTerminalLaunchWaiter.WaitAsync(
+                "terminal-absent",
+                _ =>
+                {
+                    attempts++;
+                    return Task.FromResult<ManagedTerminalLaunchStatus?>(new()
+                    {
+                        Ok = true,
+                        TerminalId = "terminal-absent",
+                        Registered = false,
+                        Online = false,
+                        Ready = false,
+                    });
+                },
+                () => null,
+                pollInterval: TimeSpan.Zero,
+                delay: static (_, _) => Task.CompletedTask));
+
+        StringAssert.Contains(error.Message, "未向 Bridge 注册");
+        Assert.AreEqual(
+            ManagedTerminalLaunchWaiter.DefaultRegistrationAttempts,
+            attempts);
+        Assert.IsTrue(
+            ManagedTerminalLaunchWaiter.DefaultRegistrationAttempts <
+            ManagedTerminalLaunchWaiter.DefaultMaximumAttempts);
+    }
+
+    [TestMethod]
     public async Task ManagedTerminalLaunchWaiterAllowsObservedSlowSessionStart()
     {
         // Local Codex startup history contains a 135-second delay between process

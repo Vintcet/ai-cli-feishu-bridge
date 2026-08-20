@@ -148,6 +148,17 @@ internal static class ManagedTerminalHost
             cancellation.Cancel();
             try { pipeTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
             try { heartbeatTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
+            if (powershell.ExitCode != 0)
+            {
+                // Drop the registration before waiting on a key press so the desktop
+                // panel sees the failure immediately instead of polling this window
+                // until its launch timeout expires.
+                TryUnregisterTerminal(terminalId, bridgeUrl, bridgeRoot, controlToken);
+                Console.WriteLine();
+                Console.WriteLine($"{runtime.DisplayName} 已退出（代码 {powershell.ExitCode}）。");
+                Console.WriteLine("请查看上方错误信息；按任意键关闭窗口。");
+                try { Console.ReadKey(intercept: true); } catch { }
+            }
             return powershell.ExitCode;
         }
         catch (Exception error)
@@ -162,23 +173,32 @@ internal static class ManagedTerminalHost
         {
             if (runtime.UsesManagedTerminal)
             {
-                try
-                {
-                    UnregisterTerminalAsync(
-                            terminalId,
-                            bridgeUrl,
-                            bridgeRoot,
-                            controlToken,
-                            CancellationToken.None)
-                        .GetAwaiter()
-                        .GetResult();
-                }
-                catch
-                {
-                    // Heartbeat expiry remains the fallback if the bridge is unavailable.
-                }
+                TryUnregisterTerminal(terminalId, bridgeUrl, bridgeRoot, controlToken);
             }
             FreeConsole();
+        }
+    }
+
+    private static void TryUnregisterTerminal(
+        string terminalId,
+        string bridgeUrl,
+        string bridgeRoot,
+        string controlToken)
+    {
+        try
+        {
+            UnregisterTerminalAsync(
+                    terminalId,
+                    bridgeUrl,
+                    bridgeRoot,
+                    controlToken,
+                    CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch
+        {
+            // Heartbeat expiry remains the fallback if the bridge is unavailable.
         }
     }
 
