@@ -235,9 +235,12 @@ function New-BridgeHookCommand {
     param(
         [Parameter(Mandatory = $true)][int]$Timeout
     )
+    # Claude Code 在 Windows 上通过 bash 执行 Hook 命令，bash 会重新解析引号，
+    # 因此不能像 Codex 那样套一层 cmd.exe /d /s /c "…"：外层引号会被 bash 吃掉，
+    # cmd.exe 取不到 /c 的命令而进入交互模式，把 stdin 的 Hook JSON 当成命令。
     $command =
-        "cmd.exe /d /s /c `"`"$hookLauncher`" --bridge-hook claudecode " +
-        "--bridge-config `"$hookConfig`"`""
+        "`"$hookLauncher`" --bridge-hook claudecode " +
+        "--bridge-config `"$hookConfig`""
     return [ordered]@{
         type = "command"
         command = $command
