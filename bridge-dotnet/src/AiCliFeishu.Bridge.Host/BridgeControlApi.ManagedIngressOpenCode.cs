@@ -438,6 +438,10 @@ public static partial class BridgeControlApi
 
         var ingress = context.RequestServices
             .GetRequiredService<IBridgeManagedHookIngress>();
+        var hookLog = context.RequestServices.GetService<IManagedHookRequestLog>();
+        var kindName = kind.ToString();
+        var sessionId = OptionalLoggedString(body.Value, "session_id");
+        var terminalId = OptionalLoggedString(body.Value, "managed_terminal_id");
         try
         {
             var result = await ingress.HandleAsync(
@@ -445,26 +449,90 @@ public static partial class BridgeControlApi
                 body.Value,
                 context.TraceIdentifier,
                 cancellationToken);
+            await LogManagedIngressAsync(
+                hookLog,
+                kindName,
+                sessionId,
+                terminalId,
+                StatusCodes.Status200OK,
+                null,
+                context.TraceIdentifier);
             return Results.Json(result);
         }
         catch (Exception error) when (
             error is InvalidDataException or ArgumentException or JsonException)
         {
+            await LogManagedIngressAsync(
+                hookLog,
+                kindName,
+                sessionId,
+                terminalId,
+                StatusCodes.Status400BadRequest,
+                error.Message,
+                context.TraceIdentifier);
             return Results.Json(
                 new { },
                 statusCode: StatusCodes.Status400BadRequest);
         }
-        catch (KeyNotFoundException)
+        catch (KeyNotFoundException error)
         {
+            await LogManagedIngressAsync(
+                hookLog,
+                kindName,
+                sessionId,
+                terminalId,
+                StatusCodes.Status409Conflict,
+                error.Message,
+                context.TraceIdentifier);
             return Results.Json(
                 new ControlError(false, "托管终端或会话身份不存在。"),
                 statusCode: StatusCodes.Status409Conflict);
         }
-        catch (InvalidOperationException)
+        catch (InvalidOperationException error)
         {
+            await LogManagedIngressAsync(
+                hookLog,
+                kindName,
+                sessionId,
+                terminalId,
+                StatusCodes.Status409Conflict,
+                error.Message,
+                context.TraceIdentifier);
             return Results.Json(
                 new ControlError(false, "托管终端 Hook 当前不可处理。"),
                 statusCode: StatusCodes.Status409Conflict);
         }
     }
+
+    private static async Task LogManagedIngressAsync(
+        IManagedHookRequestLog? hookLog,
+        string kind,
+        string? sessionId,
+        string? terminalId,
+        int statusCode,
+        string? failureReason,
+        string traceId)
+    {
+        if (hookLog is null)
+        {
+            return;
+        }
+        // Diagnostics run outside the request's cancellation so a hook that gave up
+        // waiting still leaves the reason it failed behind.
+        await hookLog.AppendAsync(
+            kind,
+            sessionId,
+            terminalId,
+            statusCode,
+            failureReason,
+            traceId,
+            CancellationToken.None);
+    }
+
+    private static string? OptionalLoggedString(JsonElement payload, string name) =>
+        payload.ValueKind == JsonValueKind.Object &&
+        payload.TryGetProperty(name, out var value) &&
+        value.ValueKind == JsonValueKind.String
+            ? ManagedHookRequestLog.Truncate(value.GetString())
+            : null;
 }

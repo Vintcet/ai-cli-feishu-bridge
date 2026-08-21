@@ -134,6 +134,9 @@ public static class BridgeHostApplication
         services.AddSingleton<ApprovalAuditLog>();
         services.AddSingleton<IApprovalAuditLog>(services =>
             services.GetRequiredService<ApprovalAuditLog>());
+        services.AddSingleton<ManagedHookRequestLog>();
+        services.AddSingleton<IManagedHookRequestLog>(services =>
+            services.GetRequiredService<ManagedHookRequestLog>());
         services.AddSingleton<IBridgeProductionStoreOwner,
             ActiveProductionStoreOwner>();
         services.AddSingleton<IBridgeProductionStoreProjectionReader>(services =>
