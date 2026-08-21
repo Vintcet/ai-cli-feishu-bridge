@@ -207,6 +207,7 @@ public sealed class BridgeActiveHostProcessIntegrationTests
                     retryIntervalSeconds = 11,
                     retryJitterSeconds = 2,
                     autoApprove = false,
+                    autoApproveMode = "relaxed",
                     notifyAutoApprovals = false,
                 }),
             };
@@ -224,6 +225,12 @@ public sealed class BridgeActiveHostProcessIntegrationTests
                     11,
                     settings.GetProperty("retryIntervalSeconds").GetInt32());
                 Assert.AreEqual(2, settings.GetProperty("retryJitterSeconds").GetInt32());
+                // The tier wins over the boolean it disagrees with, and the boolean is
+                // rewritten to match so an older build cannot read the tier as disabled.
+                Assert.AreEqual(
+                    "relaxed",
+                    settings.GetProperty("autoApproveMode").GetString());
+                Assert.IsTrue(settings.GetProperty("autoApprove").GetBoolean());
             }
             using (var persistedSettings = JsonDocument.Parse(
                        await File.ReadAllTextAsync(
@@ -237,6 +244,11 @@ public sealed class BridgeActiveHostProcessIntegrationTests
                 Assert.IsTrue(persistedSettings.RootElement
                     .GetProperty("futureSetting")
                     .GetBoolean());
+                Assert.AreEqual(
+                    "relaxed",
+                    persistedSettings.RootElement
+                        .GetProperty("autoApproveMode")
+                        .GetString());
             }
 
             using var settingsOverflowRequest = new HttpRequestMessage(

@@ -254,18 +254,7 @@ internal sealed partial class BridgeClient
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, "settings")
         {
-            Content = JsonContent.Create(new
-            {
-                workspaceRoot = settings.WorkspaceRoot,
-                notifyActivity = settings.NotifyActivity,
-                notifyUserPrompts = settings.NotifyUserPrompts,
-                autoRetryErrors = settings.AutoRetryErrors,
-                retryMaxAttempts = settings.RetryMaxAttempts,
-                retryIntervalSeconds = settings.RetryIntervalSeconds,
-                retryJitterSeconds = settings.RetryJitterSeconds,
-                autoApprove = settings.AutoApprove,
-                notifyAutoApprovals = settings.NotifyAutoApprovals,
-            }),
+            Content = JsonContent.Create(BridgeSettingsPayload.Create(settings)),
         };
         request.Headers.Add(
             "X-AI-CLI-Feishu-Control-Token",

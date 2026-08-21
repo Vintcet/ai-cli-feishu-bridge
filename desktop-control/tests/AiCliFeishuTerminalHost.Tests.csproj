@@ -33,11 +33,13 @@
     <Compile Include="..\ManagedTerminalLaunchWaiter.cs" Link="ManagedTerminalLaunchWaiter.cs" />
     <Compile Include="..\OpenCodeLaunchWaiter.cs" Link="OpenCodeLaunchWaiter.cs" />
     <Compile Include="..\Models.cs" Link="Models.cs" />
+    <Compile Include="..\BridgeSettingsPayload.cs" Link="BridgeSettingsPayload.cs" />
     <Compile Include="..\ProductionBridgeStatusProjector.cs" Link="ProductionBridgeStatusProjector.cs" />
     <Compile Include="..\BridgeHostTarget.cs" Link="BridgeHostTarget.cs" />
     <Compile Include="..\BridgeHostExitWaiter.cs" Link="BridgeHostExitWaiter.cs" />
     <Compile Include="..\BridgeHookInstallCoordinator.cs" Link="BridgeHookInstallCoordinator.cs" />
     <Compile Include="ProductionBridgeStatusProjectorTests.cs" />
+    <Compile Include="BridgeSettingsPayloadTests.cs" />
     <Compile Include="RuntimeCommandResolverTests.cs" />
   </ItemGroup>
 </Project>
