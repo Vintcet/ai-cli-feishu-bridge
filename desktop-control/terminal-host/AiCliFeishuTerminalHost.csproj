@@ -15,6 +15,7 @@
     <FileVersion>0.20.0.0</FileVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
+    <RollForward>LatestMajor</RollForward>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>

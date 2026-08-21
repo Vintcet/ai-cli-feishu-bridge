@@ -18,6 +18,7 @@
     <FileVersion>0.20.0.0</FileVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
+    <RollForward>LatestMajor</RollForward>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
@@ -52,7 +53,7 @@
     </PropertyGroup>
     <MSBuild Projects="$(MSBuildThisFileDirectory)terminal-host\AiCliFeishuTerminalHost.csproj"
              Targets="Publish"
-             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);PublishDir=$(TerminalHostPublishDirectory);PublishSingleFile=true;SelfContained=false" />
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);PublishDir=$(TerminalHostPublishDirectory);PublishSingleFile=true;SelfContained=false;RollForward=LatestMajor" />
     <Copy SourceFiles="$(TerminalHostPublishDirectory)AiCliFeishuTerminalHost.exe"
           DestinationFolder="$(PublishDir)" />
     <Delete Files="$(PublishDir)AiCliFeishuTerminalHost.dll;$(PublishDir)AiCliFeishuTerminalHost.deps.json;$(PublishDir)AiCliFeishuTerminalHost.runtimeconfig.json" />
@@ -66,7 +67,7 @@
     </PropertyGroup>
     <MSBuild Projects="$(BridgeHostProject)"
              Targets="Publish"
-             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);PublishDir=$(BridgeHostPublishDirectory);PublishSingleFile=true;SelfContained=false;Version=$(Version);AssemblyVersion=$(AssemblyVersion);FileVersion=$(FileVersion);DebugType=none;DebugSymbols=false" />
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);PublishDir=$(BridgeHostPublishDirectory);PublishSingleFile=true;SelfContained=false;RollForward=LatestMajor;Version=$(Version);AssemblyVersion=$(AssemblyVersion);FileVersion=$(FileVersion);DebugType=none;DebugSymbols=false" />
     <Error Condition="!Exists('$(BridgeHostExecutable)')"
            Text="Bridge Host sidecar publish did not produce $(BridgeHostExecutable)." />
     <Copy SourceFiles="$(BridgeHostExecutable)"

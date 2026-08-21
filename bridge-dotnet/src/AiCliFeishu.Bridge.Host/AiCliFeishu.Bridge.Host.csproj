@@ -15,6 +15,12 @@
     <FileVersion>0.20.0.0</FileVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
+    <!-- Framework-dependent on Sdk.Web means the host needs Microsoft.AspNetCore.App.
+         A machine that has moved on to a newer major (having dropped the 8.x ASP.NET
+         Core runtime while keeping 8.x NETCore/WindowsDesktop) would otherwise fail to
+         start with "You must install or update .NET", even though the desktop panel
+         still runs. Rolling forward keeps the host launchable on later majors. -->
+    <RollForward>LatestMajor</RollForward>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
