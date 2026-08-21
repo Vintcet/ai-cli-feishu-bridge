@@ -30,7 +30,7 @@ internal sealed class SettingsDialog : Form
         MaximizeBox = false;
         MinimizeBox = false;
         ShowInTaskbar = false;
-        ClientSize = new Size(620, 714);
+        ClientSize = new Size(620, 784);
         Font = new Font("Microsoft YaHei UI", 9F);
 
         var title = new Label
@@ -97,7 +97,7 @@ internal sealed class SettingsDialog : Form
             notifyAutoApprovalsBox,
             "自动审批后发送处理留痕",
             "只发送已处理信息卡，不发送带按钮的待审批卡。",
-            613,
+            657,
             settings.NotifyAutoApprovals);
         autoRetryBox.CheckedChanged += (_, _) =>
             retryOptionsGroup.Enabled = autoRetryBox.Checked;
@@ -119,14 +119,14 @@ internal sealed class SettingsDialog : Form
             Text = "取消",
             DialogResult = DialogResult.Cancel,
             Size = new Size(90, 36),
-            Location = new Point(406, 650),
+            Location = new Point(406, 724),
         };
         var saveButton = new Button
         {
             Text = "保存",
             DialogResult = DialogResult.OK,
             Size = new Size(90, 36),
-            Location = new Point(506, 650),
+            Location = new Point(506, 724),
             BackColor = Color.FromArgb(37, 99, 235),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
@@ -214,24 +214,27 @@ internal sealed class SettingsDialog : Form
     {
         autoApproveGroup.Text = "权限请求自动处理";
         autoApproveGroup.Location = new Point(26, 483);
-        autoApproveGroup.Size = new Size(568, 122);
+        autoApproveGroup.Size = new Size(568, 164);
 
         ConfigureAutoApproveOption(
             autoApproveOffBox,
             "全部人工确认",
             "每个权限请求都发送飞书卡等待你处理。",
-            22);
+            24,
+            32);
         ConfigureAutoApproveOption(
             autoApproveStrictBox,
             "仅自动允许低风险（推荐）",
-            "只放行明确的只读命令与项目内读取；其余一律人工确认。",
-            52);
+            "只放行明确的只读命令与项目内读取。",
+            60,
+            32);
         ConfigureAutoApproveOption(
             autoApproveRelaxedBox,
             "除高危外自动允许",
-            "构建、测试、装依赖、改项目内文件、提交推送都直接放行；删除、改写历史、"
-                + "提权、访问凭据、越出项目目录，以及无法解析的请求仍需人工确认。",
-            82);
+            "构建、测试、装依赖、改项目内文件、提交推送直接放行；"
+                + "删除、改写历史、提权、越出项目目录仍需确认。",
+            96,
+            56);
 
         var selected = initialAutoApproveMode switch
         {
@@ -246,19 +249,20 @@ internal sealed class SettingsDialog : Form
         RadioButton option,
         string text,
         string description,
-        int top)
+        int top,
+        int descriptionHeight)
     {
         option.Text = text;
         option.AutoSize = false;
         option.Location = new Point(16, top);
-        option.Size = new Size(250, 24);
+        option.Size = new Size(240, 24);
         var hint = new Label
         {
             Text = description,
             ForeColor = Color.FromArgb(100, 116, 139),
             AutoSize = false,
-            Location = new Point(272, top + 2),
-            Size = new Size(280, 30),
+            Location = new Point(262, top),
+            Size = new Size(294, descriptionHeight),
         };
         autoApproveGroup.Controls.Add(option);
         autoApproveGroup.Controls.Add(hint);
@@ -297,8 +301,8 @@ internal sealed class SettingsDialog : Form
             Text = "实际等待 = 基础间隔 + 0～随机增加秒\r\n成功一次即清零；下次失败从第 1 次开始。",
             ForeColor = Color.FromArgb(100, 116, 139),
             AutoSize = false,
-            Location = new Point(270, 28),
-            Size = new Size(238, 65),
+            Location = new Point(266, 26),
+            Size = new Size(290, 72),
         };
         retryOptionsGroup.Controls.Add(explanation);
     }
