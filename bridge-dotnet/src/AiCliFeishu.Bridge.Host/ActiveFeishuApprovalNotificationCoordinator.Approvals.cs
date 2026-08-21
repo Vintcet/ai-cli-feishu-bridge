@@ -104,9 +104,17 @@ internal sealed partial class ActiveFeishuApprovalNotificationCoordinator
         FeishuApprovalView approval,
         CancellationToken cancellationToken)
     {
-        if (approvals is null ||
-            store.Settings.AutoApprove != true ||
-            !string.Equals(approval.RiskLevel, "low", StringComparison.Ordinal))
+        if (approvals is null)
+        {
+            return false;
+        }
+        var mode = BridgeAutoApproveModes.Resolve(
+            store.Settings.AutoApproveMode,
+            store.Settings.AutoApprove);
+        if (mode == BridgeAutoApproveModes.Off ||
+            !ApprovalRiskLevels.IsAutoApprovable(
+                approval.RiskLevel,
+                relaxed: mode == BridgeAutoApproveModes.Relaxed))
         {
             return false;
         }

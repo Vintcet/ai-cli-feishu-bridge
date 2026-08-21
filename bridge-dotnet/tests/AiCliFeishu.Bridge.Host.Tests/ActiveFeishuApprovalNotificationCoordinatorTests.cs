@@ -236,11 +236,80 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
             StringComparison.Ordinal));
     }
 
+    [DataTestMethod]
+    // A build install (medium) is what separates the two tiers: strict keeps it manual,
+    // relaxed approves it. The legacy row proves a store written before autoApproveMode
+    // existed still behaves as strict rather than inheriting the looser tier.
+    [DataRow(BridgeAutoApproveModes.Strict, false, DisplayName = "strict keeps medium manual")]
+    [DataRow(BridgeAutoApproveModes.Relaxed, true, DisplayName = "relaxed approves medium")]
+    [DataRow(BridgeAutoApproveModes.Off, false, DisplayName = "off keeps medium manual")]
+    [DataRow(null, false, DisplayName = "legacy autoApprove behaves as strict")]
+    public async Task MediumRiskRequestFollowsTheConfiguredTier(
+        string? mode,
+        bool expectedAutoApproved)
+    {
+        var snapshot = StoreSnapshot();
+        snapshot.Settings.AutoApprove = mode != BridgeAutoApproveModes.Off;
+        snapshot.Settings.AutoApproveMode = mode;
+        var store = new RecordingStoreOwner(snapshot);
+        var state = new ActivePersistentBusinessStateOwner(
+            Options(),
+            store,
+            new FixedTimeProvider(Origin));
+        await state.StartAsync(CancellationToken.None);
+        await state.HandleAsync(ApprovalEvent("{\"command\":\"npm install\"}"));
+        var gateway = new RecordingFeishuGateway();
+        var renderer = new FeishuCardRenderer();
+        var interactions = new FeishuInteractionCoordinator(
+            gateway,
+            renderer,
+            new InMemoryFeishuCardPatchLedger());
+        var runtime = new RecordingRuntimeCommandGateway();
+        var approvals = new ActiveFeishuApprovalCoordinator(
+            state,
+            runtime,
+            interactions,
+            renderer);
+        var coordinator = new ActiveFeishuApprovalNotificationCoordinator(
+            state,
+            store,
+            gateway,
+            renderer,
+            interactions,
+            new RecordingSessionGroupCoordinator(["chat-owner"]),
+            approvals: approvals);
+
+        await coordinator.NotifyPendingAsync("approval-1", "session-1");
+
+        Assert.AreEqual("medium", store.Current.Approvals.Requests["approval-1"]
+            .ExtensionData!["riskLevel"].GetString());
+        if (expectedAutoApproved)
+        {
+            Assert.AreEqual(1, runtime.Commands.Count);
+            Assert.AreEqual(
+                "allow_once",
+                runtime.Commands[0].Payload.GetProperty("decision").GetString());
+            Assert.AreEqual(
+                ApprovalStatuses.Resolved,
+                state.Snapshot.Approvals.Requests["approval-1"].Status);
+        }
+        else
+        {
+            Assert.AreEqual(0, runtime.Commands.Count);
+            Assert.AreEqual(
+                ApprovalStatuses.Pending,
+                state.Snapshot.Approvals.Requests["approval-1"].Status);
+        }
+    }
+
     [TestMethod]
     public async Task HighRiskRequestNeverAutoApprovesEvenWhenEnabled()
     {
         var snapshot = StoreSnapshot();
         snapshot.Settings.AutoApprove = true;
+        // The relaxed tier defaults to approving, so an irreversible command is the
+        // case that must still reach a person.
+        snapshot.Settings.AutoApproveMode = BridgeAutoApproveModes.Relaxed;
         var store = new RecordingStoreOwner(snapshot);
         var state = new ActivePersistentBusinessStateOwner(
             Options(),
@@ -271,7 +340,7 @@ public sealed class ActiveFeishuApprovalNotificationCoordinatorTests
 
         await coordinator.NotifyPendingAsync("approval-1", "session-1");
 
-        Assert.AreEqual("high", store.Current.Approvals.Requests["approval-1"]
+        Assert.AreEqual("critical", store.Current.Approvals.Requests["approval-1"]
             .ExtensionData!["riskLevel"].GetString());
         Assert.AreEqual(0, runtime.Commands.Count);
         Assert.AreEqual(

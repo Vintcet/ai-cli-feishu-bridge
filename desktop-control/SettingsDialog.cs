@@ -7,18 +7,23 @@ internal sealed class SettingsDialog : Form
     private readonly CheckBox notifyActivityBox = new();
     private readonly CheckBox notifyUserPromptsBox = new();
     private readonly CheckBox autoRetryBox = new();
-    private readonly CheckBox autoApproveBox = new();
+    private readonly RadioButton autoApproveOffBox = new();
+    private readonly RadioButton autoApproveStrictBox = new();
+    private readonly RadioButton autoApproveRelaxedBox = new();
     private readonly CheckBox notifyAutoApprovalsBox = new();
     private readonly GroupBox retryOptionsGroup = new();
+    private readonly GroupBox autoApproveGroup = new();
     private readonly NumericUpDown retryMaxAttemptsInput = new();
     private readonly NumericUpDown retryIntervalInput = new();
     private readonly NumericUpDown retryJitterInput = new();
     private readonly TextBox workspaceRootBox = new();
-    private readonly bool initiallyAutoApprove;
+    private readonly string initialAutoApproveMode;
 
     public SettingsDialog(BridgeSettings settings)
     {
-        initiallyAutoApprove = settings.AutoApprove;
+        initialAutoApproveMode = BridgeAutoApproveModes.Resolve(
+            settings.AutoApproveMode,
+            settings.AutoApprove);
         Text = "助手设置";
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -87,24 +92,27 @@ internal sealed class SettingsDialog : Form
             289,
             settings.AutoRetryErrors);
         ConfigureRetryOptions(settings);
-        ConfigureCheckBox(
-            autoApproveBox,
-            "低风险审批自动允许",
-            "未命中危险命令、敏感路径或外部副作用规则时自动允许；高风险请求仍需人工确认。",
-            483,
-            settings.AutoApprove);
+        ConfigureAutoApproveOptions();
         ConfigureCheckBox(
             notifyAutoApprovalsBox,
             "自动审批后发送处理留痕",
             "只发送已处理信息卡，不发送带按钮的待审批卡。",
-            545,
+            613,
             settings.NotifyAutoApprovals);
         autoRetryBox.CheckedChanged += (_, _) =>
             retryOptionsGroup.Enabled = autoRetryBox.Checked;
         retryOptionsGroup.Enabled = autoRetryBox.Checked;
-        autoApproveBox.CheckedChanged += (_, _) =>
-            notifyAutoApprovalsBox.Enabled = autoApproveBox.Checked;
-        notifyAutoApprovalsBox.Enabled = autoApproveBox.Checked;
+        foreach (var option in new[]
+                 {
+                     autoApproveOffBox,
+                     autoApproveStrictBox,
+                     autoApproveRelaxedBox,
+                 })
+        {
+            option.CheckedChanged += (_, _) =>
+                notifyAutoApprovalsBox.Enabled = !autoApproveOffBox.Checked;
+        }
+        notifyAutoApprovalsBox.Enabled = !autoApproveOffBox.Checked;
 
         var cancelButton = new Button
         {
@@ -128,7 +136,7 @@ internal sealed class SettingsDialog : Form
         Controls.AddRange([
             title, hint, workspaceLabel, workspaceRootBox, workspaceBrowseButton,
             workspaceHint, notifyActivityBox, notifyUserPromptsBox, autoRetryBox,
-            retryOptionsGroup, autoApproveBox, notifyAutoApprovalsBox,
+            retryOptionsGroup, autoApproveGroup, notifyAutoApprovalsBox,
             cancelButton, saveButton,
         ]);
         AcceptButton = saveButton;
@@ -151,13 +159,21 @@ internal sealed class SettingsDialog : Form
             return;
         }
         if (DialogResult == DialogResult.OK &&
-            autoApproveBox.Checked &&
-            !initiallyAutoApprove)
+            SelectedAutoApproveMode != initialAutoApproveMode &&
+            SelectedAutoApproveMode != BridgeAutoApproveModes.Off)
         {
+            // The relaxed tier inverts the default from deny to allow, so it needs a
+            // sharper warning than merely turning auto-approval on.
+            var relaxed = SelectedAutoApproveMode == BridgeAutoApproveModes.Relaxed;
             var confirmation = MessageBox.Show(
                 this,
-                "开启后，低风险权限请求会自动允许；高风险请求仍会等待你确认。确定开启吗？",
-                "确认开启自动审批",
+                relaxed
+                    ? "「除高危外自动允许」会放行绝大多数请求，包括安装依赖、执行脚本、"
+                        + "改动项目内文件和提交推送，助手无需你确认即可执行。\r\n\r\n"
+                        + "仍然需要人工确认的只有：删除、改写已推送历史、提权、"
+                        + "访问凭据、越出项目目录，以及参数无法解析的请求。\r\n\r\n确定开启吗？"
+                    : "开启后，低风险权限请求会自动允许；高风险请求仍会等待你确认。确定开启吗？",
+                relaxed ? "确认开启宽松自动审批" : "确认开启自动审批",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning,
                 MessageBoxDefaultButton.Button2);
@@ -180,9 +196,73 @@ internal sealed class SettingsDialog : Form
         RetryMaxAttempts = (int)retryMaxAttemptsInput.Value,
         RetryIntervalSeconds = (int)retryIntervalInput.Value,
         RetryJitterSeconds = (int)retryJitterInput.Value,
-        AutoApprove = autoApproveBox.Checked,
+        AutoApproveMode = SelectedAutoApproveMode,
+        // Kept in sync so a build that only understands the boolean reads the tier as
+        // enabled-but-strict instead of losing the setting.
+        AutoApprove = BridgeAutoApproveModes.ToLegacyAutoApprove(SelectedAutoApproveMode),
         NotifyAutoApprovals = notifyAutoApprovalsBox.Checked,
     };
+
+    private string SelectedAutoApproveMode =>
+        autoApproveRelaxedBox.Checked
+            ? BridgeAutoApproveModes.Relaxed
+            : autoApproveStrictBox.Checked
+                ? BridgeAutoApproveModes.Strict
+                : BridgeAutoApproveModes.Off;
+
+    private void ConfigureAutoApproveOptions()
+    {
+        autoApproveGroup.Text = "权限请求自动处理";
+        autoApproveGroup.Location = new Point(26, 483);
+        autoApproveGroup.Size = new Size(568, 122);
+
+        ConfigureAutoApproveOption(
+            autoApproveOffBox,
+            "全部人工确认",
+            "每个权限请求都发送飞书卡等待你处理。",
+            22);
+        ConfigureAutoApproveOption(
+            autoApproveStrictBox,
+            "仅自动允许低风险（推荐）",
+            "只放行明确的只读命令与项目内读取；其余一律人工确认。",
+            52);
+        ConfigureAutoApproveOption(
+            autoApproveRelaxedBox,
+            "除高危外自动允许",
+            "构建、测试、装依赖、改项目内文件、提交推送都直接放行；删除、改写历史、"
+                + "提权、访问凭据、越出项目目录，以及无法解析的请求仍需人工确认。",
+            82);
+
+        var selected = initialAutoApproveMode switch
+        {
+            BridgeAutoApproveModes.Relaxed => autoApproveRelaxedBox,
+            BridgeAutoApproveModes.Strict => autoApproveStrictBox,
+            _ => autoApproveOffBox,
+        };
+        selected.Checked = true;
+    }
+
+    private void ConfigureAutoApproveOption(
+        RadioButton option,
+        string text,
+        string description,
+        int top)
+    {
+        option.Text = text;
+        option.AutoSize = false;
+        option.Location = new Point(16, top);
+        option.Size = new Size(250, 24);
+        var hint = new Label
+        {
+            Text = description,
+            ForeColor = Color.FromArgb(100, 116, 139),
+            AutoSize = false,
+            Location = new Point(272, top + 2),
+            Size = new Size(280, 30),
+        };
+        autoApproveGroup.Controls.Add(option);
+        autoApproveGroup.Controls.Add(hint);
+    }
 
     private void ConfigureRetryOptions(BridgeSettings settings)
     {

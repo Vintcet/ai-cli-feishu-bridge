@@ -146,6 +146,9 @@ internal sealed class BridgeSettings
     [JsonPropertyName("autoApprove")]
     public bool AutoApprove { get; set; }
 
+    [JsonPropertyName("autoApproveMode")]
+    public string? AutoApproveMode { get; set; }
+
     [JsonPropertyName("notifyAutoApprovals")]
     public bool NotifyAutoApprovals { get; set; }
 }

@@ -165,6 +165,11 @@ public static partial class BridgeControlApi
                 ref count,
                 out var autoApprove,
                 out error) ||
+            !TryOptionalAutoApproveMode(
+                payload,
+                ref count,
+                out var autoApproveMode,
+                out error) ||
             !TryOptionalBoolean(
                 payload,
                 "notifyAutoApprovals",
@@ -189,7 +194,32 @@ public static partial class BridgeControlApi
             retryIntervalSeconds,
             retryJitterSeconds,
             autoApprove,
+            autoApproveMode,
             notifyAutoApprovals);
+        return true;
+    }
+
+    private static bool TryOptionalAutoApproveMode(
+        JsonElement payload,
+        ref int count,
+        out string? value,
+        out string? error)
+    {
+        value = null;
+        error = null;
+        if (!payload.TryGetProperty("autoApproveMode", out var property) ||
+            property.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return true;
+        }
+        if (property.ValueKind is not JsonValueKind.String ||
+            !BridgeAutoApproveModes.IsValid(property.GetString()))
+        {
+            error = "autoApproveMode 只能是 off、strict 或 relaxed。";
+            return false;
+        }
+        value = property.GetString();
+        count++;
         return true;
     }
 
@@ -298,21 +328,33 @@ public static partial class BridgeControlApi
 
     private static SettingsStoreDocument ApplySettingsPatch(
         SettingsStoreDocument current,
-        SettingsPatch patch) => new()
+        SettingsPatch patch)
     {
-        WorkspaceRoot = patch.WorkspaceRoot ?? current.WorkspaceRoot,
-        NotifyActivity = patch.NotifyActivity ?? current.NotifyActivity,
-        NotifyUserPrompts = patch.NotifyUserPrompts ?? current.NotifyUserPrompts,
-        AutoRetryErrors = patch.AutoRetryErrors ?? current.AutoRetryErrors,
-        RetryMaxAttempts = patch.RetryMaxAttempts ?? current.RetryMaxAttempts,
-        RetryIntervalSeconds =
-            patch.RetryIntervalSeconds ?? current.RetryIntervalSeconds,
-        RetryJitterSeconds = patch.RetryJitterSeconds ?? current.RetryJitterSeconds,
-        AutoApprove = patch.AutoApprove ?? current.AutoApprove,
-        NotifyAutoApprovals =
-            patch.NotifyAutoApprovals ?? current.NotifyAutoApprovals,
-        ExtensionData = current.ExtensionData,
-    };
+        // A patch may carry either field. Resolve the tier once, then write both so the
+        // boolean stays a truthful summary for builds that only understand it.
+        var mode = BridgeAutoApproveModes.Resolve(
+            patch.AutoApproveMode ??
+                (patch.AutoApprove is null
+                    ? current.AutoApproveMode
+                    : BridgeAutoApproveModes.Resolve(null, patch.AutoApprove)),
+            patch.AutoApprove ?? current.AutoApprove);
+        return new()
+        {
+            WorkspaceRoot = patch.WorkspaceRoot ?? current.WorkspaceRoot,
+            NotifyActivity = patch.NotifyActivity ?? current.NotifyActivity,
+            NotifyUserPrompts = patch.NotifyUserPrompts ?? current.NotifyUserPrompts,
+            AutoRetryErrors = patch.AutoRetryErrors ?? current.AutoRetryErrors,
+            RetryMaxAttempts = patch.RetryMaxAttempts ?? current.RetryMaxAttempts,
+            RetryIntervalSeconds =
+                patch.RetryIntervalSeconds ?? current.RetryIntervalSeconds,
+            RetryJitterSeconds = patch.RetryJitterSeconds ?? current.RetryJitterSeconds,
+            AutoApprove = BridgeAutoApproveModes.ToLegacyAutoApprove(mode),
+            AutoApproveMode = mode,
+            NotifyAutoApprovals =
+                patch.NotifyAutoApprovals ?? current.NotifyAutoApprovals,
+            ExtensionData = current.ExtensionData,
+        };
+    }
 
     private sealed record SettingsPatch(
         string? WorkspaceRoot,
@@ -323,6 +365,7 @@ public static partial class BridgeControlApi
         int? RetryIntervalSeconds,
         int? RetryJitterSeconds,
         bool? AutoApprove,
+        string? AutoApproveMode,
         bool? NotifyAutoApprovals);
 
     private sealed record SettingsUpdateResponse(

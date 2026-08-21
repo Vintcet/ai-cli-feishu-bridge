@@ -90,6 +90,7 @@ public sealed class SettingsStoreDocument : ExtensibleStoreObject
     public int? RetryIntervalSeconds { get; set; }
     public int? RetryJitterSeconds { get; set; }
     public bool? AutoApprove { get; set; }
+    public string? AutoApproveMode { get; set; }
     public bool? NotifyAutoApprovals { get; set; }
 }
 

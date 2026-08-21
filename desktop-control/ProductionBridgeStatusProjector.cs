@@ -409,6 +409,9 @@ internal sealed class ProductionBridgeStatusProjector(
             120,
             3),
         AutoApprove = settings.AutoApprove == true,
+        AutoApproveMode = BridgeAutoApproveModes.Resolve(
+            settings.AutoApproveMode,
+            settings.AutoApprove),
         NotifyAutoApprovals = settings.NotifyAutoApprovals == true,
     };
 

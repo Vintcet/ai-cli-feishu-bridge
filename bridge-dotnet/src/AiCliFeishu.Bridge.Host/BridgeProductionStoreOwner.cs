@@ -560,6 +560,7 @@ internal sealed class ActiveProductionStoreOwner :
                 RetryIntervalSeconds = settings.RetryIntervalSeconds,
                 RetryJitterSeconds = settings.RetryJitterSeconds,
                 AutoApprove = settings.AutoApprove,
+                AutoApproveMode = settings.AutoApproveMode,
                 NotifyAutoApprovals = settings.NotifyAutoApprovals,
                 ExtensionData = settings.ExtensionData,
             };

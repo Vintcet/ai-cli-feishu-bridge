@@ -133,6 +133,48 @@ public sealed class ProductionBridgeStatusProjectorTests
         Assert.AreEqual(999, status.Settings.RetryMaxAttempts);
     }
 
+    [DataTestMethod]
+    // A store written before autoApproveMode existed only carries the boolean, and must
+    // resolve to strict rather than the looser tier.
+    [DataRow(null, true, BridgeAutoApproveModes.Strict)]
+    [DataRow(null, false, BridgeAutoApproveModes.Off)]
+    [DataRow(null, null, BridgeAutoApproveModes.Off)]
+    [DataRow("relaxed", true, BridgeAutoApproveModes.Relaxed)]
+    [DataRow("strict", true, BridgeAutoApproveModes.Strict)]
+    [DataRow("off", false, BridgeAutoApproveModes.Off)]
+    // An unrecognized tier must fall back to the boolean instead of being trusted.
+    [DataRow("everything", true, BridgeAutoApproveModes.Strict)]
+    [DataRow("everything", false, BridgeAutoApproveModes.Off)]
+    public void AutoApproveModeFallsBackToTheLegacyFlag(
+        string? mode,
+        bool? autoApprove,
+        string expected)
+    {
+        var settings = new SettingsStoreDocument
+        {
+            WorkspaceRoot = @"K:\work",
+            AutoApprove = autoApprove,
+            AutoApproveMode = mode,
+        };
+
+        var status = ProductionBridgeStatusProjector.Project(
+            Health(Component("feishu-credentials", "ready")),
+            Control(activeSessions: 0, pendingApprovals: 0),
+            Presence(),
+            new(),
+            new(),
+            new(),
+            settings,
+            @"K:\default",
+            "绑定",
+            DateTimeOffset.Parse("2026-08-09T06:00:00+08:00"));
+
+        Assert.AreEqual(expected, status.Settings.AutoApproveMode);
+        Assert.AreEqual(
+            expected != BridgeAutoApproveModes.Off,
+            status.Settings.AutoApprove);
+    }
+
     [TestMethod]
     public void EventPumpFailureIsNotReportedAsConnected()
     {
