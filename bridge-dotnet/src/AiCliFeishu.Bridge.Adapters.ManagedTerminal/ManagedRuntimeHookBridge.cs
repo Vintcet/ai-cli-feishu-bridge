@@ -8,7 +8,9 @@ namespace AiCliFeishu.Bridge.Adapters.ManagedTerminal;
 public sealed class ManagedRuntimeHookBridge(
     ManagedRuntimeHookNormalizer normalizer,
     IRuntimeEventSink eventSink,
-    int completedInteractionCapacity = 1_024) : IManagedHookResponseSink
+    int completedInteractionCapacity = 1_024,
+    int activityQueueCapacity = 4,
+    TimeSpan? activityDispatchTimeout = null) : IManagedHookResponseSink, IDisposable
 {
     private static readonly JsonElement EmptyResponse =
         JsonSerializer.SerializeToElement(new { });
@@ -17,6 +19,13 @@ public sealed class ManagedRuntimeHookBridge(
     private readonly Dictionary<InteractionKey, CompletedInteraction> completed = [];
     private readonly Queue<InteractionKey> completedOrder = new();
     private readonly int capacity = Math.Max(1, completedInteractionCapacity);
+    private readonly int activityCapacity = Math.Max(1, activityQueueCapacity);
+    private readonly TimeSpan activityTimeout = PositiveTimeout(
+        activityDispatchTimeout ?? TimeSpan.FromSeconds(3),
+        nameof(activityDispatchTimeout));
+    private readonly CancellationTokenSource activityLifetime = new();
+    private readonly object activityQueueLock = new();
+    private readonly Dictionary<ActivityQueueKey, ActivitySessionQueue> activityQueues = [];
 
     public bool IsReady(string runtime, string sessionExternalId)
     {
@@ -41,6 +50,7 @@ public sealed class ManagedRuntimeHookBridge(
         string traceId,
         CancellationToken cancellationToken = default)
     {
+        await FlushActivitiesAsync(hook, cancellationToken);
         var descriptor = DescribeInteraction(hook);
         if (descriptor is null)
         {
@@ -102,6 +112,55 @@ public sealed class ManagedRuntimeHookBridge(
         {
             ReleaseWaiter(descriptor.Value.Key, interaction);
         }
+    }
+
+    public JsonElement EnqueueActivity(JsonElement hook, string traceId)
+    {
+        if (hook.ValueKind is not JsonValueKind.Object)
+        {
+            throw new InvalidDataException("活动 Hook 必须是 JSON 对象。");
+        }
+        if (string.IsNullOrWhiteSpace(traceId))
+        {
+            throw new ArgumentException("Hook trace ID 不能为空。", nameof(traceId));
+        }
+        ObjectDisposedException.ThrowIf(activityLifetime.IsCancellationRequested, this);
+
+        var runtimeEvent = normalizer.Normalize(hook, traceId);
+        if (runtimeEvent is null)
+        {
+            return EmptyResponse.Clone();
+        }
+        if (runtimeEvent.EventType is not (
+                RuntimeEventTypes.TurnStarted or
+                RuntimeEventTypes.TurnActivity or
+                RuntimeEventTypes.TurnFailed))
+        {
+            normalizer.Release(hook);
+            throw new InvalidDataException("只有进度类 Hook 可以进入后台活动队列。");
+        }
+
+        var work = new QueuedActivity(runtimeEvent, hook.Clone());
+        var key = new ActivityQueueKey(
+            runtimeEvent.Runtime,
+            runtimeEvent.Session!.ExternalId);
+        ActivitySessionQueue queue;
+        lock (activityQueueLock)
+        {
+            if (!activityQueues.TryGetValue(key, out queue!))
+            {
+                queue = new ActivitySessionQueue(
+                    activityCapacity,
+                    ProcessActivityAsync,
+                    ReleaseActivity);
+                activityQueues.Add(key, queue);
+            }
+        }
+        if (!queue.Enqueue(work))
+        {
+            ReleaseActivity(work);
+        }
+        return EmptyResponse.Clone();
     }
 
     public Task ResolveApprovalAsync(
@@ -210,6 +269,17 @@ public sealed class ManagedRuntimeHookBridge(
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(runtime);
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionExternalId);
+        ActivitySessionQueue? activityQueue;
+        lock (activityQueueLock)
+        {
+            activityQueues.Remove(
+                new ActivityQueueKey(runtime, sessionExternalId),
+                out activityQueue);
+        }
+        if (activityQueue is not null)
+        {
+            activityQueue.Dispose();
+        }
         List<PendingInteraction> released = [];
         lock (interactionLock)
         {
@@ -234,6 +304,69 @@ public sealed class ManagedRuntimeHookBridge(
             interaction.Completion.TrySetResult(EmptyResponse.Clone());
         }
     }
+
+    public void Dispose()
+    {
+        if (activityLifetime.IsCancellationRequested)
+        {
+            return;
+        }
+        activityLifetime.Cancel();
+        ActivitySessionQueue[] queues;
+        lock (activityQueueLock)
+        {
+            queues = activityQueues.Values.ToArray();
+            activityQueues.Clear();
+        }
+        foreach (var queue in queues)
+        {
+            queue.Dispose();
+        }
+        activityLifetime.Dispose();
+    }
+
+    private async Task FlushActivitiesAsync(
+        JsonElement hook,
+        CancellationToken cancellationToken)
+    {
+        if (hook.ValueKind is not JsonValueKind.Object ||
+            OptionalString(hook, "session_id") is not { } sessionId)
+        {
+            return;
+        }
+        var runtime = OptionalString(hook, "runtime") ?? RuntimeNames.Codex;
+        ActivitySessionQueue? queue;
+        lock (activityQueueLock)
+        {
+            activityQueues.TryGetValue(
+                new ActivityQueueKey(runtime, sessionId),
+                out queue);
+        }
+        if (queue is not null)
+        {
+            await queue.FlushAsync(cancellationToken);
+        }
+    }
+
+    private async Task ProcessActivityAsync(QueuedActivity activity)
+    {
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(
+                activityLifetime.Token);
+            timeout.CancelAfter(activityTimeout);
+            await eventSink.PublishAsync(activity.Event, timeout.Token);
+        }
+        catch
+        {
+            // Progress events are deliberately best effort. Releasing the
+            // fingerprint allows a later retry to be accepted after overload.
+            normalizer.Release(activity.Hook);
+        }
+    }
+
+    private void ReleaseActivity(QueuedActivity activity) =>
+        normalizer.Release(activity.Hook);
 
     private static JsonElement BuildInputResponse(
         string runtime,
@@ -463,6 +596,204 @@ public sealed class ManagedRuntimeHookBridge(
         property.ValueKind == JsonValueKind.String
             ? property.GetString()
             : null;
+
+    private static TimeSpan PositiveTimeout(TimeSpan value, string parameterName) =>
+        value > TimeSpan.Zero
+            ? value
+            : throw new ArgumentOutOfRangeException(parameterName);
+
+    private readonly record struct ActivityQueueKey(string Runtime, string SessionId);
+
+    private sealed record QueuedActivity(
+        RuntimeEventEnvelope Event,
+        JsonElement Hook)
+    {
+        public bool Important => Event.EventType is
+            RuntimeEventTypes.TurnStarted or RuntimeEventTypes.TurnFailed;
+    }
+
+    private abstract record ActivityQueueItem;
+
+    private sealed record ActivityWork(QueuedActivity Activity) : ActivityQueueItem;
+
+    private sealed record ActivityBarrier(
+        TaskCompletionSource Completion) : ActivityQueueItem;
+
+    private sealed class ActivitySessionQueue : IDisposable
+    {
+        private readonly object sync = new();
+        private readonly int capacity;
+        private readonly Func<QueuedActivity, Task> processor;
+        private readonly Action<QueuedActivity> release;
+        private readonly LinkedList<ActivityQueueItem> pending = [];
+        private int activityCount;
+        private bool workerRunning;
+        private bool disposed;
+
+        public ActivitySessionQueue(
+            int capacity,
+            Func<QueuedActivity, Task> processor,
+            Action<QueuedActivity> release)
+        {
+            this.capacity = capacity;
+            this.processor = processor;
+            this.release = release;
+        }
+
+        public bool Enqueue(QueuedActivity activity)
+        {
+            QueuedActivity? dropped = null;
+            var startWorker = false;
+            lock (sync)
+            {
+                if (disposed)
+                {
+                    return false;
+                }
+                if (activityCount >= capacity)
+                {
+                    var candidate = pending.First;
+                    while (candidate is not null &&
+                           candidate.Value is not ActivityWork { Activity.Important: false })
+                    {
+                        candidate = candidate.Next;
+                    }
+                    if (candidate is null && !activity.Important)
+                    {
+                        return false;
+                    }
+                    candidate ??= pending.First;
+                    while (candidate is not null && candidate.Value is not ActivityWork)
+                    {
+                        candidate = candidate.Next;
+                    }
+                    if (candidate?.Value is ActivityWork oldest)
+                    {
+                        dropped = oldest.Activity;
+                        pending.Remove(candidate);
+                        activityCount--;
+                    }
+                }
+                pending.AddLast(new ActivityWork(activity));
+                activityCount++;
+                if (!workerRunning)
+                {
+                    workerRunning = true;
+                    startWorker = true;
+                }
+            }
+            if (dropped is not null)
+            {
+                release(dropped);
+            }
+            if (startWorker)
+            {
+                _ = Task.Run(ProcessAsync);
+            }
+            return true;
+        }
+
+        public Task FlushAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            TaskCompletionSource? barrier = null;
+            var startWorker = false;
+            lock (sync)
+            {
+                if (disposed || !workerRunning && pending.Count == 0)
+                {
+                    return Task.CompletedTask;
+                }
+                barrier = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                pending.AddLast(new ActivityBarrier(barrier));
+                if (!workerRunning)
+                {
+                    workerRunning = true;
+                    startWorker = true;
+                }
+            }
+            if (startWorker)
+            {
+                _ = Task.Run(ProcessAsync);
+            }
+            return barrier.Task.WaitAsync(cancellationToken);
+        }
+
+        public void Dispose()
+        {
+            List<QueuedActivity> dropped = [];
+            List<TaskCompletionSource> barriers = [];
+            lock (sync)
+            {
+                if (disposed)
+                {
+                    return;
+                }
+                disposed = true;
+                foreach (var item in pending)
+                {
+                    switch (item)
+                    {
+                        case ActivityWork work:
+                            dropped.Add(work.Activity);
+                            break;
+                        case ActivityBarrier barrier:
+                            barriers.Add(barrier.Completion);
+                            break;
+                    }
+                }
+                pending.Clear();
+                activityCount = 0;
+            }
+            foreach (var activity in dropped)
+            {
+                release(activity);
+            }
+            foreach (var barrier in barriers)
+            {
+                barrier.TrySetCanceled();
+            }
+        }
+
+        private async Task ProcessAsync()
+        {
+            while (true)
+            {
+                ActivityQueueItem item;
+                lock (sync)
+                {
+                    if (disposed || pending.First is null)
+                    {
+                        workerRunning = false;
+                        return;
+                    }
+                    item = pending.First.Value;
+                    pending.RemoveFirst();
+                    if (item is ActivityWork)
+                    {
+                        activityCount--;
+                    }
+                }
+
+                switch (item)
+                {
+                    case ActivityWork work:
+                        try
+                        {
+                            await processor(work.Activity);
+                        }
+                        catch
+                        {
+                            release(work.Activity);
+                        }
+                        break;
+                    case ActivityBarrier barrier:
+                        barrier.Completion.TrySetResult();
+                        break;
+                }
+            }
+        }
+    }
 
     private enum InteractionKind
     {

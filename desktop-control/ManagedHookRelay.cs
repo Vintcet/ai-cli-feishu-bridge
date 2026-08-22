@@ -10,6 +10,8 @@ namespace AiCliFeishuControl;
 internal static class ManagedHookRelay
 {
     private const string DefaultBridgeUrl = "http://127.0.0.1:8765";
+    private static readonly TimeSpan PresenceTimeout = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan PresenceJoinGrace = TimeSpan.FromMilliseconds(125);
     internal const string ControlTokenHeader = "X-AI-CLI-Feishu-Control-Token";
     internal const string TerminalSecretHeader = "X-AI-CLI-Feishu-Terminal-Secret";
     private const uint SnapshotProcesses = 0x00000002;
@@ -18,17 +20,37 @@ internal static class ManagedHookRelay
     public static int Run(string[] args)
     {
         HookProfile? profile = null;
+        Task<JsonObject>? execution = null;
         try
         {
             profile = HookProfile.Parse(args);
-            var result = RunAsync(profile, args).GetAwaiter().GetResult();
+            var processBudget = profile.ProcessBudget;
+            using var cancellation = processBudget is { } budget
+                ? new CancellationTokenSource(budget)
+                : new CancellationTokenSource();
+            execution = RunAsync(profile, args, cancellation.Token);
+            var result = processBudget is { } hardDeadline
+                ? execution.WaitAsync(hardDeadline).GetAwaiter().GetResult()
+                : execution.GetAwaiter().GetResult();
             if (profile.WritesOutput)
             {
                 WriteOutput(result);
             }
         }
+        catch (Exception error) when (
+            profile?.QuietFailure == true &&
+            error is OperationCanceledException or TimeoutException or
+                HttpRequestException or IOException)
+        {
+            ObserveFault(execution);
+            if (profile.WritesOutput)
+            {
+                WriteOutput(new JsonObject());
+            }
+        }
         catch (Exception error)
         {
+            ObserveFault(execution);
             Console.Error.WriteLine($"[ai-cli-feishu] C# Hook relay skipped: {error.Message}");
             if (profile?.WritesOutput is not false)
             {
@@ -40,10 +62,11 @@ internal static class ManagedHookRelay
 
     private static async Task<JsonObject> RunAsync(
         HookProfile profile,
-        string[] args)
+        string[] args,
+        CancellationToken cancellationToken)
     {
         var root = BridgeRoot(args);
-        var payload = await ReadInputAsync();
+        var payload = await ReadInputAsync(cancellationToken);
         if (profile.Runtime == "claudecode")
         {
             payload = NormalizeClaudeCodePayload(payload, DateTimeOffset.UtcNow);
@@ -78,29 +101,29 @@ internal static class ManagedHookRelay
             BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/"),
             Timeout = Timeout.InfiniteTimeSpan,
         };
-        await PostLocalPresenceAsync(client, authentication, payload);
         if (bypassed)
         {
+            await PostLocalPresenceAsync(
+                client,
+                authentication,
+                payload,
+                cancellationToken);
             return new JsonObject();
         }
 
-        var response = await PostAsync(
+        return await DispatchAsync(
             client,
-            action.Path,
             authentication,
             payload,
-            action.Timeout);
-        if (action.Path == "hooks/session-start")
-        {
-            await PostLocalPresenceAsync(client, authentication, payload);
-        }
-        return response;
+            action,
+            cancellationToken);
     }
 
-    private static async Task<JsonObject> ReadInputAsync()
+    private static async Task<JsonObject> ReadInputAsync(
+        CancellationToken cancellationToken)
     {
         Console.InputEncoding = new UTF8Encoding(false);
-        var text = (await Console.In.ReadToEndAsync()).Trim();
+        var text = (await Console.In.ReadToEndAsync(cancellationToken)).Trim();
         if (text.Length == 0)
         {
             return new JsonObject();
@@ -465,7 +488,8 @@ internal static class ManagedHookRelay
     private static async Task PostLocalPresenceAsync(
         HttpClient client,
         HookAuthentication authentication,
-        JsonObject payload)
+        JsonObject payload,
+        CancellationToken cancellationToken)
     {
         var sessionId = String(payload, "session_id");
         var processId = Integer(payload, "client_process_id");
@@ -489,11 +513,99 @@ internal static class ManagedHookRelay
                 "hooks/local-presence",
                 authentication,
                 body,
-                TimeSpan.FromMilliseconds(1_500));
+                PresenceTimeout,
+                cancellationToken);
         }
         catch
         {
             // Local presence is best effort and must not block the actual Hook.
+        }
+    }
+
+    internal static async Task<JsonObject> DispatchAsync(
+        HttpClient client,
+        HookAuthentication authentication,
+        JsonObject payload,
+        HookAction action,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        ArgumentNullException.ThrowIfNull(authentication);
+        ArgumentNullException.ThrowIfNull(payload);
+        ArgumentNullException.ThrowIfNull(action);
+
+        using var execution = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken);
+        if (action.ExecutionBudget is { } budget)
+        {
+            execution.CancelAfter(budget);
+        }
+        using var presenceCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            execution.Token);
+        presenceCancellation.CancelAfter(PresenceTimeout);
+        var presence = PostLocalPresenceAsync(
+            client,
+            authentication,
+            payload,
+            presenceCancellation.Token);
+        try
+        {
+            var response = await PostAsync(
+                client,
+                action.Path,
+                authentication,
+                payload,
+                action.Timeout,
+                execution.Token);
+            if (action.Path == "hooks/session-start")
+            {
+                await PostLocalPresenceAsync(
+                    client,
+                    authentication,
+                    payload,
+                    execution.Token);
+            }
+            return response;
+        }
+        catch (Exception error) when (
+            action.BestEffort &&
+            error is OperationCanceledException or HttpRequestException or
+                IOException or JsonException)
+        {
+            return new JsonObject();
+        }
+        finally
+        {
+            await CompletePresenceAsync(
+                presence,
+                presenceCancellation,
+                execution.Token);
+        }
+    }
+
+    private static async Task CompletePresenceAsync(
+        Task presence,
+        CancellationTokenSource cancellation,
+        CancellationToken executionToken)
+    {
+        try
+        {
+            if (presence.IsCompleted)
+            {
+                await presence;
+            }
+            else if (!executionToken.IsCancellationRequested)
+            {
+                await presence.WaitAsync(PresenceJoinGrace, executionToken);
+            }
+        }
+        catch
+        {
+            // Local presence never decides whether the actual Hook succeeded.
+        }
+        finally
+        {
+            cancellation.Cancel();
         }
     }
 
@@ -502,16 +614,21 @@ internal static class ManagedHookRelay
         string path,
         HookAuthentication authentication,
         JsonObject payload,
-        TimeSpan timeout)
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, path)
         {
             Content = JsonContent.Create(payload),
         };
         request.Headers.Add(authentication.HeaderName, authentication.Value);
-        using var cancellation = new CancellationTokenSource(timeout);
-        using var response = await client.SendAsync(request, cancellation.Token);
-        var text = await response.Content.ReadAsStringAsync(cancellation.Token);
+        using var timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken);
+        timeoutCancellation.CancelAfter(timeout);
+        using var response = await client.SendAsync(
+            request,
+            timeoutCancellation.Token);
+        var text = await response.Content.ReadAsStringAsync(timeoutCancellation.Token);
         if (!response.IsSuccessStatusCode)
         {
             var detail = text.Length <= 300 ? text : text[..300];
@@ -524,6 +641,25 @@ internal static class ManagedHookRelay
             return new JsonObject();
         }
         return JsonNode.Parse(text) as JsonObject ?? new JsonObject();
+    }
+
+    private static void ObserveFault(Task? task)
+    {
+        if (task is null || task.IsCompletedSuccessfully || task.IsCanceled)
+        {
+            return;
+        }
+        if (task.IsFaulted)
+        {
+            _ = task.Exception;
+            return;
+        }
+        _ = task.ContinueWith(
+            completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously |
+                TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
     }
 
     private static string BridgeRoot(string[] args)
@@ -665,17 +801,29 @@ internal static class ManagedHookRelay
 
     private sealed record ClientProcess(int ProcessId, string? StartedAt);
 
-    private sealed record HookAction(
+    internal sealed record HookAction(
         string Path,
         TimeSpan Timeout,
         bool CompactActivity = false,
-        bool Skip = false);
+        bool Skip = false,
+        bool BestEffort = false,
+        TimeSpan? ExecutionBudget = null);
 
     private sealed record HookProfile(
         string Runtime,
         string? Kind,
         bool WritesOutput)
     {
+        public TimeSpan? ProcessBudget => Runtime == "codex" ? Kind switch
+        {
+            "activity" => TimeSpan.FromSeconds(3),
+            "session-end" => TimeSpan.FromMilliseconds(2_400),
+            _ => null,
+        } : null;
+
+        public bool QuietFailure => Runtime == "codex" &&
+            Kind is "activity" or "session-end";
+
         public static HookProfile Parse(string[] args)
         {
             var marker = Array.FindIndex(args, item =>
@@ -706,14 +854,23 @@ internal static class ManagedHookRelay
                 return kind switch
                 {
                     "session-start" => new("hooks/session-start", TimeSpan.FromSeconds(5)),
-                    "session-end" => new("hooks/session-end", TimeSpan.FromMilliseconds(1_500)),
+                    "session-end" => new(
+                        "hooks/session-end",
+                        TimeSpan.FromMilliseconds(1_500),
+                        BestEffort: true,
+                        ExecutionBudget: TimeSpan.FromSeconds(2)),
                     "permission" => new(
                         "hooks/permission",
                         EnvironmentTimeout("AI_CLI_FEISHU_PERMISSION_HTTP_TIMEOUT_MS", 1_230_000)),
                     "input" => new(
                         "hooks/request-user-input",
                         EnvironmentTimeout("AI_CLI_FEISHU_INPUT_HTTP_TIMEOUT_MS", 1_230_000)),
-                    "activity" => new("hooks/activity", TimeSpan.FromSeconds(2), true),
+                    "activity" => new(
+                        "hooks/activity",
+                        TimeSpan.FromMilliseconds(1_750),
+                        CompactActivity: true,
+                        BestEffort: true,
+                        ExecutionBudget: TimeSpan.FromMilliseconds(2_250)),
                     "stop" => new("hooks/stop", TimeSpan.FromSeconds(10)),
                     _ => throw new InvalidOperationException($"未知 Codex Hook 类型 {kind}。"),
                 };
@@ -722,15 +879,29 @@ internal static class ManagedHookRelay
             return kind switch
             {
                 "session-start" => new("hooks/session-start", TimeSpan.FromSeconds(5)),
-                "session-end" => new("hooks/session-end", TimeSpan.FromSeconds(5)),
+                "session-end" => new(
+                    "hooks/session-end",
+                    TimeSpan.FromMilliseconds(1_750),
+                    BestEffort: true,
+                    ExecutionBudget: TimeSpan.FromMilliseconds(2_250)),
                 "permission" when String(payload, "tool_name") == "AskUserQuestion" =>
                     new(string.Empty, TimeSpan.Zero, Skip: true),
                 "permission" => new("hooks/permission", TimeSpan.FromMilliseconds(1_500_000)),
                 "pre-tool-use" when String(payload, "tool_name") == "request_user_input" =>
                     new("hooks/request-user-input", TimeSpan.FromMilliseconds(1_500_000)),
-                "pre-tool-use" => new("hooks/activity", TimeSpan.FromSeconds(5), true),
+                "pre-tool-use" => new(
+                    "hooks/activity",
+                    TimeSpan.FromMilliseconds(1_750),
+                    CompactActivity: true,
+                    BestEffort: true,
+                    ExecutionBudget: TimeSpan.FromMilliseconds(2_250)),
                 "post-tool-use" or "activity" or "user-prompt-submit" =>
-                    new("hooks/activity", TimeSpan.FromSeconds(5), true),
+                    new(
+                        "hooks/activity",
+                        TimeSpan.FromMilliseconds(1_750),
+                        CompactActivity: true,
+                        BestEffort: true,
+                        ExecutionBudget: TimeSpan.FromMilliseconds(2_250)),
                 "stop" => new("hooks/stop", TimeSpan.FromSeconds(20)),
                 _ => throw new InvalidOperationException($"未知 Claude Code Hook 类型 {kind}。"),
             };

@@ -178,9 +178,13 @@ public sealed class BridgeRuntimeEventIngress(
 {
     private readonly IBridgeRuntimeEventHandler[] eventHandlers = handlers.ToArray();
     private readonly int capacity = Math.Max(1, completedEventCapacity);
-    private readonly SemaphoreSlim writeGate = new(1, 1);
+    private readonly object streamGateLock = new();
+    private readonly Dictionary<string, StreamGate> streamGates =
+        new(StringComparer.Ordinal);
+    private readonly object completedLock = new();
     private readonly LinkedList<string> completedOrder = [];
     private readonly HashSet<string> completed = new(StringComparer.Ordinal);
+    private bool disposed;
 
     public int HandlerCount => eventHandlers.Length;
 
@@ -196,34 +200,116 @@ public sealed class BridgeRuntimeEventIngress(
                 $"运行时事件不符合 Bridge Protocol：{string.Join("；", validation.Errors)}");
         }
         var handler = RequireSingleHandler();
-        await writeGate.WaitAsync(cancellationToken);
+        var streamKey = $"{runtimeEvent.Runtime}\n{runtimeEvent.Session!.ExternalId}";
+        var streamGate = AcquireStreamGate(streamKey);
         try
         {
-            var eventKey = $"{runtimeEvent.Runtime}\n{runtimeEvent.EventId}";
-            if (completed.Contains(eventKey))
+            await streamGate.Gate.WaitAsync(cancellationToken);
+            try
             {
-                return;
-            }
+                var eventKey = $"{streamKey}\n{runtimeEvent.EventId}";
+                lock (completedLock)
+                {
+                    if (completed.Contains(eventKey))
+                    {
+                        return;
+                    }
+                }
 
-            await handler.HandleAsync(runtimeEvent, cancellationToken);
-            completed.Add(eventKey);
-            completedOrder.AddLast(eventKey);
-            while (completedOrder.Count > capacity)
+                await handler.HandleAsync(runtimeEvent, cancellationToken);
+                lock (completedLock)
+                {
+                    completed.Add(eventKey);
+                    completedOrder.AddLast(eventKey);
+                    while (completedOrder.Count > capacity)
+                    {
+                        var oldest = completedOrder.First!;
+                        completedOrder.RemoveFirst();
+                        completed.Remove(oldest.Value);
+                    }
+                }
+            }
+            finally
             {
-                var oldest = completedOrder.First!;
-                completedOrder.RemoveFirst();
-                completed.Remove(oldest.Value);
+                streamGate.Gate.Release();
             }
         }
         finally
         {
-            writeGate.Release();
+            ReleaseStreamGate(streamKey, streamGate);
         }
     }
 
     public void ValidateConfiguration() => _ = RequireSingleHandler();
 
-    public void Dispose() => writeGate.Dispose();
+    public void Dispose()
+    {
+        StreamGate[] gates;
+        lock (streamGateLock)
+        {
+            if (disposed)
+            {
+                return;
+            }
+            disposed = true;
+            gates = [];
+            foreach (var entry in streamGates.ToArray())
+            {
+                entry.Value.DisposeWhenIdle = true;
+                if (entry.Value.Users == 0)
+                {
+                    streamGates.Remove(entry.Key);
+                    gates = [.. gates, entry.Value];
+                }
+            }
+        }
+        foreach (var gate in gates)
+        {
+            gate.Gate.Dispose();
+        }
+    }
+
+    private StreamGate AcquireStreamGate(string streamKey)
+    {
+        lock (streamGateLock)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (!streamGates.TryGetValue(streamKey, out var streamGate))
+            {
+                streamGate = new();
+                streamGates.Add(streamKey, streamGate);
+            }
+            streamGate.Users++;
+            return streamGate;
+        }
+    }
+
+    private void ReleaseStreamGate(string streamKey, StreamGate streamGate)
+    {
+        SemaphoreSlim? gateToDispose = null;
+        lock (streamGateLock)
+        {
+            streamGate.Users--;
+            if (streamGate.Users == 0 &&
+                streamGate.DisposeWhenIdle &&
+                streamGates.TryGetValue(streamKey, out var current) &&
+                ReferenceEquals(current, streamGate))
+            {
+                streamGates.Remove(streamKey);
+                gateToDispose = streamGate.Gate;
+            }
+        }
+        gateToDispose?.Dispose();
+    }
+
+    private sealed class StreamGate
+    {
+        public SemaphoreSlim Gate { get; } = new(1, 1);
+
+        public int Users { get; set; }
+
+        public bool DisposeWhenIdle { get; set; }
+    }
 
     private IBridgeRuntimeEventHandler RequireSingleHandler() =>
         OptionalSingleHandler() ?? throw new InvalidOperationException(

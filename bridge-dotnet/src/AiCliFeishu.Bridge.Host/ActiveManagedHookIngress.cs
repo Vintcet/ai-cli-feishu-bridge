@@ -234,10 +234,12 @@ internal sealed class ActiveManagedHookIngress(
         await lifecycleGate.WaitAsync(cancellationToken);
         try
         {
-            handling = hookBridge.HandleAsync(
-                BindExistingIdentity(payload),
-                traceId,
-                cancellationToken);
+            var canonical = BindExistingIdentity(payload);
+            if (kind is BridgeManagedIngressKind.Activity)
+            {
+                return hookBridge.EnqueueActivity(canonical, traceId);
+            }
+            handling = hookBridge.HandleAsync(canonical, traceId, cancellationToken);
         }
         finally
         {

@@ -42,6 +42,39 @@ public sealed class BridgeBoundaryTests
     }
 
     [TestMethod]
+    public async Task RuntimeIngressDoesNotLetOneSessionBlockAnotherSession()
+    {
+        var handler = new BlockingSessionRuntimeEventHandler("session-blocked");
+        using var ingress = new BridgeRuntimeEventIngress([handler]);
+        var blocked = ingress.PublishAsync(Event("event-blocked", "session-blocked"));
+        await handler.BlockedStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await ingress.PublishAsync(Event("event-independent", "session-independent"))
+            .WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.AreEqual(2, handler.MaximumConcurrency);
+        handler.ReleaseBlocked.TrySetResult();
+        await blocked;
+    }
+
+    [TestMethod]
+    public async Task RuntimeIngressDefersGateDisposalUntilInFlightEventCompletes()
+    {
+        var handler = new BlockingSessionRuntimeEventHandler("session-disposing");
+        var ingress = new BridgeRuntimeEventIngress([handler]);
+        var publish = ingress.PublishAsync(Event("event-disposing", "session-disposing"));
+        await handler.BlockedStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        ingress.Dispose();
+        handler.ReleaseBlocked.TrySetResult();
+
+        await publish;
+        await Assert.ThrowsExceptionAsync<ObjectDisposedException>(() =>
+            ingress.PublishAsync(Event("event-after-dispose", "session-after-dispose")));
+        ingress.Dispose();
+    }
+
+    [TestMethod]
     public async Task RuntimeIngressRejectsInvalidProtocolBeforeBusinessHandler()
     {
         var handler = new RecordingRuntimeEventHandler();
@@ -340,11 +373,13 @@ public sealed class BridgeBoundaryTests
         Assert.ThrowsException<InvalidOperationException>(duplicateRuntimeIngressAdapters.Validate);
     }
 
-    private static RuntimeEventEnvelope Event(string eventId) => new()
+    private static RuntimeEventEnvelope Event(
+        string eventId,
+        string sessionId = "session-1") => new()
     {
         ProtocolVersion = BridgeProtocolVersion.Current,
         Runtime = RuntimeNames.Codex,
-        Session = new RuntimeSessionReference { ExternalId = "session-1", Cwd = "C:/repo" },
+        Session = new RuntimeSessionReference { ExternalId = sessionId, Cwd = "C:/repo" },
         TraceId = "trace-1",
         EventId = eventId,
         EventType = RuntimeEventTypes.RuntimeConnected,
@@ -417,6 +452,40 @@ public sealed class BridgeBoundaryTests
                     throw new InvalidOperationException("synthetic failure");
                 }
                 Events.Add(runtimeEvent);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref concurrency);
+            }
+        }
+    }
+
+    private sealed class BlockingSessionRuntimeEventHandler(string blockedSessionId)
+        : IBridgeRuntimeEventHandler
+    {
+        private int concurrency;
+
+        public TaskCompletionSource BlockedStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource ReleaseBlocked { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int MaximumConcurrency { get; private set; }
+
+        public async Task HandleAsync(
+            RuntimeEventEnvelope runtimeEvent,
+            CancellationToken cancellationToken = default)
+        {
+            var current = Interlocked.Increment(ref concurrency);
+            MaximumConcurrency = Math.Max(MaximumConcurrency, current);
+            try
+            {
+                if (runtimeEvent.Session!.ExternalId == blockedSessionId)
+                {
+                    BlockedStarted.TrySetResult();
+                    await ReleaseBlocked.Task.WaitAsync(cancellationToken);
+                }
             }
             finally
             {

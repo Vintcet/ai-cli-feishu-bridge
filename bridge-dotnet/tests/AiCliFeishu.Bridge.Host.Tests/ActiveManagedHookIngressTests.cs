@@ -263,6 +263,121 @@ public sealed class ActiveManagedHookIngressTests
         Assert.AreEqual("trace-retry", fixture.Sink.Events.Single().TraceId);
     }
 
+    [TestMethod]
+    public async Task ActivityAcknowledgementDoesNotWaitForSlowBusinessPipeline()
+    {
+        var fixture = await Fixture.CreateAsync();
+        await fixture.Ingress.HandleAsync(
+            BridgeManagedIngressKind.SessionStart,
+            SessionStart("activity-fast-ack", terminalId: null, elevated: null),
+            "trace-fast-start");
+        var release = fixture.Sink.BlockNextPublish();
+        var startedAt = DateTime.UtcNow;
+
+        var response = await fixture.Ingress.HandleAsync(
+            BridgeManagedIngressKind.Activity,
+            Activity(
+                "activity-fast-ack",
+                terminalId: null,
+                elevated: null,
+                turnId: "turn-fast"),
+            "trace-fast-activity");
+
+        Assert.AreEqual(JsonValueKind.Object, response.ValueKind);
+        Assert.IsTrue(
+            DateTime.UtcNow - startedAt < TimeSpan.FromMilliseconds(500),
+            "Activity HTTP acknowledgement waited for the blocked event sink.");
+        await fixture.Sink.WaitUntilPublishBlockedAsync();
+        Assert.AreEqual(1, fixture.Sink.Events.Count);
+        release.TrySetResult();
+        await WaitUntilAsync(() => fixture.Sink.Events.Count == 2);
+    }
+
+    [TestMethod]
+    public async Task StopFlushesQueuedActivityBeforeCompletionEvent()
+    {
+        var fixture = await Fixture.CreateAsync();
+        await fixture.Ingress.HandleAsync(
+            BridgeManagedIngressKind.SessionStart,
+            SessionStart("activity-before-stop", terminalId: null, elevated: null),
+            "trace-order-start");
+        var release = fixture.Sink.BlockNextPublish();
+        await fixture.Ingress.HandleAsync(
+            BridgeManagedIngressKind.Activity,
+            Activity(
+                "activity-before-stop",
+                terminalId: null,
+                elevated: null,
+                turnId: "turn-order"),
+            "trace-order-activity");
+        await fixture.Sink.WaitUntilPublishBlockedAsync();
+
+        var stop = fixture.Ingress.HandleAsync(
+            BridgeManagedIngressKind.Stop,
+            Stop("activity-before-stop", "turn-order"),
+            "trace-order-stop");
+        await Task.Delay(100);
+        Assert.IsFalse(stop.IsCompleted);
+
+        release.TrySetResult();
+        await stop;
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                RuntimeEventTypes.SessionStarted,
+                RuntimeEventTypes.TurnStarted,
+                RuntimeEventTypes.TurnCompleted,
+            },
+            fixture.Sink.Events.Select(item => item.EventType).ToArray());
+    }
+
+    [TestMethod]
+    public async Task ActivityQueueRemainsBoundedAndKeepsLatestProgress()
+    {
+        var fixture = await Fixture.CreateAsync(activityQueueCapacity: 2);
+        await fixture.Ingress.HandleAsync(
+            BridgeManagedIngressKind.SessionStart,
+            SessionStart("activity-pressure", terminalId: null, elevated: null),
+            "trace-pressure-start");
+        var release = fixture.Sink.BlockNextPublish();
+        await fixture.Ingress.HandleAsync(
+            BridgeManagedIngressKind.Activity,
+            Activity(
+                "activity-pressure",
+                terminalId: null,
+                elevated: null,
+                turnId: "turn-0"),
+            "trace-pressure-0");
+        await fixture.Sink.WaitUntilPublishBlockedAsync();
+
+        for (var index = 1; index <= 20; index++)
+        {
+            await fixture.Ingress.HandleAsync(
+                BridgeManagedIngressKind.Activity,
+                Activity(
+                    "activity-pressure",
+                    terminalId: null,
+                    elevated: null,
+                    turnId: $"turn-{index}"),
+                $"trace-pressure-{index}");
+        }
+        release.TrySetResult();
+        await fixture.Ingress.HandleAsync(
+            BridgeManagedIngressKind.Stop,
+            Stop("activity-pressure", "turn-20"),
+            "trace-pressure-stop");
+
+        var activities = fixture.Sink.Events
+            .Where(item => item.EventType == RuntimeEventTypes.TurnStarted)
+            .ToArray();
+        Assert.IsTrue(
+            activities.Length <= 3,
+            $"Bounded queue published {activities.Length} activity events.");
+        Assert.IsTrue(activities.Any(item =>
+            item.Payload.GetProperty("turnId").GetString() == "turn-20"));
+    }
+
     private static JsonElement SessionStart(
         string sessionId,
         string? terminalId,
@@ -305,7 +420,8 @@ public sealed class ActiveManagedHookIngressTests
     private static JsonElement Activity(
         string sessionId,
         string? terminalId,
-        bool? elevated)
+        bool? elevated,
+        string? turnId = null)
     {
         var values = new Dictionary<string, object?>
         {
@@ -314,6 +430,11 @@ public sealed class ActiveManagedHookIngressTests
             ["cwd"] = Cwd,
             ["runtime"] = RuntimeNames.Codex,
         };
+        if (turnId is not null)
+        {
+            values["turn_id"] = turnId;
+            values["prompt"] = $"prompt-{turnId}";
+        }
         if (terminalId is not null)
         {
             values["managed_terminal_id"] = terminalId;
@@ -324,6 +445,18 @@ public sealed class ActiveManagedHookIngressTests
         }
         return JsonSerializer.SerializeToElement(values);
     }
+
+    private static JsonElement Stop(string sessionId, string turnId) =>
+        JsonSerializer.SerializeToElement(new
+        {
+            hook_event_name = "Stop",
+            session_id = sessionId,
+            turn_id = turnId,
+            cwd = Cwd,
+            model = "gpt-5",
+            last_assistant_message = "done",
+            runtime = RuntimeNames.Codex,
+        });
 
     private static JsonElement Permission(
         string sessionId,
@@ -367,7 +500,7 @@ public sealed class ActiveManagedHookIngressTests
         public RecordingRuntimeEventSink Sink { get; } = sink;
         public ConcurrentQueue<string> Operations { get; } = operations;
 
-        public static async Task<Fixture> CreateAsync()
+        public static async Task<Fixture> CreateAsync(int activityQueueCapacity = 4)
         {
             var options = new BridgeHostOptions(
                 Path.GetTempPath(),
@@ -383,7 +516,8 @@ public sealed class ActiveManagedHookIngressTests
             var sink = new RecordingRuntimeEventSink(operations);
             var bridge = new ManagedRuntimeHookBridge(
                 new ManagedRuntimeHookNormalizer(),
-                sink);
+                sink,
+                activityQueueCapacity: activityQueueCapacity);
             var ingress = new ActiveManagedHookIngress(
                 options,
                 directory,
@@ -413,13 +547,35 @@ public sealed class ActiveManagedHookIngressTests
     private sealed class RecordingRuntimeEventSink(
         ConcurrentQueue<string> operations) : IRuntimeEventSink
     {
+        private readonly object blockSync = new();
+        private TaskCompletionSource? blockedPublish;
+        private TaskCompletionSource? nextPublishRelease;
         public List<RuntimeEventEnvelope> Events { get; } = [];
         public TaskCompletionSource FirstPublished { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Exception? NextError { get; set; }
         public int PublishAttempts { get; private set; }
 
-        public Task PublishAsync(
+        public TaskCompletionSource BlockNextPublish()
+        {
+            lock (blockSync)
+            {
+                blockedPublish = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                nextPublishRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                return nextPublishRelease;
+            }
+        }
+
+        public Task WaitUntilPublishBlockedAsync()
+        {
+            lock (blockSync)
+            {
+                return (blockedPublish ?? throw new InvalidOperationException(
+                    "No publish was configured to block.")).Task;
+            }
+        }
+
+        public async Task PublishAsync(
             RuntimeEventEnvelope runtimeEvent,
             CancellationToken cancellationToken = default)
         {
@@ -428,12 +584,25 @@ public sealed class ActiveManagedHookIngressTests
             if (NextError is { } error)
             {
                 NextError = null;
-                return Task.FromException(error);
+                throw error;
+            }
+            Task? blocked = null;
+            lock (blockSync)
+            {
+                if (nextPublishRelease is not null)
+                {
+                    blocked = nextPublishRelease.Task;
+                    nextPublishRelease = null;
+                    blockedPublish!.TrySetResult();
+                }
+            }
+            if (blocked is not null)
+            {
+                await blocked.WaitAsync(cancellationToken);
             }
             Events.Add(runtimeEvent);
             operations.Enqueue($"publish:{runtimeEvent.EventType}");
             FirstPublished.TrySetResult();
-            return Task.CompletedTask;
         }
     }
 

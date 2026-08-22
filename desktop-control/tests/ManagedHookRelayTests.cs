@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Net;
 using System.Text.Json.Nodes;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -212,5 +214,130 @@ public sealed class ManagedHookRelayTests
 
         Assert.AreEqual(200, codex?.ProcessId);
         Assert.IsNull(unrelated);
+    }
+
+    [TestMethod]
+    public async Task BestEffortActivityReturnsBeforeItsHardDeadline()
+    {
+        using var client = Client(async (_, cancellationToken) =>
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return Response("{}");
+        });
+        var action = new ManagedHookRelay.HookAction(
+            "hooks/activity",
+            TimeSpan.FromSeconds(10),
+            CompactActivity: true,
+            BestEffort: true,
+            ExecutionBudget: TimeSpan.FromMilliseconds(150));
+        var stopwatch = Stopwatch.StartNew();
+
+        var response = await ManagedHookRelay.DispatchAsync(
+            client,
+            Authentication(),
+            PresencePayload(),
+            action);
+
+        stopwatch.Stop();
+        Assert.AreEqual(0, response.Count);
+        Assert.IsTrue(
+            stopwatch.Elapsed < TimeSpan.FromSeconds(1),
+            $"Best-effort Hook took {stopwatch.Elapsed}.");
+    }
+
+    [TestMethod]
+    public async Task SlowPresenceRunsBesideAndNeverSerializesActivity()
+    {
+        var requestedPaths = new List<string>();
+        using var client = Client(async (request, cancellationToken) =>
+        {
+            lock (requestedPaths)
+            {
+                requestedPaths.Add(request.RequestUri!.AbsolutePath);
+            }
+            if (request.RequestUri!.AbsolutePath == "/hooks/local-presence")
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            return Response("{\"accepted\":true}");
+        });
+        var action = new ManagedHookRelay.HookAction(
+            "hooks/activity",
+            TimeSpan.FromSeconds(1),
+            CompactActivity: true,
+            BestEffort: true,
+            ExecutionBudget: TimeSpan.FromSeconds(1));
+        var stopwatch = Stopwatch.StartNew();
+
+        var response = await ManagedHookRelay.DispatchAsync(
+            client,
+            Authentication(),
+            PresencePayload(),
+            action);
+
+        stopwatch.Stop();
+        Assert.IsTrue(response["accepted"]!.GetValue<bool>());
+        CollectionAssert.Contains(requestedPaths, "/hooks/local-presence");
+        CollectionAssert.Contains(requestedPaths, "/hooks/activity");
+        Assert.IsTrue(
+            stopwatch.Elapsed < TimeSpan.FromMilliseconds(750),
+            $"Presence serialized the Hook for {stopwatch.Elapsed}.");
+    }
+
+    [TestMethod]
+    public async Task OfflineBridgeIsIgnoredForBestEffortActivity()
+    {
+        using var client = Client((request, _) => request.RequestUri!.AbsolutePath ==
+            "/hooks/local-presence"
+                ? Task.FromResult(Response("{}"))
+                : Task.FromException<HttpResponseMessage>(
+                    new HttpRequestException("synthetic offline bridge")));
+        var action = new ManagedHookRelay.HookAction(
+            "hooks/activity",
+            TimeSpan.FromSeconds(1),
+            BestEffort: true,
+            ExecutionBudget: TimeSpan.FromSeconds(1));
+
+        var response = await ManagedHookRelay.DispatchAsync(
+            client,
+            Authentication(),
+            PresencePayload(),
+            action);
+
+        Assert.AreEqual(0, response.Count);
+    }
+
+    private static HttpClient Client(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) =>
+        new(new StubHttpMessageHandler(send))
+        {
+            BaseAddress = new Uri("http://127.0.0.1:8765/"),
+            Timeout = Timeout.InfiniteTimeSpan,
+        };
+
+    private static HttpResponseMessage Response(string json) => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent(json),
+    };
+
+    private static ManagedHookRelay.HookAuthentication Authentication() =>
+        new(ManagedHookRelay.ControlTokenHeader, new string('a', 64));
+
+    private static JsonObject PresencePayload() => new()
+    {
+        ["hook_event_name"] = "PostToolUse",
+        ["session_id"] = "session-timeout-test",
+        ["cwd"] = Path.GetTempPath(),
+        ["runtime"] = "codex",
+        ["client_process_id"] = 1234,
+    };
+
+    private sealed class StubHttpMessageHandler(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send)
+        : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) => send(request, cancellationToken);
     }
 }
