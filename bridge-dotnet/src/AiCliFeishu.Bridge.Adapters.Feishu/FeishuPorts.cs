@@ -65,6 +65,110 @@ public interface IFeishuGateway
         CancellationToken cancellationToken = default);
 }
 
+public enum FeishuMessagePriority
+{
+    Low,
+    Normal,
+    High,
+}
+
+public interface IFeishuPriorityGateway
+{
+    Task<string> SendTextAsync(
+        string chatId,
+        string text,
+        FeishuMessagePriority priority,
+        CancellationToken cancellationToken = default);
+
+    Task<string> ReplyTextAsync(
+        string messageId,
+        string text,
+        FeishuMessagePriority priority,
+        CancellationToken cancellationToken = default);
+
+    Task<string> SendCardAsync(
+        string chatId,
+        FeishuCardView card,
+        string? idempotencyKey,
+        FeishuMessagePriority priority,
+        CancellationToken cancellationToken = default);
+
+    Task PatchCardAsync(
+        string messageId,
+        FeishuCardView card,
+        FeishuMessagePriority priority,
+        CancellationToken cancellationToken = default);
+
+    Task<string> SendLocalFileAsync(
+        string chatId,
+        string filePath,
+        FeishuMessagePriority priority,
+        CancellationToken cancellationToken = default);
+}
+
+public static class FeishuGatewayPriorityExtensions
+{
+    public static Task<string> SendTextAsync(
+        this IFeishuGateway gateway,
+        string chatId,
+        string text,
+        FeishuMessagePriority priority,
+        CancellationToken cancellationToken = default) =>
+        gateway is IFeishuPriorityGateway prioritized
+            ? prioritized.SendTextAsync(chatId, text, priority, cancellationToken)
+            : gateway.SendTextAsync(chatId, text, cancellationToken);
+
+    public static Task<string> ReplyTextAsync(
+        this IFeishuGateway gateway,
+        string messageId,
+        string text,
+        FeishuMessagePriority priority,
+        CancellationToken cancellationToken = default) =>
+        gateway is IFeishuPriorityGateway prioritized
+            ? prioritized.ReplyTextAsync(messageId, text, priority, cancellationToken)
+            : gateway.ReplyTextAsync(messageId, text, cancellationToken);
+
+    public static Task<string> SendCardAsync(
+        this IFeishuGateway gateway,
+        string chatId,
+        FeishuCardView card,
+        string? idempotencyKey,
+        FeishuMessagePriority priority,
+        CancellationToken cancellationToken = default) =>
+        gateway is IFeishuPriorityGateway prioritized
+            ? prioritized.SendCardAsync(
+                chatId,
+                card,
+                idempotencyKey,
+                priority,
+                cancellationToken)
+            : gateway.SendCardAsync(
+                chatId,
+                card,
+                idempotencyKey,
+                cancellationToken);
+
+    public static Task PatchCardAsync(
+        this IFeishuGateway gateway,
+        string messageId,
+        FeishuCardView card,
+        FeishuMessagePriority priority,
+        CancellationToken cancellationToken = default) =>
+        gateway is IFeishuPriorityGateway prioritized
+            ? prioritized.PatchCardAsync(messageId, card, priority, cancellationToken)
+            : gateway.PatchCardAsync(messageId, card, cancellationToken);
+
+    public static Task<string> SendLocalFileAsync(
+        this IFeishuGateway gateway,
+        string chatId,
+        string filePath,
+        FeishuMessagePriority priority,
+        CancellationToken cancellationToken = default) =>
+        gateway is IFeishuPriorityGateway prioritized
+            ? prioritized.SendLocalFileAsync(chatId, filePath, priority, cancellationToken)
+            : gateway.SendLocalFileAsync(chatId, filePath, cancellationToken);
+}
+
 public interface IFeishuCardRenderer
 {
     FeishuCardView CommandMenu();

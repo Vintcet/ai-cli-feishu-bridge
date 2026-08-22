@@ -178,6 +178,9 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             new { turnId = "turn-session-group", message = "done" }));
 
         Assert.AreEqual("chat-session-group", fixture.Gateway.Sends.Single().ChatId);
+        Assert.AreEqual(
+            FeishuMessagePriority.High,
+            fixture.Gateway.PriorityAttempts.Single().Priority);
         CollectionAssert.AreEqual(
             new[] { SessionId },
             sessionGroups.NotificationRequests.ToArray());
@@ -294,6 +297,9 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
             "lastNotificationStatus"));
         Assert.AreEqual("error", fixture.Store.Current.Routes.Messages
             .Values.Single().Kind);
+        Assert.AreEqual(
+            FeishuMessagePriority.Low,
+            fixture.Gateway.PriorityAttempts.Single().Priority);
         Assert.IsTrue(fixture.Coordinator.HasActiveRetry(SessionId));
 
         var command = await fixture.RuntimeCommands.Dispatched.Task.WaitAsync(
@@ -1775,7 +1781,7 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         }
     }
 
-    private sealed class RecordingFeishuGateway : IFeishuGateway
+    private sealed class RecordingFeishuGateway : IFeishuGateway, IFeishuPriorityGateway
     {
         private readonly object sync = new();
         private readonly Dictionary<string, string> messageIdsByKey =
@@ -1783,6 +1789,7 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         private readonly List<SendAttempt> attempts = [];
         private readonly List<SentCard> sends = [];
         private readonly List<(string MessageId, FeishuCardView Card)> patches = [];
+        private readonly List<PriorityAttempt> priorityAttempts = [];
 
         public ConcurrentQueue<string>? Actions { get; set; }
         public Action? BeforeSend { get; set; }
@@ -1819,6 +1826,83 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
                     return patches.ToArray();
                 }
             }
+        }
+
+        public IReadOnlyList<PriorityAttempt> PriorityAttempts
+        {
+            get
+            {
+                lock (sync)
+                {
+                    return priorityAttempts.ToArray();
+                }
+            }
+        }
+
+        public Task<string> SendTextAsync(
+            string chatId,
+            string text,
+            FeishuMessagePriority priority,
+            CancellationToken cancellationToken = default)
+        {
+            lock (sync)
+            {
+                priorityAttempts.Add(new("text", priority));
+            }
+            return SendTextAsync(chatId, text, cancellationToken);
+        }
+
+        public Task<string> ReplyTextAsync(
+            string messageId,
+            string text,
+            FeishuMessagePriority priority,
+            CancellationToken cancellationToken = default)
+        {
+            lock (sync)
+            {
+                priorityAttempts.Add(new("reply", priority));
+            }
+            return ReplyTextAsync(messageId, text, cancellationToken);
+        }
+
+        public Task<string> SendCardAsync(
+            string chatId,
+            FeishuCardView card,
+            string? idempotencyKey,
+            FeishuMessagePriority priority,
+            CancellationToken cancellationToken = default)
+        {
+            lock (sync)
+            {
+                priorityAttempts.Add(new("card", priority));
+            }
+            return SendCardAsync(chatId, card, idempotencyKey, cancellationToken);
+        }
+
+        public Task PatchCardAsync(
+            string messageId,
+            FeishuCardView card,
+            FeishuMessagePriority priority,
+            CancellationToken cancellationToken = default)
+        {
+            lock (sync)
+            {
+                priorityAttempts.Add(new("patch", priority));
+            }
+            return PatchCardAsync(messageId, card, cancellationToken);
+        }
+
+        public Task<string> SendLocalFileAsync(
+            string chatId,
+            string filePath,
+            FeishuMessagePriority priority,
+            CancellationToken cancellationToken = default)
+        {
+            lock (sync)
+            {
+                priorityAttempts.Add(new("file", priority));
+            }
+            return SendLocalFileAsync(chatId, filePath, cancellationToken);
         }
 
         public Task<string> SendCardAsync(
@@ -1917,4 +2001,8 @@ public sealed class ActiveRuntimeRetryCoordinatorTests
         string ChatId,
         string IdempotencyKey,
         FeishuCardView Card);
+
+    private sealed record PriorityAttempt(
+        string Kind,
+        FeishuMessagePriority Priority);
 }

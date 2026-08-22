@@ -279,7 +279,11 @@ public sealed class FeishuInteractionCoordinator(
             }
             try
             {
-                await gateway.PatchCardAsync(messageId, card, cancellationToken);
+                await gateway.PatchCardAsync(
+                    messageId,
+                    card,
+                    FeishuMessagePriority.High,
+                    cancellationToken);
             }
             catch
             {

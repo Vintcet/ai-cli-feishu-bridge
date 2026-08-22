@@ -72,6 +72,7 @@ internal sealed partial class ActiveFeishuApprovalNotificationCoordinator
                 chatId,
                 card,
                 NotificationKey(requestId, chatId),
+                FeishuMessagePriority.High,
                 cancellationToken);
             if (string.IsNullOrWhiteSpace(messageId))
             {
@@ -144,6 +145,7 @@ internal sealed partial class ActiveFeishuApprovalNotificationCoordinator
                         chatId,
                         card,
                         $"{NotificationKey(requestId, chatId)}-auto",
+                        FeishuMessagePriority.High,
                         cancellationToken);
                 }
             }

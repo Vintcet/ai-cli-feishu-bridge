@@ -109,6 +109,7 @@ internal sealed partial class ActiveRuntimeRetryCoordinator
                         chatId,
                         cards[index],
                         NotificationKey(notification, chatId, index),
+                        BridgeRuntimeNotificationPriority.ForKind(notification.Kind),
                         cancellationToken);
                     if (!string.IsNullOrWhiteSpace(messageId))
                     {

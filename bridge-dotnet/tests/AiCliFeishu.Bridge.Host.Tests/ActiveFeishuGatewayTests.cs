@@ -99,6 +99,42 @@ public sealed class ActiveFeishuGatewayTests
     }
 
     [TestMethod]
+    public async Task HighPriorityMessageJumpsAheadOfQueuedLowPriorityMessages()
+    {
+        var inner = new RecordingGateway { BlockFirstCard = true };
+        using var gateway = new ActiveFeishuGateway(
+            ActiveOptions(),
+            new RecordingCredentialSource(),
+            _ => inner);
+        var card = new FeishuCardView(new JsonObject { ["type"] = "card" });
+
+        var first = gateway.SendCardAsync(
+            "chat",
+            card,
+            "first",
+            FeishuMessagePriority.Low);
+        await inner.FirstCardStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var second = gateway.SendCardAsync(
+            "chat",
+            card,
+            "second",
+            FeishuMessagePriority.Low);
+        var urgent = gateway.SendCardAsync(
+            "chat",
+            card,
+            "urgent",
+            FeishuMessagePriority.High);
+
+        inner.ReleaseFirstCard.TrySetResult();
+        await Task.WhenAll(first, second, urgent);
+
+        CollectionAssert.AreEqual(
+            new[] { "first", "urgent", "second" },
+            inner.CardOrder.ToArray());
+    }
+
+    [TestMethod]
     public void CancelledOperationDoesNotLoadCredentialsOrGateway()
     {
         var credentials = new RecordingCredentialSource();
@@ -224,6 +260,13 @@ public sealed class ActiveFeishuGatewayTests
     private sealed class RecordingGateway : IFeishuGateway
     {
         public List<GatewayCall> Calls { get; } = [];
+        public List<string> CardOrder { get; } = [];
+        public TaskCompletionSource FirstCardStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseFirstCard { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool BlockFirstCard { get; set; }
+        private int cardCalls;
 
         public Task<string> SendTextAsync(
             string chatId,
@@ -243,14 +286,24 @@ public sealed class ActiveFeishuGatewayTests
             return Task.FromResult("replied-text");
         }
 
-        public Task<string> SendCardAsync(
+        public async Task<string> SendCardAsync(
             string chatId,
             FeishuCardView card,
             string? idempotencyKey = null,
             CancellationToken cancellationToken = default)
         {
             Record("send-card", cancellationToken, chatId, card, idempotencyKey);
-            return Task.FromResult("sent-card");
+            var cardCall = Interlocked.Increment(ref cardCalls);
+            if (BlockFirstCard && cardCall == 1)
+            {
+                FirstCardStarted.TrySetResult();
+                await ReleaseFirstCard.Task.WaitAsync(cancellationToken);
+            }
+            lock (CardOrder)
+            {
+                CardOrder.Add(idempotencyKey ?? string.Empty);
+            }
+            return "sent-card";
         }
 
         public Task PatchCardAsync(

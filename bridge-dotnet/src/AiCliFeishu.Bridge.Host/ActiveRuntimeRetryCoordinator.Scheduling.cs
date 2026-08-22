@@ -253,6 +253,7 @@ internal sealed partial class ActiveRuntimeRetryCoordinator
                     await gateway.PatchCardAsync(
                         target.MessageId,
                         cards[target.CardIndex % cards.Count],
+                        FeishuMessagePriority.Low,
                         cancellationToken);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

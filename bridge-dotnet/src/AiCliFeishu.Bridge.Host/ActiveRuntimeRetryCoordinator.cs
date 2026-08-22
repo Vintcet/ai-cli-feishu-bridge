@@ -21,6 +21,16 @@ internal static class BridgeRuntimeNotificationKinds
     public const string Error = "error";
 }
 
+internal static class BridgeRuntimeNotificationPriority
+{
+    public static FeishuMessagePriority ForKind(string kind) => kind switch
+    {
+        BridgeRuntimeNotificationKinds.Stop => FeishuMessagePriority.High,
+        BridgeRuntimeNotificationKinds.Error => FeishuMessagePriority.Low,
+        _ => FeishuMessagePriority.Normal,
+    };
+}
+
 internal sealed record BridgeRetryStopResult(
     string Kind,
     bool RetryAlreadyStarted,
